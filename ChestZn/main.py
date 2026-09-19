@@ -11,6 +11,10 @@ from operator_window import OperatorWindow
 from admin_window import AdminWindow
 from styles import APP_QSS
 from login_window import LoginWindow
+from security_question_window import SecurityQuestionWindow
+
+
+ADMIN_LOGIN = "admin"
 
 
 class MainWindow(QMainWindow):
@@ -129,23 +133,62 @@ class MainWindow(QMainWindow):
         # Даём оверлею отрисоваться
         QApplication.processEvents()
 
-        # Показываем окно входа
+        # ---------- Шаг 1: окно входа ----------
         login = LoginWindow(self.store, self)
         result = login.exec()
 
         # Убираем размытие
         self._set_blur(False)
 
-        if result == LoginWindow.Accepted and login.user:
-            self.admin_authenticated = True
-            self.admin.switch("dashboard")
-            print(f"[ChestZn] Админ авторизован: {login.user['fio']}")
-        else:
+        if result != LoginWindow.Accepted or not login.user:
             # Отмена — возвращаем Оператора
-            self.tabs.blockSignals(True)
-            self.tabs.setCurrentIndex(0)
-            self.tabs.blockSignals(False)
-            print("[ChestZn] Вход в админку отменён")
+            self._return_to_operator("Вход в админку отменён")
+            return
+
+        # Проверяем, что вошёл действительно админ
+        if login.user.get("role") != "Администратор":
+            self._return_to_operator("Нет прав администратора")
+            return
+
+        # ---------- Шаг 2: секретный вопрос ----------
+        if not self.store.has_security_question(login.user["login"]):
+            # Вопрос не настроен — принудительно настраиваем
+            print("[ChestZn] Секретный вопрос не настроен — принудительная настройка")
+
+            QApplication.processEvents()
+            self._set_blur(True)
+            QApplication.processEvents()
+
+            question_window = SecurityQuestionWindow(
+                self.store, login.user["login"], self
+            )
+            q_result = question_window.exec()
+
+            self._set_blur(False)
+
+            if q_result != SecurityQuestionWindow.Accepted:
+                # Не настроил — не пускаем в админку
+                self._return_to_operator("Настройка восстановления отменена")
+                return
+
+            # Проверяем ещё раз на всякий случай
+            if not self.store.has_security_question(login.user["login"]):
+                self._return_to_operator("Настройка восстановления не завершена")
+                return
+
+        # ---------- Шаг 3: пускаем в админку ----------
+        self.admin_authenticated = True
+        self.admin.switch("dashboard")
+        print(f"[ChestZn] Админ авторизован: {login.user['fio']}")
+
+    # ------------------------------------------------------------------
+    def _return_to_operator(self, message: str = ""):
+        """Вернуться на вкладку Оператор."""
+        self.tabs.blockSignals(True)
+        self.tabs.setCurrentIndex(0)
+        self.tabs.blockSignals(False)
+        if message:
+            print(f"[ChestZn] {message}")
 
     # ------------------------------------------------------------------
     def _set_blur(self, enabled: bool):

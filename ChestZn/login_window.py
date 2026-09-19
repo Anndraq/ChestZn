@@ -76,13 +76,13 @@ class LoginWindow(QDialog):
         self.btn_cancel = QPushButton("Отмена")
         self.btn_cancel.setObjectName("cancelButton")
         self.btn_cancel.setMinimumHeight(38)
-        self.btn_cancel.setAutoDefault(False)       # ← чтобы Enter не срабатывал на «Отмена»
+        self.btn_cancel.setAutoDefault(False)
         self.btn_cancel.clicked.connect(self.reject)
 
         self.btn_login = QPushButton("Войти")
         self.btn_login.setObjectName("loginButton")
         self.btn_login.setMinimumHeight(38)
-        self.btn_login.setDefault(True)             # ← Enter = «Войти»
+        self.btn_login.setDefault(True)
         self.btn_login.setAutoDefault(True)
         self.btn_login.clicked.connect(self.try_login)
 
@@ -90,6 +90,15 @@ class LoginWindow(QDialog):
         buttons.addWidget(self.btn_login, stretch=2)
 
         root.addLayout(buttons)
+
+        # ---------- Ссылка «Забыли пароль?» ----------
+        self.btn_recovery = QPushButton("Забыли пароль?")
+        self.btn_recovery.setObjectName("recoveryLink")
+        self.btn_recovery.setFlat(True)
+        self.btn_recovery.setCursor(Qt.PointingHandCursor)
+        self.btn_recovery.clicked.connect(self.open_recovery)
+        root.addWidget(self.btn_recovery)
+
         root.addStretch(1)
 
         # ---------- Горячие клавиши ----------
@@ -146,6 +155,17 @@ class LoginWindow(QDialog):
                 background-color: #1c2530;
                 color: #e6edf3;
             }
+            QPushButton#recoveryLink {
+                background: transparent;
+                border: none;
+                color: #3b82f6;
+                font-size: 12px;
+                text-decoration: underline;
+                padding: 6px;
+            }
+            QPushButton#recoveryLink:hover {
+                color: #60a5fa;
+            }
         """)
 
     # ------------------------------------------------------------------
@@ -180,3 +200,17 @@ class LoginWindow(QDialog):
         self.store.log("Вход в админку",
                        operator=user.get("fio"), result="успех")
         self.accept()
+
+    def open_recovery(self):
+        """Открыть окно восстановления пароля."""
+        from recovery_window import RecoveryWindow
+
+        rec = RecoveryWindow(self.store, ADMIN_LOGIN, self)
+        result = rec.exec()
+
+        if result == RecoveryWindow.Accepted and rec.new_password_set:
+            # Пароль изменён — показываем подсказку
+            self.error_label.setStyleSheet("color: #22c55e; font-size: 12px;")
+            self.error_label.setText("Пароль изменён. Войдите с новым паролем.")
+            self.password_input.clear()
+            self.password_input.setFocus()

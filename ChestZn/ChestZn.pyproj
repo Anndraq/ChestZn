@@ -25,15 +25,18 @@
     <Compile Include="admin_window.py" />
     <Compile Include="auth.py" />
     <Compile Include="barcode.py" />
+    <Compile Include="change_password_window.py" />
     <Compile Include="db.py" />
     <Compile Include="db_view.py" />
     <Compile Include="login_window.py" />
     <Compile Include="main.py" />
     <Compile Include="operator_window.py" />
+    <Compile Include="recovery_window.py" />
     <Compile Include="store.py" />
     <Compile Include="styles.py" />
     <Compile Include="toast.py" />
     <Compile Include="printer.py" />
+    <Compile Include="security_question_window.py" />
   </ItemGroup>
   <ItemGroup>
     <Content Include="build.bat" />

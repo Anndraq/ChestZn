@@ -13,6 +13,8 @@ from PySide6.QtGui import QColor, QBrush
 from store import Store
 from barcode import render_datamatrix
 from toast import Toast
+from change_password_window import ChangePasswordWindow
+from security_question_window import SecurityQuestionWindow
 from printer import (list_printers, detect_language, load_config,
                      save_config, print_code, default_printer)
 
@@ -82,7 +84,8 @@ class AdminWindow(QWidget):
         self.nav_printer      = nav("🖨  Принтер", "printer")
 
         section("КОНТРОЛЬ")
-        self.nav_journal = nav("📜  Журнал", "journal")
+        self.nav_journal  = nav("📜  Журнал", "journal")
+        self.nav_security = nav("🔒  Безопасность", "security")
 
         sb.addStretch(1)
 
@@ -97,6 +100,7 @@ class AdminWindow(QWidget):
         self.stack.addWidget(self._page_pool())
         self.stack.addWidget(self._page_printer())
         self.stack.addWidget(self._page_journal())
+        self.stack.addWidget(self._page_security())
 
         root.addWidget(sidebar)
         root.addWidget(self.stack, stretch=1)
@@ -108,13 +112,14 @@ class AdminWindow(QWidget):
         pages = {
             "dashboard": 0, "queue": 1, "points": 2, "users": 3,
             "integrations": 4, "templates": 5, "pool": 6,
-            "printer": 7, "journal": 8,
+            "printer": 7, "journal": 8, "security": 9,
         }
         idx = pages.get(page_id, 0)
         self.stack.setCurrentIndex(idx)
         for btn in [self.nav_dashboard, self.nav_queue, self.nav_points,
                     self.nav_users, self.nav_integrations, self.nav_templates,
-                    self.nav_pool, self.nav_printer, self.nav_journal]:
+                    self.nav_pool, self.nav_printer, self.nav_journal,
+                    self.nav_security]:
             btn.setChecked(btn.property("page_id") == page_id)
         self.refresh(page_id)
 
@@ -128,6 +133,7 @@ class AdminWindow(QWidget):
         if page_id == "pool":         self._refresh_pool()
         if page_id == "printer":      self._refresh_printer()
         if page_id == "journal":      self._refresh_journal()
+        if page_id == "security":     self._refresh_security()
 
     # ==================================================================
     # DASHBOARD
@@ -678,3 +684,105 @@ class AdminWindow(QWidget):
             result = r.get("result", "—")
             color = {"успех": "#22c55e", "не найден": "#ef4444"}.get(result, "#f59e0b")
             t.setItem(i, 6, cell(result, color))
+
+    # ==================================================================
+    # SECURITY (Безопасность)
+    # ==================================================================
+    def _page_security(self) -> QWidget:
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(24, 20, 24, 20)
+        v.setSpacing(14)
+
+        tt = QLabel("Безопасность")
+        tt.setStyleSheet("font-size:18px; font-weight:600;")
+        v.addWidget(tt)
+
+        sub = QLabel("Управление паролем и восстановлением доступа")
+        sub.setStyleSheet("color:#8b97a6; font-size:12px;")
+        v.addWidget(sub)
+
+        # ---------- Смена пароля ----------
+        card1 = QFrame(); card1.setObjectName("card")
+        cv1 = QVBoxLayout(card1)
+        cv1.setContentsMargins(18, 14, 18, 14)
+        cv1.setSpacing(10)
+
+        title1 = QLabel("Пароль администратора")
+        title1.setStyleSheet("color:#e6edf3; font-size:14px; font-weight:600;")
+        cv1.addWidget(title1)
+
+        desc1 = QLabel("Смените текущий пароль на новый. "
+                       "Понадобится ввод текущего пароля.")
+        desc1.setStyleSheet("color:#8b97a6; font-size:12px;")
+        desc1.setWordWrap(True)
+        cv1.addWidget(desc1)
+
+        btn_change_pwd = QPushButton("🔑 Сменить пароль администратора")
+        btn_change_pwd.setProperty("primary", True)
+        btn_change_pwd.setMinimumHeight(38)
+        btn_change_pwd.clicked.connect(self._on_change_password)
+        cv1.addWidget(btn_change_pwd)
+
+        v.addWidget(card1)
+
+        # ---------- Секретный вопрос ----------
+        card2 = QFrame(); card2.setObjectName("card")
+        cv2 = QVBoxLayout(card2)
+        cv2.setContentsMargins(18, 14, 18, 14)
+        cv2.setSpacing(10)
+
+        title2 = QLabel("Секретный вопрос (восстановление доступа)")
+        title2.setStyleSheet("color:#e6edf3; font-size:14px; font-weight:600;")
+        cv2.addWidget(title2)
+
+        # Текущее состояние
+        self.security_status = QLabel("")
+        self.security_status.setWordWrap(True)
+        self.security_status.setStyleSheet("font-size:12px;")
+        cv2.addWidget(self.security_status)
+
+        self.btn_security = QPushButton("Изменить секретный вопрос")
+        self.btn_security.setMinimumHeight(38)
+        self.btn_security.clicked.connect(self._on_change_security)
+        cv2.addWidget(self.btn_security)
+
+        v.addWidget(card2)
+
+        v.addStretch(1)
+        return w
+
+    def _refresh_security(self):
+        """Обновить статус секретного вопроса."""
+        login = "admin"
+        has_q = self.store.has_security_question(login)
+
+        if has_q:
+            q = self.store.get_security_question(login)
+            self.security_status.setText(
+                f"✅ Вопрос настроен: <b>{q}</b>"
+            )
+            self.security_status.setStyleSheet("color:#22c55e; font-size:12px;")
+            self.btn_security.setText("🔒 Изменить секретный вопрос")
+        else:
+            self.security_status.setText(
+                "⚠ Вопрос <b>не настроен</b>. "
+                "Восстановление пароля будет недоступно."
+            )
+            self.security_status.setStyleSheet("color:#f59e0b; font-size:12px;")
+            self.btn_security.setText("🔒 Настроить секретный вопрос")
+
+    def _on_change_password(self):
+        """Открыть окно смены пароля."""
+        win = ChangePasswordWindow(self.store, "admin", self)
+        result = win.exec()
+        if result == ChangePasswordWindow.Accepted and win.changed:
+            self.toast.show_message("Пароль изменён", "ok")
+
+    def _on_change_security(self):
+        """Открыть окно настройки / изменения секретного вопроса."""
+        win = SecurityQuestionWindow(self.store, "admin", self)
+        result = win.exec()
+        if result == SecurityQuestionWindow.Accepted:
+            self.toast.show_message("Секретный вопрос обновлён", "ok")
+            self._refresh_security()

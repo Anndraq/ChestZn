@@ -188,11 +188,61 @@ class Store:
         return None
 
     def set_password(self, login: str, new_password: str):
+        """Сменить пароль пользователя."""
         for u in self.users:
             if u["login"] == login:
                 u["password_hash"] = hash_password(new_password)
                 break
         self._save_users(self.users)
+
+    # ==================================================================
+    # СЕКРЕТНЫЙ ВОПРОС (восстановление доступа)
+    # ==================================================================
+    def set_security_question(self, login: str, question: str, answer: str):
+        """
+        Сохранить секретный вопрос и ответ (хэш).
+        Используется при первом входе админа.
+        Регистр учитывается, пробелы по краям убираются.
+        """
+        answer = answer.strip()
+        for u in self.users:
+            if u["login"] == login:
+                u["security_question"] = question
+                u["security_answer_hash"] = hash_password(answer)
+                break
+        self._save_users(self.users)
+
+    def has_security_question(self, login: str) -> bool:
+        """Проверить, настроен ли секретный вопрос у пользователя."""
+        for u in self.users:
+            if u["login"] == login:
+                return bool(u.get("security_question") and u.get("security_answer_hash"))
+        return False
+
+    def get_security_question(self, login: str) -> str:
+        """Получить текст секретного вопроса."""
+        for u in self.users:
+            if u["login"] == login:
+                return u.get("security_question", "")
+        return ""
+
+    def check_security_answer(self, login: str, answer: str) -> bool:
+        """
+        Проверить ответ на секретный вопрос.
+        Регистр учитывается, пробелы по краям убираются.
+        """
+        for u in self.users:
+            if u["login"] == login:
+                stored = u.get("security_answer_hash")
+                if not stored:
+                    return False
+                answer = answer.strip()
+                return verify_password(answer, stored)
+        return False
+
+    def reset_password(self, login: str, new_password: str):
+        """Сбросить пароль (используется после верного ответа)."""
+        self.set_password(login, new_password)
 
     # ==================================================================
     # ПУЛ КОДОВ ЧЗ
@@ -221,11 +271,7 @@ class Store:
                     )
 
     def take_code(self, gtin, point=None):
-        """
-        Взять свободный код из пула для указанного GTIN.
-        Помечает used=1, опционально записывает point.
-        Возвращает dict {gtin, code, sn} или None.
-        """
+        """Взять свободный код из пула. Помечает used=1."""
         with db.get_conn() as conn:
             row = conn.execute(
                 "SELECT id, gtin, code, sn FROM pool_codes "
@@ -234,7 +280,6 @@ class Store:
             ).fetchone()
 
             if row is None:
-                # Досыпаем
                 for i in range(10):
                     sn = "SN" + ''.join(random.choices(string.digits, k=7))
                     verify = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
@@ -348,10 +393,7 @@ class Store:
             }
 
     def increment_counter(self, key, delta=1):
-        """
-        Увеличить счётчик. key ∈ {scans, prints, errors}.
-        Возвращает новое значение.
-        """
+        """Увеличить счётчик. key ∈ {scans, prints, errors}."""
         col = {
             "scans":  "scans",
             "prints": "prints",
