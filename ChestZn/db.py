@@ -72,6 +72,27 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
+
+CREATE TABLE IF NOT EXISTS users (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    login         TEXT NOT NULL UNIQUE,
+    fio           TEXT NOT NULL,
+    role          TEXT NOT NULL,
+    point         TEXT,
+    password_hash TEXT NOT NULL,
+    password_salt TEXT NOT NULL,
+    active        INTEGER NOT NULL DEFAULT 1,
+    last_login    TEXT,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS security_questions (
+    login          TEXT PRIMARY KEY,
+    question       TEXT NOT NULL,
+    answer_hash    TEXT NOT NULL,
+    answer_salt    TEXT NOT NULL,
+    updated_at     TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
 """
 
 

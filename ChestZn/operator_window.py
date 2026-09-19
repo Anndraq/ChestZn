@@ -7,6 +7,9 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QShortcut, QKeySequence
 
+from logger import get_logger
+log = get_logger("operator")
+
 from store import Store, parse_foreign_barcode
 from barcode import render_datamatrix
 from toast import Toast
@@ -33,6 +36,8 @@ class OperatorWindow(QWidget):
         self.store = store
         self.last_cz_code = None
         self.fields = {}
+
+        log.info("Инициализация OperatorWindow")
 
         self.toast = Toast(self)
 
@@ -79,6 +84,8 @@ class OperatorWindow(QWidget):
 
         self.reset()
         self._refresh_counter()
+
+        log.info("OperatorWindow готов")
 
     # ------------------------------------------------------------------
     def _build_scanbar(self) -> QFrame:
@@ -359,12 +366,14 @@ class OperatorWindow(QWidget):
         cfg = load_config()
 
         if not cfg.get("printer_name") and not cfg.get("printer_ip"):
+            log.warning("Автопечать отменена: принтер не настроен")
             self.toast.show_message(
                 "Принтер не настроен — открой Админ → Принтер", "warn"
             )
             return
 
-        print(f"[ChestZn] _auto_print: отправка на {cfg.get('printer_name')} ({cfg.get('printer_lang')})")
+        log.info("Автопечать: отправка на %s (%s)",
+                 cfg.get("printer_name"), cfg.get("printer_lang"))
         result = print_code(code, cfg)
 
         if result["ok"]:
@@ -374,24 +383,27 @@ class OperatorWindow(QWidget):
             self.store.log("Автопечать", point="T-01", operator="Иванов И.И.",
                            result="успех")
             self.toast.show_message(f"Напечатано: {result['info']}", "ok")
-            print(f"[ChestZn] _auto_print ok: {result['info']}")
+            log.info("Автопечать успешна: %s", result["info"])
         else:
             self.store.increment_counter("errors")
             self._refresh_counter()
             self.toast.show_message(f"Ошибка печати: {result['info']}", "err")
-            print(f"[ChestZn] _auto_print err: {result['info']}")
+            log.error("Автопечать не удалась: %s", result["info"])
 
     # ------------------------------------------------------------------
     # Основные действия
     # ------------------------------------------------------------------
     def do_scan(self, mode: str = "auto"):
-        print(f"[ChestZn] do_scan вызван, mode={mode}")
+        log.debug("do_scan вызван, mode=%s", mode)
         raw = self.scan_input.text()
         foreign = parse_foreign_barcode(raw)
         self.store.increment_counter("scans")
+        log.info("Скан: GTIN=%s SN=%s mode=%s",
+                 foreign["gtin"], foreign["serial"], mode)
 
         # offline-режим
         if mode == "offline" or self.store.integrations["gis_mt"]["status"] != "ok":
+            log.warning("Офлайн-режим: код в очередь")
             cz = self.store.take_code(foreign["gtin"], point="T-01")
             self.store.add_queue_entry(
                 gtin=foreign["gtin"],
@@ -409,6 +421,8 @@ class OperatorWindow(QWidget):
             return
 
         if mode == "err":
+            log.warning("Скан не найден: GTIN=%s SN=%s",
+                        foreign["gtin"], foreign["serial"])
             self.store.increment_counter("errors")
             self.store.log("Скан", point="T-01", operator="Иванов И.И.",
                            gtin=foreign["gtin"], sn=foreign["serial"], result="не найден")
@@ -422,11 +436,13 @@ class OperatorWindow(QWidget):
         gtin_cz = self.store.gtin_map.get(foreign["gtin"], foreign["gtin"])
         cz = self.store.take_code(gtin_cz, point="T-01")
         if not cz:
+            log.error("Пул кодов пуст для GTIN=%s", gtin_cz)
             self.store.increment_counter("errors")
             self.toast.show_message("Пул кодов пуст", "err")
             self._refresh_counter()
             return
 
+        log.info("Честный знак получен: %s", cz["code"][:40] + "...")
         self.store.log("Скан", point="T-01", operator="Иванов И.И.",
                        gtin=foreign["gtin"], sn=foreign["serial"], result="успех")
         self._render_ok(foreign, cz["code"], state="ok")
@@ -500,7 +516,10 @@ class OperatorWindow(QWidget):
     def do_print(self):
         """Повторная печать последнего кода."""
         if not self.last_cz_code:
+            log.warning("Повтор печати: нет последнего кода")
             return
+
+        log.info("Повторная печать: %s", self.last_cz_code[:40] + "...")
 
         from printer import print_code, load_config
         cfg = load_config()
@@ -513,8 +532,12 @@ class OperatorWindow(QWidget):
                            result="успех")
             self._refresh_counter()
             self.toast.show_message(f"Напечатано: {result['info']}", "ok")
+            log.info("Повторная печать успешна: %s", result["info"])
         else:
+            self.store.increment_counter("errors")
+            self._refresh_counter()
             self.toast.show_message(f"Ошибка печати: {result['info']}", "err")
+            log.error("Повторная печать не удалась: %s", result["info"])
 
     def reset(self):
         self.last_cz_code = None

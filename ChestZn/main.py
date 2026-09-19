@@ -6,6 +6,10 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt
 
+from logger import setup_logging, get_logger
+setup_logging(debug=True)
+log = get_logger("app")
+
 from store import Store
 from operator_window import OperatorWindow
 from admin_window import AdminWindow
@@ -23,7 +27,10 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("ChestZn · Маркировка")
         self.resize(1360, 900)
 
+        log.info("Инициализация MainWindow")
+
         self.store = Store()
+        log.info("Store инициализирован")
 
         # ---------- Автоопределение принтера ----------
         from printer import autodetect, load_config, save_config
@@ -35,11 +42,33 @@ class MainWindow(QMainWindow):
                 cfg["printer_name"] = s["name"]
                 cfg["printer_lang"] = s["lang"]
                 save_config(cfg)
-                print(f"[ChestZn] Принтер определён: {s['name']} ({s['lang']})")
+                log.info("Принтер определён: %s (%s)", s["name"], s["lang"])
             else:
-                print("[ChestZn] Принтеры не найдены — настройте вручную в админке")
+                log.warning("Принтеры не найдены — настройте вручную в админке")
         else:
-            print(f"[ChestZn] Принтер из настроек: {cfg['printer_name']} ({cfg['printer_lang']})")
+            log.info("Принтер из настроек: %s (%s)",
+                     cfg["printer_name"], cfg["printer_lang"])
+
+            # ---------- Автобэкап БД ----------
+        try:
+            from backup import auto_backup_if_needed
+            result = auto_backup_if_needed()
+            if result and result["ok"]:
+                log.info("Автобэкап: %s", result["info"])
+            elif result:
+                log.warning("Автобэкап не удался: %s", result["info"])
+        except Exception as e:
+            log.error("Автобэкап: исключение %s", e)
+
+                    # ---------- Автоочистка журнала ----------
+        try:
+            result = self.store.auto_cleanup_if_needed()
+            if result and result["ok"]:
+                log.info("Автоочистка журнала: %s", result["info"])
+            elif result:
+                log.warning("Автоочистка журнала: %s", result["info"])
+        except Exception as e:
+            log.error("Автоочистка журнала: исключение %s", e)
 
         # ---------- Флаг: админ авторизован? ----------
         self.admin_authenticated = False
@@ -110,8 +139,8 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(root)
 
-        print("[ChestZn] MainWindow создан, размер:", self.size())
-        print("[ChestZn] вкладок:", self.tabs.count())
+        log.info("MainWindow создан, размер: %s", self.size())
+        log.info("Вкладок: %s", self.tabs.count())
 
     # ------------------------------------------------------------------
     def _on_tab_changed(self, idx: int):
@@ -123,6 +152,8 @@ class MainWindow(QMainWindow):
         if self.admin_authenticated:
             self.admin.switch("dashboard")
             return
+
+        log.info("Запрос доступа к админке")
 
         # Даём окну отрисоваться перед скриншотом
         QApplication.processEvents()
@@ -153,7 +184,7 @@ class MainWindow(QMainWindow):
         # ---------- Шаг 2: секретный вопрос ----------
         if not self.store.has_security_question(login.user["login"]):
             # Вопрос не настроен — принудительно настраиваем
-            print("[ChestZn] Секретный вопрос не настроен — принудительная настройка")
+            log.info("Секретный вопрос не настроен — принудительная настройка")
 
             QApplication.processEvents()
             self._set_blur(True)
@@ -179,7 +210,7 @@ class MainWindow(QMainWindow):
         # ---------- Шаг 3: пускаем в админку ----------
         self.admin_authenticated = True
         self.admin.switch("dashboard")
-        print(f"[ChestZn] Админ авторизован: {login.user['fio']}")
+        log.info("Админ авторизован: %s", login.user['fio'])
 
     # ------------------------------------------------------------------
     def _return_to_operator(self, message: str = ""):
@@ -188,7 +219,7 @@ class MainWindow(QMainWindow):
         self.tabs.setCurrentIndex(0)
         self.tabs.blockSignals(False)
         if message:
-            print(f"[ChestZn] {message}")
+            log.info("%s", message)
 
     # ------------------------------------------------------------------
     def _set_blur(self, enabled: bool):
@@ -246,14 +277,26 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    log.info("Запуск приложения")
     app = QApplication(sys.argv)
     app.setStyleSheet(APP_QSS)
 
+    # ---------- Глобальный обработчик исключений ----------
+    from error_handler import install_exception_hook
+
     win = MainWindow()
+
+    # Устанавливаем хук ПОСЛЕ создания окна (нужен store)
+    install_exception_hook(store=win.store)
+
     win.show()
 
-    print("[ChestZn] окно показано, visible:", win.isVisible())
-    sys.exit(app.exec())
+    log.info("Окно показано, visible: %s", win.isVisible())
+    log.info("Приложение готово к работе")
+
+    exit_code = app.exec()
+    log.info("Приложение завершено, код выхода: %s", exit_code)
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":
