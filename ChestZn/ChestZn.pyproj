@@ -24,6 +24,8 @@
   <ItemGroup>
     <Compile Include="admin_window.py" />
     <Compile Include="barcode.py" />
+    <Compile Include="db.py" />
+    <Compile Include="db_view.py" />
     <Compile Include="main.py" />
     <Compile Include="operator_window.py" />
     <Compile Include="store.py" />

@@ -234,7 +234,7 @@ class AdminWindow(QWidget):
 
     def _retry_all(self):
         n = len(self.store.queue)
-        self.store.queue.clear()
+        self.store.clear_queue()
         self.toast.show_message(f"Обработано: {n}", "ok")
         self._refresh_queue()
         self._refresh_dashboard()
