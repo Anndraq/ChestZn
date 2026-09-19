@@ -1,9 +1,11 @@
 """Админ-панель: боковое меню + QStackedWidget с разделами."""
 from typing import Optional
+
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLabel,
     QPushButton, QStackedWidget, QTableWidget, QTableWidgetItem,
-    QHeaderView, QGridLayout, QSizePolicy, QAbstractItemView
+    QHeaderView, QGridLayout, QSizePolicy, QAbstractItemView,
+    QLineEdit, QComboBox
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QBrush
@@ -11,6 +13,8 @@ from PySide6.QtGui import QColor, QBrush
 from store import Store
 from barcode import render_datamatrix
 from toast import Toast
+from printer import (list_printers, detect_language, load_config,
+                     save_config, print_code, default_printer)
 
 
 def table(headers: list[str]) -> QTableWidget:
@@ -75,6 +79,7 @@ class AdminWindow(QWidget):
         self.nav_integrations = nav("🔌  Интеграции", "integrations")
         self.nav_templates    = nav("🏷️  Шаблоны", "templates")
         self.nav_pool         = nav("🎫  Пул кодов", "pool")
+        self.nav_printer      = nav("🖨  Принтер", "printer")
 
         section("КОНТРОЛЬ")
         self.nav_journal = nav("📜  Журнал", "journal")
@@ -90,6 +95,7 @@ class AdminWindow(QWidget):
         self.stack.addWidget(self._page_integrations())
         self.stack.addWidget(self._page_templates())
         self.stack.addWidget(self._page_pool())
+        self.stack.addWidget(self._page_printer())
         self.stack.addWidget(self._page_journal())
 
         root.addWidget(sidebar)
@@ -101,13 +107,14 @@ class AdminWindow(QWidget):
     def switch(self, page_id: str):
         pages = {
             "dashboard": 0, "queue": 1, "points": 2, "users": 3,
-            "integrations": 4, "templates": 5, "pool": 6, "journal": 7,
+            "integrations": 4, "templates": 5, "pool": 6,
+            "printer": 7, "journal": 8,
         }
         idx = pages.get(page_id, 0)
         self.stack.setCurrentIndex(idx)
         for btn in [self.nav_dashboard, self.nav_queue, self.nav_points,
                     self.nav_users, self.nav_integrations, self.nav_templates,
-                    self.nav_pool, self.nav_journal]:
+                    self.nav_pool, self.nav_printer, self.nav_journal]:
             btn.setChecked(btn.property("page_id") == page_id)
         self.refresh(page_id)
 
@@ -119,6 +126,7 @@ class AdminWindow(QWidget):
         if page_id == "integrations": self._refresh_integrations()
         if page_id == "templates":    self._refresh_templates()
         if page_id == "pool":         self._refresh_pool()
+        if page_id == "printer":      self._refresh_printer()
         if page_id == "journal":      self._refresh_journal()
 
     # ==================================================================
@@ -319,8 +327,7 @@ class AdminWindow(QWidget):
 
             left = QVBoxLayout()
             title = QLabel(integ["name"] + ("   ● работает" if integ["status"] == "ok" else "   ● ошибка"))
-            color = "#22c55e" if integ["status"] == "ok" else "#ef4444"
-            title.setStyleSheet(f"font-size:14px; font-weight:600; color:#e6edf3;")
+            title.setStyleSheet("font-size:14px; font-weight:600; color:#e6edf3;")
             left.addWidget(title)
 
             for k, v in [
@@ -483,6 +490,163 @@ class AdminWindow(QWidget):
             t.setItem(r, 2, cell(p["free"], "#22c55e", mono=True))
             t.setItem(r, 3, cell(p["used"], "#f59e0b", mono=True))
             t.setItem(r, 4, cell(p["printed"], mono=True))
+
+    # ==================================================================
+    # PRINTER
+    # ==================================================================
+    def _page_printer(self) -> QWidget:
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(24, 20, 24, 20)
+        v.setSpacing(14)
+
+        tt = QLabel("Принтер")
+        tt.setStyleSheet("font-size:18px; font-weight:600;")
+        v.addWidget(tt)
+
+        sub = QLabel("Печать Честного знака на этикеточный принтер")
+        sub.setStyleSheet("color:#8b97a6; font-size:12px;")
+        v.addWidget(sub)
+
+        # ---------- Список принтеров ----------
+        card = QFrame(); card.setObjectName("card")
+        cv = QVBoxLayout(card)
+        cv.setContentsMargins(18, 14, 18, 14)
+        cv.setSpacing(10)
+
+        h = QHBoxLayout()
+        h.addWidget(QLabel("Найденные принтеры:"))
+        btn_scan = QPushButton("🔄 Обновить список")
+        btn_scan.clicked.connect(self._refresh_printer)
+        h.addStretch(1)
+        h.addWidget(btn_scan)
+        cv.addLayout(h)
+
+        self.printer_table = table(["Принтер", "Порт", "Язык", "По умолчанию"])
+        self.printer_table.setMinimumHeight(180)
+        self.printer_table.itemSelectionChanged.connect(self._on_printer_select)
+        cv.addWidget(self.printer_table)
+
+        v.addWidget(card)
+
+        # ---------- Параметры ----------
+        card2 = QFrame(); card2.setObjectName("card")
+        g = QGridLayout(card2)
+        g.setContentsMargins(18, 14, 18, 14)
+        g.setSpacing(10)
+
+        self.cfg_printer_name = QLineEdit()
+        self.cfg_printer_ip   = QLineEdit()
+        self.cfg_printer_port = QLineEdit()
+        self.cfg_printer_lang = QComboBox()
+        self.cfg_printer_lang.addItems(["auto", "zpl", "tspl", "ezpl", "windows"])
+        self.cfg_label_w = QLineEdit()
+        self.cfg_label_h = QLineEdit()
+        self.cfg_dpi     = QComboBox()
+        self.cfg_dpi.addItems(["203", "300", "600"])
+        self.cfg_copies  = QLineEdit()
+
+        rows = [
+            ("Принтер (имя Windows):", self.cfg_printer_name),
+            ("IP-адрес (если сеть):",  self.cfg_printer_ip),
+            ("Порт:",                  self.cfg_printer_port),
+            ("Язык команд:",           self.cfg_printer_lang),
+            ("Ширина этикетки, мм:",   self.cfg_label_w),
+            ("Высота этикетки, мм:",   self.cfg_label_h),
+            ("DPI:",                   self.cfg_dpi),
+            ("Копий:",                 self.cfg_copies),
+        ]
+        for i, (lbl, widget) in enumerate(rows):
+            l = QLabel(lbl); l.setStyleSheet("color:#8b97a6;")
+            g.addWidget(l, i, 0)
+            g.addWidget(widget, i, 1)
+
+        v.addWidget(card2)
+
+        # ---------- Кнопки ----------
+        h2 = QHBoxLayout()
+        btn_save = QPushButton("💾 Сохранить")
+        btn_save.setProperty("primary", True)
+        btn_save.clicked.connect(self._save_printer_cfg)
+        btn_test = QPushButton("🧪 Тест печати")
+        btn_test.clicked.connect(self._test_print)
+        h2.addWidget(btn_save)
+        h2.addWidget(btn_test)
+        h2.addStretch(1)
+        v.addLayout(h2)
+
+        v.addStretch(1)
+        return w
+
+    def _refresh_printer(self):
+        cfg = load_config()
+        self.cfg_printer_name.setText(cfg.get("printer_name", ""))
+        self.cfg_printer_ip.setText(cfg.get("printer_ip", ""))
+        self.cfg_printer_port.setText(str(cfg.get("printer_port", 9100)))
+        self.cfg_printer_lang.setCurrentText(cfg.get("printer_lang", "auto"))
+        self.cfg_label_w.setText(str(cfg.get("label_width_mm", 58)))
+        self.cfg_label_h.setText(str(cfg.get("label_height_mm", 40)))
+        self.cfg_dpi.setCurrentText(str(cfg.get("dpi", 203)))
+        self.cfg_copies.setText(str(cfg.get("copies", 1)))
+
+        t = self.printer_table
+        t.setRowCount(0)
+        try:
+            default = default_printer()
+        except Exception:
+            default = ""
+        for p in list_printers():
+            r = t.rowCount(); t.insertRow(r)
+            lang = detect_language(p["name"])
+            t.setItem(r, 0, cell(p["name"]))
+            t.setItem(r, 1, cell(p["port"], mono=True))
+            t.setItem(r, 2, cell(lang))
+            t.setItem(r, 3, cell("да" if p["name"] == default else "", "#22c55e"))
+
+    def _on_printer_select(self):
+        rows = self.printer_table.selectionModel().selectedRows()
+        if not rows:
+            return
+        idx = rows[0].row()
+        name = self.printer_table.item(idx, 0).text()
+        lang = self.printer_table.item(idx, 2).text()
+        self.cfg_printer_name.setText(name)
+        self.cfg_printer_lang.setCurrentText(lang)
+
+    def _save_printer_cfg(self):
+        cfg = load_config()
+        cfg["printer_name"] = self.cfg_printer_name.text().strip()
+        cfg["printer_ip"]   = self.cfg_printer_ip.text().strip()
+        try:
+            cfg["printer_port"] = int(self.cfg_printer_port.text().strip() or 9100)
+        except ValueError:
+            cfg["printer_port"] = 9100
+        cfg["printer_lang"] = self.cfg_printer_lang.currentText()
+        try:
+            cfg["label_width_mm"]  = float(self.cfg_label_w.text().strip() or 58)
+            cfg["label_height_mm"] = float(self.cfg_label_h.text().strip() or 40)
+        except ValueError:
+            pass
+        try:
+            cfg["dpi"] = int(self.cfg_dpi.currentText())
+        except ValueError:
+            cfg["dpi"] = 203
+        try:
+            cfg["copies"] = int(self.cfg_copies.text().strip() or 1)
+        except ValueError:
+            cfg["copies"] = 1
+
+        save_config(cfg)
+        self.toast.show_message("Настройки принтера сохранены", "ok")
+
+    def _test_print(self):
+        cfg = load_config()
+        sample = "(01)04600123456782(21)SN00000001(91)TEST(92)SAMPLE01"
+        result = print_code(sample, cfg)
+        if result["ok"]:
+            self.toast.show_message(f"Тест: {result['info']}", "ok")
+        else:
+            self.toast.show_message(f"Ошибка: {result['info']}", "err")
 
     # ==================================================================
     # JOURNAL

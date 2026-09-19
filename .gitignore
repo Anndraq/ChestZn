@@ -361,3 +361,25 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+
+# Виртуальные окружения Python
+env/
+.venv/
+venv/
+ENV/
+ENV.bak/
+venv.bak/
+
+# PyInstaller
+build/
+dist/
+*.spec.bak
+
+# Локальные конфиги приложения
+config.json
+*.log
+
+# OS
+Thumbs.db
+.DS_Store
+desktop.ini

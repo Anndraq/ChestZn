@@ -13,7 +13,6 @@ from toast import Toast
 from datetime import datetime
 
 
-
 def field_pair(key: str, value_id_holder: dict) -> tuple:
     """Вернуть пару QLabel (ключ, значение) для формы."""
     k = QLabel(key)
@@ -272,7 +271,7 @@ class OperatorWindow(QWidget):
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(10)
 
-        self.btn_print  = self._make_button("🖨 Печать   F2", primary=True)
+        self.btn_print  = self._make_button("🖨 Повтор печати   F2", primary=True)
         self.btn_retry  = self._make_button("🔄 Повтор   F5")
         self.btn_manual = self._make_button("✏️ Вручную   F6")
         self.btn_skip   = self._make_button("⏭ Пропустить   F8", danger=True)
@@ -340,9 +339,40 @@ class OperatorWindow(QWidget):
         self.btn_skip.setEnabled(bool(state))
 
     # ------------------------------------------------------------------
+    # Автопечать
+    # ------------------------------------------------------------------
+    def _auto_print(self, code: str):
+        """Автопечать после успешного скана."""
+        from printer import print_code, load_config
+        cfg = load_config()
+
+        if not cfg.get("printer_name") and not cfg.get("printer_ip"):
+            self.toast.show_message(
+                "Принтер не настроен — открой Админ → Принтер", "warn"
+            )
+            return
+
+        print(f"[ChestZn] _auto_print: отправка на {cfg.get('printer_name')} ({cfg.get('printer_lang')})")
+        result = print_code(code, cfg)
+
+        if result["ok"]:
+            self.store.counter["prints"] += 1
+            self._refresh_counter()
+            self.store.log("Автопечать", point="T-01", operator="Иванов И.И.",
+                           result="успех")
+            self.toast.show_message(f"Напечатано: {result['info']}", "ok")
+            print(f"[ChestZn] _auto_print ok: {result['info']}")
+        else:
+            self.store.counter["errors"] += 1
+            self._refresh_counter()
+            self.toast.show_message(f"Ошибка печати: {result['info']}", "err")
+            print(f"[ChestZn] _auto_print err: {result['info']}")
+
+    # ------------------------------------------------------------------
     # Основные действия
     # ------------------------------------------------------------------
     def do_scan(self, mode: str = "auto"):
+        print(f"[ChestZn] do_scan вызван, mode={mode}")
         raw = self.scan_input.text()
         foreign = parse_foreign_barcode(raw)
         self.store.counter["scans"] += 1
@@ -361,6 +391,7 @@ class OperatorWindow(QWidget):
             self.toast.show_message("Сохранено в очередь синхронизации", "warn")
             self._refresh_counter()
             self._update_buttons("offline")
+            self._auto_print(cz["code"])
             return
 
         if mode == "err":
@@ -389,9 +420,9 @@ class OperatorWindow(QWidget):
         self.toast.show_message("Честный знак получен", "ok")
         self._refresh_counter()
         self._update_buttons("ok")
+        self._auto_print(cz["code"])
 
     def _render_ok(self, foreign: dict, cz_code: str, state: str = "ok"):
-        # Иностранный ШК
         self._set_field("Тип", foreign["type"])
         self._set_field("GTIN", foreign["gtin"])
         self._set_field("Серия", foreign["serial"])
@@ -399,7 +430,6 @@ class OperatorWindow(QWidget):
         self._set_field("Срок годн.", foreign["exp"])
         self._set_field("Страна", foreign["country"])
 
-        # ЧЗ
         if state == "offline":
             self._set_badge("ОТЛОЖЕН", "warn")
             self._set_field("ЧЗ_Статус", "🟡 Будет запрошен при восстановлении связи")
@@ -414,13 +444,11 @@ class OperatorWindow(QWidget):
             self._set_status("✅ Найдено", "ok")
         self._set_field("ЧЗ_Код", cz_code)
 
-        # DataMatrix
         pix_big = render_datamatrix(cz_code, 120)
         self.dm_big.setPixmap(pix_big)
         pix_small = render_datamatrix(cz_code, 90)
         self.dm_small.setPixmap(pix_small)
 
-        # Предпросмотр русификатора
         self.preview_empty.hide()
         self.label_mock.show()
         self.lm_name.setText(foreign["name"])
@@ -457,19 +485,28 @@ class OperatorWindow(QWidget):
         self.last_cz_code = None
 
     def do_print(self):
+        """Повторная печать последнего кода."""
         if not self.last_cz_code:
             return
-        for gtin, codes in self.store.pool.items():
-            for c in codes:
-                if c["code"] == self.last_cz_code:
-                    c["printed"] = True
-                    c["printed_at"] = datetime.now().strftime("%H:%M:%S")
-                    break
-        self.store.counter["prints"] += 1
-        self.store.log("Печать", point="T-01", operator="Иванов И.И.",
-                       result="успех")
-        self._refresh_counter()
-        self.toast.show_message("Этикетка отправлена на принтер", "ok")
+
+        from printer import print_code, load_config
+        cfg = load_config()
+        result = print_code(self.last_cz_code, cfg)
+
+        if result["ok"]:
+            for gtin, codes in self.store.pool.items():
+                for c in codes:
+                    if c["code"] == self.last_cz_code:
+                        c["printed"] = True
+                        c["printed_at"] = datetime.now().strftime("%H:%M:%S")
+                        break
+            self.store.counter["prints"] += 1
+            self.store.log("Повтор печати", point="T-01", operator="Иванов И.И.",
+                           result="успех")
+            self._refresh_counter()
+            self.toast.show_message(f"Напечатано: {result['info']}", "ok")
+        else:
+            self.toast.show_message(f"Ошибка печати: {result['info']}", "err")
 
     def reset(self):
         self.last_cz_code = None

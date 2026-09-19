@@ -20,6 +20,23 @@ class MainWindow(QMainWindow):
 
         self.store = Store()
 
+        # ---------- Автоопределение принтера ----------
+        from printer import autodetect, load_config, save_config
+        cfg = load_config()
+        if not cfg.get("printer_name") and not cfg.get("printer_ip"):
+            result = autodetect()
+            if result["suggested"]:
+                s = result["suggested"]
+                cfg["printer_name"] = s["name"]
+                cfg["printer_lang"] = s["lang"]
+                save_config(cfg)
+                print(f"[ChestZn] Принтер определён: {s['name']} ({s['lang']})")
+            else:
+                print("[ChestZn] Принтеры не найдены — настройте вручную в админке")
+        else:
+            print(f"[ChestZn] Принтер из настроек: {cfg['printer_name']} ({cfg['printer_lang']})")
+        # ---------- /Автоопределение принтера ----------
+
         # ---------- Корневой виджет ----------
         root = QWidget()
         root_layout = QVBoxLayout(root)
@@ -81,7 +98,7 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(root)
 
-        # Отладка: показать, что вообще создалось
+        # Отладка
         print("[ChestZn] MainWindow создан, размер:", self.size())
         print("[ChestZn] вкладок:", tabs.count())
 
