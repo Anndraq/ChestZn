@@ -163,6 +163,24 @@ QFrame#labelMock {
     border-radius: 6px;
 }
 
+QFrame#labelMock QLabel {
+    background: transparent;
+    border: none;
+    color: #000000;
+}
+
+QFrame#labelMock QLabel#lmName {
+    color: #000000;
+    font-weight: 600;
+    font-size: 12px;
+}
+
+QFrame#labelMock QLabel.lmField {
+    color: #000000;
+    font-family: Consolas, monospace;
+    font-size: 11px;
+}
+
 /* ===== Admin sidebar ===== */
 QFrame#sidebar {
     background-color: #161c24;
