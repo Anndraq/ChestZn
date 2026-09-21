@@ -177,6 +177,14 @@ class AdminWindow(QWidget):
             kpi_row.addWidget(self._make_kpi(key, label, color))
         v.addLayout(kpi_row)
 
+                # Индикатор целостности журнала
+        self.journal_integrity_label = QLabel("")
+        self.journal_integrity_label.setStyleSheet(
+            "font-size:12px; padding:8px; "
+            "background:rgba(139,151,166,.1); border-radius:6px;"
+        )
+        v.addWidget(self.journal_integrity_label)
+
         t = QLabel("ИНТЕГРАЦИИ")
         t.setStyleSheet("color:#8b97a6; font-size:11px; font-weight:600; letter-spacing:1.5px; margin-top:10px;")
         v.addWidget(t)
@@ -219,6 +227,28 @@ class AdminWindow(QWidget):
                                  "#22c55e" if ok else "#ef4444"))
             t.setItem(r, 2, cell(integ["last"], mono=True))
             t.setItem(r, 3, cell(integ["calls_today"], mono=True))
+
+        # Проверить целостность журнала
+        try:
+            res = self.store.verify_audit_chain()
+            if res["ok"]:
+                self.journal_integrity_label.setText(
+                    f"🔐 Журнал: цел ({res['total']} записей)"
+                )
+                self.journal_integrity_label.setStyleSheet(
+                    "color:#22c55e; font-size:12px; padding:8px; "
+                    "background:rgba(34,197,94,.1); border-radius:6px;"
+                )
+            else:
+                self.journal_integrity_label.setText(
+                    f"⚠ Журнал повреждён: {len(res['broken'])} из {res['total']}"
+                )
+                self.journal_integrity_label.setStyleSheet(
+                    "color:#ef4444; font-size:12px; padding:8px; "
+                    "background:rgba(239,68,68,.1); border-radius:6px;"
+                )
+        except Exception:
+            self.journal_integrity_label.setText("")
 
     # ==================================================================
     # QUEUE
@@ -1248,6 +1278,10 @@ class AdminWindow(QWidget):
         btn_refresh.clicked.connect(self._refresh_journal)
         head.addWidget(btn_refresh)
 
+        btn_verify = QPushButton("🔐 Проверить цепочку")
+        btn_verify.clicked.connect(self._verify_audit_chain)
+        head.addWidget(btn_verify)
+
         v.addLayout(head)
 
         row1 = QHBoxLayout()
@@ -1496,6 +1530,33 @@ class AdminWindow(QWidget):
         except Exception as e:
             log.error("Ошибка экспорта журнала: %s", e)
             self.toast.show_message(f"Ошибка: {e}", "err")
+
+    def _verify_audit_chain(self):
+        """Проверить HMAC-цепочку журнала."""
+        result = self.store.verify_audit_chain()
+
+        if result["ok"]:
+            QMessageBox.information(
+                self, "Проверка журнала",
+                result["info"]
+            )
+        else:
+            # Есть повреждения — показать детали
+            lines = [f"Всего записей: {result['total']}",
+                     f"Повреждений: {len(result['broken'])}", ""]
+            for b in result["broken"][:20]:
+                lines.append(f"#{b['id']}  {b['time']}  {b['action']}")
+                lines.append(f"    {b['reason']}")
+            if len(result["broken"]) > 20:
+                lines.append(f"...и ещё {len(result['broken']) - 20}")
+
+            QMessageBox.warning(
+                self, "⚠ Журнал повреждён",
+                "\n".join(lines)
+            )
+
+            log.warning("Журнал повреждён: %s повреждений", len(result["broken"]))
+
 
     # ==================================================================
     # SECURITY

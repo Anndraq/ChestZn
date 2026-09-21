@@ -74,6 +74,13 @@ class Store:
         self._ensure_seed_data()
         self._ensure_users_seeded()
 
+        # --- Миграция HMAC для audit ---
+        try:
+            self.migrate_audit_hmac()
+        except Exception as e:
+            from logger import get_logger
+            get_logger("store").error("Ошибка миграции HMAC: %s", e)
+
         # ---------- Кэши в памяти ----------
         self.counter = self._load_counter()
         self.queue   = self._load_queue()
@@ -161,6 +168,7 @@ class Store:
     # Пул кодов
     # ==========================================================
     def take_code(self, gtin: str, point: str = "T-01"):
+        """Взять свободный код из пула, пометить used."""
         with db.get_conn() as conn:
             row = conn.execute(
                 "SELECT id, gtin, code, sn FROM pool_codes "
@@ -195,6 +203,7 @@ class Store:
             }
 
     def mark_printed(self, code: str, point: str = "T-01"):
+        """Пометить код как напечатанный."""
         with db.get_conn() as conn:
             conn.execute(
                 "UPDATE pool_codes SET printed = 1, printed_at = datetime('now','localtime') "
@@ -203,6 +212,7 @@ class Store:
             )
 
     def pool_stats(self) -> list:
+        """Статистика по пулу — по каждому GTIN."""
         with db.get_conn() as conn:
             rows = conn.execute(
                 "SELECT gtin, "
@@ -214,12 +224,18 @@ class Store:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def count_pool(self) -> int:
+        """Всего кодов в пуле."""
+        with db.get_conn() as conn:
+            return conn.execute("SELECT COUNT(*) AS c FROM pool_codes").fetchone()["c"]
+
     # ==========================================================
     # Счётчики
     # ==========================================================
     _COUNTER_FIELDS = {"scans": "scans", "prints": "prints", "errors": "errors"}
 
     def increment_counter(self, key: str, delta: int = 1):
+        """Увеличить счётчик и обновить кэш."""
         if key not in self._COUNTER_FIELDS:
             return
         col = self._COUNTER_FIELDS[key]
@@ -231,6 +247,7 @@ class Store:
         self.counter[key] = self.counter.get(key, 0) + delta
 
     def reset_counters(self):
+        """Сбросить счётчики."""
         with db.get_conn() as conn:
             conn.execute(
                 "UPDATE counters SET scans=0, prints=0, errors=0 WHERE id = 1"
@@ -263,9 +280,33 @@ class Store:
         self.queue.clear()
 
     # ==========================================================
-    # Журнал
+    # Журнал + HMAC
     # ==========================================================
+    def _compute_audit_hmac(self, prev_hmac: str, entry: dict) -> str:
+        """
+        Вычислить HMAC одной записи журнала.
+        HMAC-SHA256 от: ключ + (prev_hmac | time | action | point | operator | gtin | sn | result)
+        """
+        import hmac as hmac_mod
+        import hashlib
+        from crypto import get_hmac_key
+
+        key = get_hmac_key()
+        parts = [
+            prev_hmac or "",
+            entry.get("time") or "",
+            entry.get("action") or "",
+            entry.get("point") or "",
+            entry.get("operator") or "",
+            entry.get("gtin") or "",
+            entry.get("sn") or "",
+            entry.get("result") or "",
+        ]
+        data = "|".join(parts).encode("utf-8")
+        return hmac_mod.new(key, data, hashlib.sha256).hexdigest()
+
     def log(self, action: str, **kwargs):
+        """Добавить запись в журнал с HMAC-подписью."""
         now = datetime.now().strftime("%H:%M:%S")
         entry = {
             "time": now,
@@ -276,18 +317,32 @@ class Store:
             "sn": kwargs.get("sn"),
             "result": kwargs.get("result"),
         }
+
         with db.get_conn() as conn:
+            last = conn.execute(
+                "SELECT hmac FROM audit ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            prev_hmac = (last["hmac"] if last and last["hmac"] else "") or ""
+
+            cur_hmac = self._compute_audit_hmac(prev_hmac, entry)
+
             conn.execute(
-                "INSERT INTO audit (time, action, point, operator, gtin, sn, result) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO audit "
+                "(time, action, point, operator, gtin, sn, result, hmac, prev_hmac) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (entry["time"], entry["action"], entry["point"],
-                 entry["operator"], entry["gtin"], entry["sn"], entry["result"])
+                 entry["operator"], entry["gtin"], entry["sn"], entry["result"],
+                 cur_hmac, prev_hmac)
             )
+
+        entry["hmac"] = cur_hmac
+        entry["prev_hmac"] = prev_hmac
         self.audit.insert(0, entry)
         if len(self.audit) > 200:
             self.audit = self.audit[:200]
 
     def query_audit(self, filters: dict = None, limit: int = 100, offset: int = 0):
+        """Поиск записей в журнале с фильтрами и пагинацией."""
         filters = filters or {}
         where = []
         params = []
@@ -304,15 +359,12 @@ class Store:
         if filters.get("point"):
             where.append("point = ?")
             params.append(filters["point"])
-
         if filters.get("operator"):
             where.append("operator = ?")
             params.append(filters["operator"])
-
         if filters.get("result"):
             where.append("result = ?")
             params.append(filters["result"])
-
         if filters.get("search"):
             s = f"%{filters['search']}%"
             where.append("(gtin LIKE ? OR sn LIKE ?)")
@@ -324,7 +376,6 @@ class Store:
             total = conn.execute(
                 f"SELECT COUNT(*) AS c FROM audit {where_sql}", params
             ).fetchone()["c"]
-
             rows = conn.execute(
                 f"SELECT time, action, point, operator, gtin, sn, result, created_at "
                 f"FROM audit {where_sql} "
@@ -335,6 +386,7 @@ class Store:
         return [dict(r) for r in rows], total
 
     def get_audit_filter_values(self) -> dict:
+        """Уникальные значения для фильтров журнала."""
         with db.get_conn() as conn:
             points = [r["point"] for r in conn.execute(
                 "SELECT DISTINCT point FROM audit "
@@ -348,11 +400,109 @@ class Store:
                 "SELECT DISTINCT result FROM audit "
                 "WHERE result IS NOT NULL AND result != '' ORDER BY result"
             ).fetchall()]
-        return {
-            "points": points,
-            "operators": operators,
-            "results": results,
-        }
+        return {"points": points, "operators": operators, "results": results}
+
+    # ==========================================================
+    # HMAC-цепочка журнала
+    # ==========================================================
+    def migrate_audit_hmac(self):
+        """Пересчитать HMAC-цепочку для всех записей журнала."""
+        with db.get_conn() as conn:
+            total = conn.execute(
+                "SELECT COUNT(*) AS c FROM audit"
+            ).fetchone()["c"]
+            if total == 0:
+                return
+
+            signed = conn.execute(
+                "SELECT COUNT(*) AS c FROM audit "
+                "WHERE hmac IS NOT NULL AND hmac != ''"
+            ).fetchone()["c"]
+            if signed == total:
+                return
+
+            from logger import get_logger
+            get_logger("store").info(
+                "Начата подпись журнала: %s/%s уже подписано", signed, total
+            )
+
+            rows = conn.execute(
+                "SELECT id, time, action, point, operator, gtin, sn, result "
+                "FROM audit ORDER BY id ASC"
+            ).fetchall()
+
+            prev_hmac = ""
+            updated = 0
+            for r in rows:
+                entry = {
+                    "time": r["time"], "action": r["action"],
+                    "point": r["point"], "operator": r["operator"],
+                    "gtin": r["gtin"], "sn": r["sn"], "result": r["result"],
+                }
+                new_hmac = self._compute_audit_hmac(prev_hmac, entry)
+                conn.execute(
+                    "UPDATE audit SET hmac = ?, prev_hmac = ? WHERE id = ?",
+                    (new_hmac, prev_hmac, r["id"])
+                )
+                prev_hmac = new_hmac
+                updated += 1
+
+            from logger import get_logger
+            get_logger("store").info(
+                "Миграция audit HMAC: подписано %s записей", updated
+            )
+
+    def verify_audit_chain(self) -> dict:
+        """Проверить HMAC-цепочку журнала."""
+        with db.get_conn() as conn:
+            rows = conn.execute(
+                "SELECT id, time, action, point, operator, gtin, sn, result, "
+                "       hmac, prev_hmac "
+                "FROM audit ORDER BY id ASC"
+            ).fetchall()
+
+        if not rows:
+            return {"ok": True, "total": 0, "broken": [],
+                    "info": "Журнал пуст"}
+
+        broken = []
+        expected_prev = ""
+
+        for r in rows:
+            actual_prev = (r["prev_hmac"] or "")
+            actual_hmac = (r["hmac"] or "")
+
+            if actual_prev != expected_prev:
+                broken.append({
+                    "id": r["id"], "time": r["time"], "action": r["action"],
+                    "reason": "Разрыв связи с предыдущей записью",
+                })
+
+            entry = {
+                "time": r["time"], "action": r["action"],
+                "point": r["point"], "operator": r["operator"],
+                "gtin": r["gtin"], "sn": r["sn"], "result": r["result"],
+            }
+            computed = self._compute_audit_hmac(actual_prev, entry)
+            if computed != actual_hmac:
+                reason = ("HMAC отсутствует"
+                          if not actual_hmac
+                          else "Данные записи изменены (HMAC не совпадает)")
+                broken.append({
+                    "id": r["id"], "time": r["time"], "action": r["action"],
+                    "reason": reason,
+                })
+
+            expected_prev = actual_hmac
+
+        total = len(rows)
+        ok = len(broken) == 0
+
+        if ok:
+            return {"ok": True, "total": total, "broken": [],
+                    "info": f"✅ Журнал цел. Записей: {total}"}
+        return {"ok": False, "total": total, "broken": broken,
+                "info": f"⚠ Обнаружено {len(broken)} повреждений из {total}"}
 
     # ==========================================================
     # Пользователи и аутентификация
@@ -527,18 +677,13 @@ class Store:
             ).fetchall()
         return [dict(r) for r in rows]
 
-    
     # ==========================================================
     # Массовый импорт
     # ==========================================================
     def bulk_import_pool_codes(self, rows: list) -> dict:
         """
         Массовая вставка кодов ЧЗ в пул.
-        rows = [
-            {"gtin": "04600123456782", "code": "(01)...", "sn": "SN0001"},
-            ...
-        ]
-        Возвращает {ok, added, skipped, errors, messages}.
+        rows = [{"gtin": "04600123456782", "code": "(01)...", "sn": "SN0001"}, ...]
         """
         added = 0
         skipped = 0
@@ -546,13 +691,12 @@ class Store:
         gtin_counts = {}
 
         with db.get_conn() as conn:
-            for i, row in enumerate(rows, start=2):  # 2 = первая строка данных (после заголовка)
+            for i, row in enumerate(rows, start=2):
                 try:
                     gtin = str(row.get("gtin", "")).strip()
                     code = str(row.get("code", "")).strip()
                     sn = str(row.get("sn", "")).strip()
 
-                    # Валидация
                     if not gtin:
                         errors.append(f"Строка {i}: пустой GTIN")
                         continue
@@ -563,7 +707,6 @@ class Store:
                         errors.append(f"Строка {i}: пустой код ЧЗ")
                         continue
 
-                    # Если SN пустой — попробуем извлечь из кода
                     if not sn:
                         import re
                         m = re.search(r"\(21\)([^\(]+)", code)
@@ -607,11 +750,7 @@ class Store:
         }
 
     def bulk_import_gtin_map(self, rows: list) -> dict:
-        """
-        Массовая вставка/обновление маппинга GTIN.
-        rows = [{"foreign_gtin": "...", "cz_gtin": "..."}, ...]
-        Возвращает {ok, added, updated, errors, messages}.
-        """
+        """Массовая вставка/обновление маппинга GTIN."""
         added = 0
         updated = 0
         errors = []
@@ -649,12 +788,10 @@ class Store:
                             (cz, fg)
                         )
                         updated += 1
-                    # если совпадает — ничего не делаем
 
                 except Exception as e:
                     errors.append(f"Строка {i}: {e}")
 
-        # Обновить кэш в памяти
         self.gtin_map = self._load_gtin_map()
 
         summary = (
@@ -673,17 +810,11 @@ class Store:
             "info": summary,
         }
 
-    def count_pool(self) -> int:
-        """Всего кодов в пуле."""
-        with db.get_conn() as conn:
-            return conn.execute("SELECT COUNT(*) AS c FROM pool_codes").fetchone()["c"]
-
     def count_gtin_map(self) -> int:
         """Всего записей в маппинге GTIN."""
         with db.get_conn() as conn:
             return conn.execute("SELECT COUNT(*) AS c FROM gtin_map").fetchone()["c"]
 
-    
     # ==========================================================
     # Настройки (таблица meta)
     # ==========================================================
@@ -717,19 +848,15 @@ class Store:
 
     def set_audit_retention_days(self, days: int):
         """Сохранить срок хранения журнала."""
-        days = max(7, int(days))  # минимум 7 дней
+        days = max(7, int(days))
         self.set_setting("audit_retention_days", str(days))
 
     def cleanup_old_audit(self) -> dict:
-        """
-        Удалить записи audit старше N дней.
-        Возвращает {ok, deleted, info}.
-        """
+        """Удалить записи audit старше N дней."""
         days = self.get_audit_retention_days()
 
         try:
             with db.get_conn() as conn:
-                # Сколько записей под удаление
                 threshold_mod = f"-{days} days"
                 count_row = conn.execute(
                     "SELECT COUNT(*) AS c FROM audit "
@@ -742,14 +869,12 @@ class Store:
                     return {"ok": True, "deleted": 0,
                             "info": f"Нет записей старше {days} дней"}
 
-                # Удаляем
                 conn.execute(
                     "DELETE FROM audit "
                     "WHERE created_at < datetime('now', 'localtime', ?)",
                     (threshold_mod,)
                 )
 
-            # Перезагружаем кэш в памяти
             self.audit = self._load_audit(limit=200)
 
             from logger import get_logger
@@ -766,10 +891,7 @@ class Store:
             return {"ok": False, "deleted": 0, "info": str(e)}
 
     def auto_cleanup_if_needed(self):
-        """
-        Автоочистка раз в сутки.
-        Запускается при старте приложения.
-        """
+        """Автоочистка раз в сутки."""
         from datetime import datetime
         last = self.get_setting("last_cleanup")
 

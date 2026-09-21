@@ -27,6 +27,7 @@
     <Compile Include="backup.py" />
     <Compile Include="barcode.py" />
     <Compile Include="change_password_window.py" />
+    <Compile Include="crypto.py" />
     <Compile Include="db.py" />
     <Compile Include="db_view.py" />
     <Compile Include="error_handler.py" />
@@ -37,6 +38,7 @@
     <Compile Include="main.py" />
     <Compile Include="operator_window.py" />
     <Compile Include="recovery_window.py" />
+    <Compile Include="security.py" />
     <Compile Include="store.py" />
     <Compile Include="styles.py" />
     <Compile Include="test_old_audit.py" />

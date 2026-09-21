@@ -3,3 +3,4 @@ treepoem==3.24.0
 Pillow==10.4.0
 pyinstaller==6.10.0
 pywin32==312
+sqlcipher3

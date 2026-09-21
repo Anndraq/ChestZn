@@ -32,6 +32,17 @@ class MainWindow(QMainWindow):
         self.store = Store()
         log.info("Store инициализирован")
 
+                # ---------- Защита прав папки ----------
+        try:
+            from security import apply_permissions_if_needed
+            result = apply_permissions_if_needed()
+            if result.get("ok") and not result.get("skipped"):
+                log.info("Права папки: %s", result.get("info"))
+            elif not result.get("ok"):
+                log.warning("Права папки: %s", result.get("info"))
+        except Exception as e:
+            log.error("Настройка прав: исключение %s", e)
+
         # ---------- Автоопределение принтера ----------
         from printer import autodetect, load_config, save_config
         cfg = load_config()
