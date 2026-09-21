@@ -2,13 +2,15 @@
 import sys
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout,
-    QHBoxLayout, QLabel, QFrame
+    QHBoxLayout, QLabel, QFrame, QMessageBox
 )
 from PySide6.QtCore import Qt
 
-from logger import setup_logging, get_logger
-setup_logging(debug=True)
-log = get_logger("app")
+import docs_helper
+import startup_check
+from startup_check import has_critical, has_warnings, check_all
+from startup_problems_window import StartupProblemsWindow
+from banner import WarningBanner
 
 from store import Store
 from operator_window import OperatorWindow
@@ -22,26 +24,12 @@ ADMIN_LOGIN = "admin"
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, initial_problems: list = None):
         super().__init__()
         self.setWindowTitle("ChestZn · Маркировка")
         self.resize(1360, 900)
 
-        log.info("Инициализация MainWindow")
-
         self.store = Store()
-        log.info("Store инициализирован")
-
-                # ---------- Защита прав папки ----------
-        try:
-            from security import apply_permissions_if_needed
-            result = apply_permissions_if_needed()
-            if result.get("ok") and not result.get("skipped"):
-                log.info("Права папки: %s", result.get("info"))
-            elif not result.get("ok"):
-                log.warning("Права папки: %s", result.get("info"))
-        except Exception as e:
-            log.error("Настройка прав: исключение %s", e)
 
         # ---------- Автоопределение принтера ----------
         from printer import autodetect, load_config, save_config
@@ -53,33 +41,11 @@ class MainWindow(QMainWindow):
                 cfg["printer_name"] = s["name"]
                 cfg["printer_lang"] = s["lang"]
                 save_config(cfg)
-                log.info("Принтер определён: %s (%s)", s["name"], s["lang"])
+                print(f"[ChestZn] Принтер определён: {s['name']} ({s['lang']})")
             else:
-                log.warning("Принтеры не найдены — настройте вручную в админке")
+                print("[ChestZn] Принтеры не найдены — настройте вручную в админке")
         else:
-            log.info("Принтер из настроек: %s (%s)",
-                     cfg["printer_name"], cfg["printer_lang"])
-
-            # ---------- Автобэкап БД ----------
-        try:
-            from backup import auto_backup_if_needed
-            result = auto_backup_if_needed()
-            if result and result["ok"]:
-                log.info("Автобэкап: %s", result["info"])
-            elif result:
-                log.warning("Автобэкап не удался: %s", result["info"])
-        except Exception as e:
-            log.error("Автобэкап: исключение %s", e)
-
-                    # ---------- Автоочистка журнала ----------
-        try:
-            result = self.store.auto_cleanup_if_needed()
-            if result and result["ok"]:
-                log.info("Автоочистка журнала: %s", result["info"])
-            elif result:
-                log.warning("Автоочистка журнала: %s", result["info"])
-        except Exception as e:
-            log.error("Автоочистка журнала: исключение %s", e)
+            print(f"[ChestZn] Принтер из настроек: {cfg['printer_name']} ({cfg['printer_lang']})")
 
         # ---------- Флаг: админ авторизован? ----------
         self.admin_authenticated = False
@@ -87,11 +53,23 @@ class MainWindow(QMainWindow):
         # ---------- Оверлей для размытия ----------
         self._overlay = None
 
+        # ---------- Проблемы при старте ----------
+        self._initial_problems = initial_problems or []
+
         # ---------- Корневой виджет ----------
         root = QWidget()
-        root_layout = QVBoxLayout(root)
-        root_layout.setContentsMargins(0, 0, 0, 0)
-        root_layout.setSpacing(0)
+        self._root_layout = QVBoxLayout(root)
+        self._root_layout.setContentsMargins(0, 0, 0, 0)
+        self._root_layout.setSpacing(0)
+
+        # ---------- Баннер предупреждений (если есть проблемы) ----------
+        self.banner = None
+        if self._initial_problems:
+            warnings_only = [p for p in self._initial_problems if p.get("status") != "ok"]
+            if warnings_only:
+                self.banner = WarningBanner(warnings_only)
+                self.banner.details_clicked.connect(self.show_problems_window)
+                self._root_layout.addWidget(self.banner)
 
         # ---------- Шапка ----------
         header = QFrame()
@@ -134,7 +112,7 @@ class MainWindow(QMainWindow):
         """)
         h.addWidget(avatar)
 
-        root_layout.addWidget(header)
+        self._root_layout.addWidget(header)
 
         # ---------- Вкладки ----------
         self.tabs = QTabWidget()
@@ -146,12 +124,41 @@ class MainWindow(QMainWindow):
 
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
-        root_layout.addWidget(self.tabs, stretch=1)
+        self._root_layout.addWidget(self.tabs, stretch=1)
 
         self.setCentralWidget(root)
 
-        log.info("MainWindow создан, размер: %s", self.size())
-        log.info("Вкладок: %s", self.tabs.count())
+        print("[ChestZn] MainWindow создан, размер:", self.size())
+        print("[ChestZn] вкладок:", self.tabs.count())
+
+    # ------------------------------------------------------------------
+    def show_problems_window(self):
+        """Показать окно проблем (по кнопке «Подробнее»)."""
+        win = StartupProblemsWindow(self.store, self)
+        win.problems_changed.connect(self.update_banner)
+        win.exec()
+        # После закрытия — обновить баннер
+        self.update_banner(win.problems)
+
+    # ------------------------------------------------------------------
+    def update_banner(self, problems: list):
+        """Обновить или скрыть баннер в главном окне."""
+        warnings_only = [p for p in problems if p.get("status") != "ok"]
+
+        if warnings_only:
+            if self.banner is None:
+                # Баннера не было — создаём и вставляем первым в root_layout
+                self.banner = WarningBanner(warnings_only)
+                self.banner.details_clicked.connect(self.show_problems_window)
+                self._root_layout.insertWidget(0, self.banner)
+            else:
+                # Баннер уже есть — обновляем
+                self.banner.update_problems(warnings_only)
+                self.banner.show()
+        else:
+            # Проблем нет — скрыть баннер
+            if self.banner is not None:
+                self.banner.hide()
 
     # ------------------------------------------------------------------
     def _on_tab_changed(self, idx: int):
@@ -159,43 +166,30 @@ class MainWindow(QMainWindow):
         if idx != 1:
             return
 
-        # Уже авторизован — просто переключаемся
         if self.admin_authenticated:
             self.admin.switch("dashboard")
             return
 
-        log.info("Запрос доступа к админке")
-
-        # Даём окну отрисоваться перед скриншотом
         QApplication.processEvents()
-
-        # Размываем главное окно
         self._set_blur(True)
-
-        # Даём оверлею отрисоваться
         QApplication.processEvents()
 
-        # ---------- Шаг 1: окно входа ----------
         login = LoginWindow(self.store, self)
         result = login.exec()
 
-        # Убираем размытие
         self._set_blur(False)
 
         if result != LoginWindow.Accepted or not login.user:
-            # Отмена — возвращаем Оператора
             self._return_to_operator("Вход в админку отменён")
             return
 
-        # Проверяем, что вошёл действительно админ
         if login.user.get("role") != "Администратор":
             self._return_to_operator("Нет прав администратора")
             return
 
-        # ---------- Шаг 2: секретный вопрос ----------
+        # ---------- Секретный вопрос ----------
         if not self.store.has_security_question(login.user["login"]):
-            # Вопрос не настроен — принудительно настраиваем
-            log.info("Секретный вопрос не настроен — принудительная настройка")
+            print("[ChestZn] Секретный вопрос не настроен — принудительная настройка")
 
             QApplication.processEvents()
             self._set_blur(True)
@@ -209,19 +203,17 @@ class MainWindow(QMainWindow):
             self._set_blur(False)
 
             if q_result != SecurityQuestionWindow.Accepted:
-                # Не настроил — не пускаем в админку
                 self._return_to_operator("Настройка восстановления отменена")
                 return
 
-            # Проверяем ещё раз на всякий случай
             if not self.store.has_security_question(login.user["login"]):
                 self._return_to_operator("Настройка восстановления не завершена")
                 return
 
-        # ---------- Шаг 3: пускаем в админку ----------
+        # ---------- Пускаем в админку ----------
         self.admin_authenticated = True
         self.admin.switch("dashboard")
-        log.info("Админ авторизован: %s", login.user['fio'])
+        print(f"[ChestZn] Админ авторизован: {login.user['fio']}")
 
     # ------------------------------------------------------------------
     def _return_to_operator(self, message: str = ""):
@@ -230,7 +222,7 @@ class MainWindow(QMainWindow):
         self.tabs.setCurrentIndex(0)
         self.tabs.blockSignals(False)
         if message:
-            log.info("%s", message)
+            print(f"[ChestZn] {message}")
 
     # ------------------------------------------------------------------
     def _set_blur(self, enabled: bool):
@@ -252,11 +244,9 @@ class MainWindow(QMainWindow):
         from PySide6.QtGui import QPixmap, QPainter
         from PySide6.QtCore import Qt, QRectF
 
-        # 1. Скриншот главного окна
         screen = self.grab()
         w, h = screen.width(), screen.height()
 
-        # 2. Размываем картинку
         blur = QGraphicsBlurEffect()
         blur.setBlurRadius(18)
         blur.setBlurHints(QGraphicsBlurEffect.QualityHint)
@@ -273,7 +263,6 @@ class MainWindow(QMainWindow):
         scene.render(painter, QRectF(0, 0, w, h), QRectF(0, 0, w, h))
         painter.end()
 
-        # 3. Оверлей поверх окна
         overlay = QWidget(self)
         overlay.setGeometry(self.rect())
         overlay.setStyleSheet("background: transparent;")
@@ -288,26 +277,47 @@ class MainWindow(QMainWindow):
 
 
 def main():
-    log.info("Запуск приложения")
     app = QApplication(sys.argv)
     app.setStyleSheet(APP_QSS)
 
-    # ---------- Глобальный обработчик исключений ----------
-    from error_handler import install_exception_hook
+    # ---------- 1. Скопировать руководства ----------
+    docs_helper.ensure_docs_copied()
 
-    win = MainWindow()
+    # ---------- 2. Проверить состояние ----------
+    problems = check_all()
 
-    # Устанавливаем хук ПОСЛЕ создания окна (нужен store)
-    install_exception_hook(store=win.store)
+    critical = has_critical(problems)
+    warnings = has_warnings(problems)
 
+    print(f"[ChestZn] Проверка при запуске: "
+          f"критических={critical}, предупреждений={warnings}")
+
+    # ---------- 3. Показать окно проблем ВСЕГДА ----------
+    try:
+        store_for_dialog = Store()
+    except Exception as e:
+        store_for_dialog = None
+        print(f"[ChestZn] Store не создан: {e}")
+
+    dlg = StartupProblemsWindow(store_for_dialog, parent=None)
+    result = dlg.exec()
+
+    # Если критические — не пускаем
+    if critical:
+        print("[ChestZn] Критические проблемы — выход")
+        sys.exit(1)
+
+    # Если оператор закрыл окно без «Продолжить» — выход
+    if result != StartupProblemsWindow.Accepted:
+        print("[ChestZn] Оператор закрыл окно проблем — выход")
+        sys.exit(0)
+
+    # ---------- 4. Открыть главное окно ----------
+    win = MainWindow(initial_problems=problems)
     win.show()
 
-    log.info("Окно показано, visible: %s", win.isVisible())
-    log.info("Приложение готово к работе")
-
-    exit_code = app.exec()
-    log.info("Приложение завершено, код выхода: %s", exit_code)
-    sys.exit(exit_code)
+    print("[ChestZn] Окно показано, visible:", win.isVisible())
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":

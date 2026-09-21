@@ -6,6 +6,9 @@
 - хранится в %APPDATA%\ChestZn\.keyfile;
 - шифруется через Windows DPAPI (CryptProtectData);
 - может быть экспортирован/импортирован в base64 для переноса.
+
+ВАЖНО: ключ НИКОГДА не пересоздаётся, если БД уже существует.
+Если .keyfile потерян, но БД есть — выдаётся ошибка.
 """
 import os
 import secrets
@@ -19,7 +22,18 @@ log = get_logger("crypto")
 
 APP_DIR = Path(os.environ.get("APPDATA", Path.home())) / "ChestZn"
 KEY_FILE = APP_DIR / ".keyfile"
+DB_FILE = APP_DIR / "chestzn.db"
 KEY_DPAPI_DESC = "ChestZn DB Encryption Key v1"
+
+
+class KeyLostError(RuntimeError):
+    """Ключ шифрования потерян, но БД существует."""
+    pass
+
+
+class KeyCorruptedError(RuntimeError):
+    """Файл ключа повреждён."""
+    pass
 
 
 # ==========================================================
@@ -69,28 +83,96 @@ def save_key(key: str):
 
 
 def load_key():
-    """Прочитать ключ из .keyfile. None, если файла нет или ошибка."""
+    """
+    Прочитать ключ из .keyfile.
+    Возвращает:
+      - str  — ключ, если файл есть и расшифрован;
+      - None — если файла нет;
+    Исключения:
+      - KeyCorruptedError — если файл есть, но не расшифровывается.
+    """
     if not KEY_FILE.exists():
         return None
     try:
         blob = KEY_FILE.read_bytes()
         raw = _dpapi_unprotect(blob)
-        return raw.decode("utf-8")
+        key = raw.decode("utf-8")
+        # Проверяем формат — 64 hex-символа
+        if len(key) != 64:
+            raise ValueError(f"Неверная длина ключа: {len(key)}")
+        int(key, 16)
+        return key
     except Exception as e:
         log.error("Не удалось расшифровать .keyfile: %s", e)
-        return None
+        raise KeyCorruptedError(
+            f"Файл ключа повреждён или создан на другом ПК/пользователе.\n"
+            f"Файл: {KEY_FILE}\n"
+            f"Ошибка: {e}\n\n"
+            f"Восстановите .keyfile из резервной копии."
+        )
 
 
 def get_or_create_key() -> str:
-    """Загрузить ключ или создать новый."""
-    key = load_key()
-    if key:
+    """
+    Загрузить ключ или создать новый (ТОЛЬКО при первом запуске).
+
+    Логика:
+      - Если .keyfile есть и расшифрован → вернуть его.
+      - Если .keyfile есть, но не расшифрован → ошибка KeyCorruptedError.
+      - Если .keyfile нет, но БД есть → ошибка KeyLostError.
+      - Если .keyfile нет и БД нет → создать новый ключ (первый запуск).
+    """
+    # 1. Пробуем загрузить существующий ключ
+    key = load_key()   # может поднять KeyCorruptedError
+
+    if key is not None:
         log.debug("Ключ БД загружен")
         return key
+
+    # 2. Ключа нет. Смотрим — есть ли БД?
+    if DB_FILE.exists():
+        log.critical(
+            "Ключ шифрования отсутствует, но БД существует: %s",
+            DB_FILE
+        )
+        raise KeyLostError(
+            f"Ключ шифрования потерян, но база данных существует.\n\n"
+            f"Файл БД: {DB_FILE}\n"
+            f"Файл ключа: {KEY_FILE} (отсутствует)\n\n"
+            f"Восстановите .keyfile из резервной копии\n"
+            f"или обратитесь к администратору системы.\n\n"
+            f"ВНИМАНИЕ: НЕ удаляйте БД — данные ещё можно восстановить."
+        )
+
+    # 3. Ни ключа, ни БД — это первый запуск. Создаём новый ключ.
     key = generate_key()
     save_key(key)
-    log.info("Создан новый ключ БД")
+    log.info("Создан новый ключ БД (первый запуск)")
     return key
+
+
+# ==========================================================
+# Проверка соответствия ключа БД
+# ==========================================================
+def key_matches_db(key: str) -> bool:
+    """
+    Проверить, что ключ подходит к существующей БД.
+    Возвращает True, если БД открывается с этим ключом.
+    """
+    if not DB_FILE.exists():
+        return True   # БД ещё нет — любой ключ подойдёт
+
+    try:
+        from sqlcipher3 import dbapi2 as sqlcipher
+        conn = sqlcipher.connect(str(DB_FILE))
+        conn.execute(f"PRAGMA key = \"x'{key}'\"")
+        # Пробуем выполнить запрос — если ключ неверный, упадёт
+        conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+        conn.close()
+        return True
+    except Exception as e:
+        log.error("Ключ не подходит к БД: %s", e)
+        return False
 
 
 # ==========================================================
@@ -147,7 +229,6 @@ def get_hmac_key() -> bytes:
     base_key = get_or_create_key()
     key_bytes = bytes.fromhex(base_key)
 
-    # HMAC-SHA256 от базового ключа с контекстной меткой
     return hmac_mod.new(
         key_bytes,
         b"chestzn-audit-hmac-v1",

@@ -12,6 +12,7 @@
     <Name>ChestZn</Name>
     <RootNamespace>ChestZn</RootNamespace>
     <InterpreterId>MSBuild|env|$(MSBuildProjectFullPath)</InterpreterId>
+    <TestFramework>Pytest</TestFramework>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)' == 'Debug' ">
     <DebugSymbols>true</DebugSymbols>
@@ -22,14 +23,17 @@
     <EnableUnmanagedDebugging>false</EnableUnmanagedDebugging>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="admin_guard.py" />
     <Compile Include="admin_window.py" />
     <Compile Include="auth.py" />
     <Compile Include="backup.py" />
+    <Compile Include="banner.py" />
     <Compile Include="barcode.py" />
     <Compile Include="change_password_window.py" />
     <Compile Include="crypto.py" />
     <Compile Include="db.py" />
     <Compile Include="db_view.py" />
+    <Compile Include="docs_helper.py" />
     <Compile Include="error_handler.py" />
     <Compile Include="export.py" />
     <Compile Include="importer.py" />
@@ -39,6 +43,8 @@
     <Compile Include="operator_window.py" />
     <Compile Include="recovery_window.py" />
     <Compile Include="security.py" />
+    <Compile Include="startup_check.py" />
+    <Compile Include="startup_problems_window.py" />
     <Compile Include="store.py" />
     <Compile Include="styles.py" />
     <Compile Include="test_old_audit.py" />
