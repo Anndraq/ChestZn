@@ -102,6 +102,31 @@ CREATE TABLE IF NOT EXISTS security_questions (
     answer_salt    TEXT NOT NULL,
     updated_at     TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
+
+CREATE TABLE IF NOT EXISTS label_templates (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    code        TEXT NOT NULL UNIQUE,
+    name        TEXT NOT NULL,
+    is_default  INTEGER NOT NULL DEFAULT 0,
+    version     TEXT NOT NULL DEFAULT '1.0',
+    width_mm    REAL NOT NULL DEFAULT 58,
+    height_mm   REAL NOT NULL DEFAULT 40,
+    dpi         INTEGER NOT NULL DEFAULT 203,
+    fields_json TEXT NOT NULL DEFAULT '[]',
+    sort_order  INTEGER NOT NULL DEFAULT 100,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS template_bindings (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    template_code TEXT NOT NULL,
+    gtin_prefix   TEXT NOT NULL,
+    priority      INTEGER NOT NULL DEFAULT 100,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_tpl_bindings_gtin
+    ON template_bindings(gtin_prefix);
 """
 
 

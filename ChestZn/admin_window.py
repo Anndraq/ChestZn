@@ -5,7 +5,8 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLabel,
     QPushButton, QStackedWidget, QTableWidget, QTableWidgetItem,
     QHeaderView, QGridLayout, QSizePolicy, QAbstractItemView,
-    QLineEdit, QComboBox, QMessageBox
+    QLineEdit, QComboBox, QMessageBox, QCheckBox, QSpinBox,
+    QDoubleSpinBox, QInputDialog
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QBrush
@@ -52,6 +53,13 @@ class AdminWindow(QWidget):
         super().__init__(parent)
         self.store = store
         self.toast = Toast(self)
+
+        # Таймер дебаунса для предпросмотра шаблона
+        from PySide6.QtCore import QTimer
+        self._tpl_preview_timer = QTimer(self)
+        self._tpl_preview_timer.setSingleShot(True)
+        self._tpl_preview_timer.setInterval(300)   # 300 мс
+        self._tpl_preview_timer.timeout.connect(self._tpl_refresh_preview_now)
 
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -505,60 +513,229 @@ class AdminWindow(QWidget):
         w = QWidget()
         v = QVBoxLayout(w)
         v.setContentsMargins(24, 20, 24, 20)
-        v.setSpacing(14)
-        tt = QLabel("Шаблоны русификатора"); tt.setStyleSheet("font-size:18px; font-weight:600;")
-        v.addWidget(tt)
+        v.setSpacing(12)
 
-        row = QHBoxLayout(); row.setSpacing(14)
+        # ---------- Заголовок ----------
+        head = QHBoxLayout()
+        tt = QLabel("Шаблоны этикеток")
+        tt.setStyleSheet("font-size:18px; font-weight:600;")
+        head.addWidget(tt)
+        head.addStretch(1)
 
+        btn_new = QPushButton("➕ Новый шаблон")
+        btn_new.clicked.connect(self._tpl_create)
+        head.addWidget(btn_new)
+
+        btn_del = QPushButton("🗑 Удалить")
+        btn_del.clicked.connect(self._tpl_delete)
+        head.addWidget(btn_del)
+
+        v.addLayout(head)
+
+        # ---------- Основная область: 3 колонки ----------
+        row = QHBoxLayout()
+        row.setSpacing(12)
+
+        # === Слева: список шаблонов ===
         self.tpl_list = QTableWidget(0, 2)
-        self.tpl_list.setHorizontalHeaderLabels(["Шаблон", "Версия"])
-        self.tpl_list.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.tpl_list.setHorizontalHeaderLabels(["Шаблон", "По умолч."])
+        hh_l = self.tpl_list.horizontalHeader()
+        hh_l.setSectionResizeMode(0, QHeaderView.Stretch)
+        hh_l.setSectionResizeMode(1, QHeaderView.Fixed)
+        self.tpl_list.setColumnWidth(1, 80)
         self.tpl_list.verticalHeader().setVisible(False)
         self.tpl_list.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.tpl_list.setMaximumWidth(320)
+        self.tpl_list.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.tpl_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.tpl_list.setShowGrid(False)
+        self.tpl_list.setFixedWidth(240)
         self.tpl_list.itemSelectionChanged.connect(self._on_template_select)
         row.addWidget(self.tpl_list)
 
-        self.tpl_fields = QTableWidget(0, 2)
-        self.tpl_fields.setHorizontalHeaderLabels(["Поле", "Обязательность"])
-        self.tpl_fields.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.tpl_fields.verticalHeader().setVisible(False)
-        self.tpl_fields.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        row.addWidget(self.tpl_fields, stretch=1)
+        # === Центр: редактор ===
+        right = QVBoxLayout()
+        right.setSpacing(8)
 
-        preview_wrap = QFrame(); preview_wrap.setObjectName("card")
-        pv = QVBoxLayout(preview_wrap)
-        pv.setContentsMargins(14, 14, 14, 14)
-        pv.setSpacing(10)
-        pv_title = QLabel("ПРЕДПРОСМОТР")
-        pv_title.setStyleSheet("color:#8b97a6; font-size:11px; font-weight:600; letter-spacing:1.5px;")
-        pv.addWidget(pv_title)
+        name_row = QHBoxLayout()
+        name_row.setSpacing(8)
+        name_row.addWidget(QLabel("Название:"))
+        self.tpl_name_edit = QLineEdit()
+        self.tpl_name_edit.textChanged.connect(self._tpl_refresh_preview)
+        name_row.addWidget(self.tpl_name_edit, stretch=1)
+        right.addLayout(name_row)
 
-        label_mock = QFrame(); label_mock.setStyleSheet("background:#fff; border-radius:6px;")
-        lm = QHBoxLayout(label_mock)
-        lm.setContentsMargins(14, 14, 14, 14)
-        lm.setSpacing(14)
+        size_row = QHBoxLayout()
+        size_row.setSpacing(8)
 
-        self.admin_dm = QLabel()
-        self.admin_dm.setFixedSize(90, 90)
-        lm.addWidget(self.admin_dm)
+        size_row.addWidget(QLabel("Ширина:"))
+        self.tpl_w = QDoubleSpinBox()
+        self.tpl_w.setRange(20, 300)
+        self.tpl_w.setDecimals(0)
+        self.tpl_w.setSuffix(" мм")
+        self.tpl_w.setValue(58)
+        self.tpl_w.setFixedWidth(110)
+        self.tpl_w.valueChanged.connect(self._tpl_refresh_preview)
+        size_row.addWidget(self.tpl_w)
 
-        info = QVBoxLayout(); info.setSpacing(2)
-        info.addWidget(self._dark_label("Наушники беспроводные BT-500", bold=True))
-        info.addWidget(self._dark_label("Модель: BT-500"))
-        info.addWidget(self._dark_label("Импортёр: ООО «Ромашка»"))
-        info.addWidget(self._dark_label("Срок годности: 12.2026"))
-        info.addWidget(self._dark_label("Кол-во: 1 шт."))
-        info.addStretch(1)
-        lm.addLayout(info)
-        lm.addStretch(1)
+        size_row.addWidget(QLabel("Высота:"))
+        self.tpl_h = QDoubleSpinBox()
+        self.tpl_h.setRange(15, 300)
+        self.tpl_h.setDecimals(0)
+        self.tpl_h.setSuffix(" мм")
+        self.tpl_h.setValue(40)
+        self.tpl_h.setFixedWidth(110)
+        self.tpl_h.valueChanged.connect(self._tpl_refresh_preview)
+        size_row.addWidget(self.tpl_h)
 
-        pv.addWidget(label_mock)
-        pv.addStretch(1)
-        row.addWidget(preview_wrap, stretch=1)
+        size_row.addSpacing(16)
+        size_row.addWidget(QLabel("DPI:"))
+        self.tpl_dpi = QComboBox()
+        self.tpl_dpi.addItems(["203", "300", "600"])
+        self.tpl_dpi.setFixedWidth(80)
+        size_row.addWidget(self.tpl_dpi)
+
+        size_row.addStretch(1)
+        right.addLayout(size_row)
+
+        # --- Заголовок секции полей + кнопки ---
+        fields_head = QHBoxLayout()
+        fields_head.setSpacing(6)
+
+        lbl_fields = QLabel("ПОЛЯ ЭТИКЕТКИ")
+        lbl_fields.setStyleSheet(
+            "color:#8b97a6; font-size:11px; font-weight:600; letter-spacing:1.5px;"
+        )
+        fields_head.addWidget(lbl_fields)
+        fields_head.addStretch(1)
+
+        btn_add_field = QPushButton("+")
+        btn_add_field.setFixedSize(40, 30)
+        btn_add_field.setToolTip("Добавить поле")
+        btn_add_field.setStyleSheet("font-size:20px; font-weight:700; padding:0;")
+        btn_add_field.clicked.connect(self._tpl_add_field)
+        fields_head.addWidget(btn_add_field)
+
+        btn_up = QPushButton("↑")
+        btn_up.setFixedSize(40, 30)
+        btn_up.setToolTip("Переместить вверх")
+        btn_up.setStyleSheet("font-size:18px; font-weight:700; padding:0;")
+        btn_up.clicked.connect(lambda: self._tpl_move_field(-1))
+        fields_head.addWidget(btn_up)
+
+        btn_down = QPushButton("↓")
+        btn_down.setFixedSize(40, 30)
+        btn_down.setToolTip("Переместить вниз")
+        btn_down.setStyleSheet("font-size:18px; font-weight:700; padding:0;")
+        btn_down.clicked.connect(lambda: self._tpl_move_field(1))
+        fields_head.addWidget(btn_down)
+
+        right.addLayout(fields_head)
+
+        # --- Таблица полей ---
+        self.tpl_fields = QTableWidget(0, 5)
+        self.tpl_fields.setHorizontalHeaderLabels(
+            ["Поле", "Подпись на этикетке", "Обяз.", "Шрифт", ""]
+        )
+        hh = self.tpl_fields.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.Interactive)
+        hh.setSectionResizeMode(1, QHeaderView.Stretch)
+        hh.setSectionResizeMode(2, QHeaderView.Fixed)
+        hh.setSectionResizeMode(3, QHeaderView.Fixed)
+        hh.setSectionResizeMode(4, QHeaderView.Fixed)
+        self.tpl_fields.setColumnWidth(0, 130)
+        self.tpl_fields.setColumnWidth(2, 50)
+        self.tpl_fields.setColumnWidth(3, 85)
+        self.tpl_fields.setColumnWidth(4, 42)
+        self.tpl_fields.verticalHeader().setVisible(True)
+        self.tpl_fields.verticalHeader().setFixedWidth(30)
+        self.tpl_fields.verticalHeader().setDefaultSectionSize(34)
+        self.tpl_fields.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.tpl_fields.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.tpl_fields.setShowGrid(False)
+        self.tpl_fields.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.tpl_fields.itemChanged.connect(lambda _: self._tpl_refresh_preview())
+        right.addWidget(self.tpl_fields, stretch=1)
+
+        # --- Кнопки сохранения ---
+        save_row = QHBoxLayout()
+        save_row.setSpacing(8)
+
+        btn_save = QPushButton("💾 Сохранить шаблон")
+        btn_save.setProperty("primary", True)
+        btn_save.clicked.connect(self._tpl_save)
+        save_row.addWidget(btn_save)
+
+        btn_make_default = QPushButton("⭐ По умолчанию")
+        btn_make_default.clicked.connect(self._tpl_make_default)
+        save_row.addWidget(btn_make_default)
+
+        save_row.addStretch(1)
+        right.addLayout(save_row)
+
+        row.addLayout(right, stretch=1)
+
+        # === Справа: предпросмотр ===
+        row.addWidget(self._build_template_preview())
 
         v.addLayout(row, stretch=1)
+
+        # ---------- Привязки GTIN ----------
+        card_bind = QFrame()
+        card_bind.setObjectName("card")
+        cb = QVBoxLayout(card_bind)
+        cb.setContentsMargins(18, 12, 18, 12)
+        cb.setSpacing(6)
+
+        tt_bind = QLabel("ПРИВЯЗКА К GTIN (необязательно)")
+        tt_bind.setStyleSheet(
+            "color:#8b97a6; font-size:11px; font-weight:600; letter-spacing:1.5px;"
+        )
+        cb.addWidget(tt_bind)
+
+        desc_bind = QLabel(
+            "Какой шаблон использовать для GTIN, начинающегося с этих цифр. "
+            "Пример: «046001» — этот шаблон для всех GTIN на 046001."
+        )
+        desc_bind.setStyleSheet("color:#8b97a6; font-size:11px;")
+        desc_bind.setWordWrap(True)
+        cb.addWidget(desc_bind)
+
+        bind_row = QHBoxLayout()
+        bind_row.setSpacing(8)
+
+        bind_row.addWidget(QLabel("GTIN-префикс:"))
+        self.bind_gtin = QLineEdit()
+        self.bind_gtin.setPlaceholderText("4–14 цифр")
+        self.bind_gtin.setFixedWidth(140)
+        bind_row.addWidget(self.bind_gtin)
+
+        btn_bind = QPushButton("🔗 Привязать")
+        btn_bind.clicked.connect(self._tpl_bind_create)
+        bind_row.addWidget(btn_bind)
+
+        bind_row.addStretch(1)
+        cb.addLayout(bind_row)
+
+        self.bind_table = QTableWidget(0, 4)
+        self.bind_table.setHorizontalHeaderLabels(
+            ["GTIN-префикс", "Шаблон", "Приоритет", ""]
+        )
+        hb = self.bind_table.horizontalHeader()
+        hb.setSectionResizeMode(0, QHeaderView.Fixed)
+        hb.setSectionResizeMode(1, QHeaderView.Stretch)
+        hb.setSectionResizeMode(2, QHeaderView.Fixed)
+        hb.setSectionResizeMode(3, QHeaderView.Fixed)
+        self.bind_table.setColumnWidth(0, 140)
+        self.bind_table.setColumnWidth(2, 90)
+        self.bind_table.setColumnWidth(3, 50)
+        self.bind_table.verticalHeader().setVisible(False)
+        self.bind_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.bind_table.setShowGrid(False)
+        self.bind_table.setFixedHeight(90)
+        cb.addWidget(self.bind_table)
+
+        v.addWidget(card_bind)
+
         return w
 
     def _dark_label(self, text: str, bold: bool = False) -> QLabel:
@@ -568,34 +745,572 @@ class AdminWindow(QWidget):
         return lbl
 
     def _refresh_templates(self):
-        t = self.tpl_list
-        t.setRowCount(0)
-        for tpl in self.store.templates:
-            r = t.rowCount(); t.insertRow(r)
-            t.setItem(r, 0, cell(tpl["name"]))
-            t.setItem(r, 1, cell(tpl["version"], mono=True))
-        if t.rowCount():
-            t.selectRow(0)
+        # Блокируем сигнал выбора — чтобы selectRow(0) не дёргал
+        # _on_template_select дважды
+        self.tpl_list.blockSignals(True)
+        try:
+            self.tpl_list.setRowCount(0)
+            tpls = self.store.list_templates()
+            for tpl in tpls:
+                r = self.tpl_list.rowCount()
+                self.tpl_list.insertRow(r)
+                self.tpl_list.setItem(r, 0, cell(tpl["name"]))
+                self.tpl_list.setItem(r, 1, cell(
+                    "⭐" if tpl["is_default"] else "",
+                    "#f59e0b"
+                ))
+        finally:
+            self.tpl_list.blockSignals(False)
+
+        if self.tpl_list.rowCount():
+            self.tpl_list.selectRow(0)
+
+        self._refresh_bindings()
 
     def _on_template_select(self):
         rows = self.tpl_list.selectionModel().selectedRows()
         if not rows:
             return
         idx = rows[0].row()
-        tpl = self.store.templates[idx]
+        tpls = self.store.list_templates()
+        if idx >= len(tpls):
+            return
+
+        self._current_tpl_code = tpls[idx]["code"]
+        tpl = tpls[idx]
+
+        # Блокируем сигналы на время заполнения —
+        # чтобы не дёргать _tpl_refresh_preview много раз подряд
+        self.tpl_name_edit.blockSignals(True)
+        self.tpl_w.blockSignals(True)
+        self.tpl_h.blockSignals(True)
+        self.tpl_fields.blockSignals(True)
+
+        try:
+            # --- Поля шаблона ---
+            self.tpl_name_edit.setText(tpl["name"])
+            self.tpl_w.setValue(float(tpl["width_mm"]))
+            self.tpl_h.setValue(float(tpl["height_mm"]))
+            self.tpl_dpi.setCurrentText(str(tpl["dpi"]))
+
+            # --- Таблица полей ---
+            t = self.tpl_fields
+            t.setRowCount(0)
+
+            for f in tpl["fields"]:
+                r = t.rowCount()
+                t.insertRow(r)
+
+                # Имя поля — не редактируется
+                item_name = QTableWidgetItem(f.get("name", ""))
+                item_name.setFlags(item_name.flags() & ~Qt.ItemIsEditable)
+                t.setItem(r, 0, item_name)
+
+                # Подпись — редактируется
+                t.setItem(r, 1, QTableWidgetItem(f.get("label", "")))
+
+                # Чекбокс «обязательное» — по центру
+                chk = QCheckBox()
+                chk.setChecked(bool(f.get("required")))
+                wrap_chk = QWidget()
+                wl = QHBoxLayout(wrap_chk)
+                wl.setContentsMargins(0, 0, 0, 0)
+                wl.addWidget(chk)
+                wl.setAlignment(Qt.AlignCenter)
+                t.setCellWidget(r, 2, wrap_chk)
+
+                # Шрифт — по центру
+                spin = QSpinBox()
+                spin.setRange(6, 40)
+                spin.setValue(int(f.get("font_size", 12)))
+                spin.setAlignment(Qt.AlignCenter)
+                t.setCellWidget(r, 3, spin)
+
+                # Кнопка удаления — по центру
+                btn_rm = QPushButton("×")
+                btn_rm.setFixedSize(32, 26)
+                btn_rm.setStyleSheet(
+                    "color:#ef4444; border:none; font-weight:700; "
+                    "font-size:18px; padding:0; background:transparent;"
+                )
+                btn_rm.setCursor(Qt.PointingHandCursor)
+                btn_rm.clicked.connect(lambda _, rr=r: self._tpl_remove_field(rr))
+
+                wrap_rm = QWidget()
+                wl2 = QHBoxLayout(wrap_rm)
+                wl2.setContentsMargins(0, 0, 0, 0)
+                wl2.addWidget(btn_rm)
+                wl2.setAlignment(Qt.AlignCenter)
+                t.setCellWidget(r, 4, wrap_rm)
+
+            t.resizeRowsToContents()
+        finally:
+            self.tpl_name_edit.blockSignals(False)
+            self.tpl_w.blockSignals(False)
+            self.tpl_h.blockSignals(False)
+            self.tpl_fields.blockSignals(False)
+
+        # Обновить предпросмотр — один раз, после всего
+        self._tpl_refresh_preview()
+
+    # ==================================================================
+    # Работа с шаблонами — поля, CRUD, привязки
+    # ==================================================================
+    def _current_template(self):
+        """Вернуть текущий выбранный шаблон (dict) или None."""
+        rows = self.tpl_list.selectionModel().selectedRows()
+        if not rows:
+            return None
+        idx = rows[0].row()
+        tpls = self.store.list_templates()
+        if idx >= len(tpls):
+            return None
+        return tpls[idx]
+
+    def _tpl_add_field(self):
+        """Добавить пустое поле в конец."""
+        name, ok = QInputDialog.getText(
+            self, "Новое поле",
+            "Системное имя (например, country, manufacturer, batch):"
+        )
+        if not ok or not name.strip():
+            return
+        name = name.strip().lower().replace(" ", "_")
 
         t = self.tpl_fields
-        t.setRowCount(0)
-        for f in tpl["fields"]:
-            r = t.rowCount(); t.insertRow(r)
-            t.setItem(r, 0, cell(f["name"], mono=True))
-            if f["required"]:
-                t.setItem(r, 1, cell("обязательное", "#ef4444"))
-            else:
-                t.setItem(r, 1, cell("опционально", "#8b97a6"))
+        r = t.rowCount()
+        t.insertRow(r)
 
-        sample = "(01)04600123456782(21)SN0004821(91)ABCD(92)XYZ12345"
-        self.admin_dm.setPixmap(render_datamatrix(sample, 90))
+        # Имя поля — не редактируется
+        item_name = QTableWidgetItem(name)
+        item_name.setFlags(item_name.flags() & ~Qt.ItemIsEditable)
+        t.setItem(r, 0, item_name)
+
+        # Подпись — редактируется
+        t.setItem(r, 1, QTableWidgetItem(name))
+
+        # Чекбокс «обязательное» — по центру
+        chk = QCheckBox()
+        wrap_chk = QWidget()
+        wl = QHBoxLayout(wrap_chk)
+        wl.setContentsMargins(0, 0, 0, 0)
+        wl.addWidget(chk)
+        wl.setAlignment(Qt.AlignCenter)
+        t.setCellWidget(r, 2, wrap_chk)
+
+        # Шрифт — по центру
+        spin = QSpinBox()
+        spin.setRange(6, 40)
+        spin.setValue(12)
+        spin.setAlignment(Qt.AlignCenter)
+        t.setCellWidget(r, 3, spin)
+
+        # Кнопка удаления — по центру, курсор-указатель
+        btn_rm = QPushButton("✕")
+        btn_rm.setStyleSheet("color:#ef4444; border:none; font-weight:600;")
+        btn_rm.setCursor(Qt.PointingHandCursor)
+        btn_rm.clicked.connect(lambda _, rr=r: self._tpl_remove_field(rr))
+
+        wrap_rm = QWidget()
+        wl2 = QHBoxLayout(wrap_rm)
+        wl2.setContentsMargins(0, 0, 0, 0)
+        wl2.addWidget(btn_rm)
+        wl2.setAlignment(Qt.AlignCenter)
+        t.setCellWidget(r, 4, wrap_rm)
+
+        t.resizeRowsToContents()
+        self._tpl_refresh_preview()
+
+    def _tpl_remove_field(self, row_idx: int):
+        """Удалить поле из таблицы."""
+        t = self.tpl_fields
+        if 0 <= row_idx < t.rowCount():
+            t.removeRow(row_idx)
+            # Переподключить кнопки к актуальным индексам
+            self._relink_field_buttons()
+            self._tpl_refresh_preview()
+
+    def _relink_field_buttons(self):
+        """Переподключить кнопки удаления к правильным индексам (после удаления)."""
+        t = self.tpl_fields
+        for r in range(t.rowCount()):
+            btn = t.cellWidget(r, 4)
+            if btn:
+                try:
+                    btn.clicked.disconnect()
+                except Exception:
+                    pass
+                btn.clicked.connect(lambda _, rr=r: self._tpl_remove_field(rr))
+
+    def _tpl_move_field(self, direction: int):
+        """Переместить выбранное поле вверх (-1) или вниз (+1)."""
+        t = self.tpl_fields
+        rows = t.selectionModel().selectedRows()
+        if not rows:
+            return
+        idx = rows[0].row()
+        new_idx = idx + direction
+        if new_idx < 0 or new_idx >= t.rowCount():
+            return
+
+        # Сохранить данные всех полей
+        all_fields = []
+        for r in range(t.rowCount()):
+            name = t.item(r, 0).text() if t.item(r, 0) else ""
+            label = t.item(r, 1).text() if t.item(r, 1) else ""
+            wrap = t.cellWidget(r, 2)
+            chk = wrap.findChild(QCheckBox) if wrap else None
+            required = chk.isChecked() if chk else False
+            spin = t.cellWidget(r, 3)
+            font_size = spin.value() if spin else 12
+            all_fields.append({
+                "name": name, "label": label,
+                "required": required, "font_size": font_size
+            })
+
+        all_fields[idx], all_fields[new_idx] = all_fields[new_idx], all_fields[idx]
+
+                # Перерисовать
+        t.setRowCount(0)
+        for f in all_fields:
+            r = t.rowCount(); t.insertRow(r)
+
+            item_name = QTableWidgetItem(f["name"])
+            item_name.setFlags(item_name.flags() & ~Qt.ItemIsEditable)
+            t.setItem(r, 0, item_name)
+
+            t.setItem(r, 1, QTableWidgetItem(f["label"]))
+
+            chk = QCheckBox(); chk.setChecked(f["required"])
+            wrap_chk = QWidget()
+            wl = QHBoxLayout(wrap_chk)
+            wl.setContentsMargins(0, 0, 0, 0)
+            wl.addWidget(chk)
+            wl.setAlignment(Qt.AlignCenter)
+            t.setCellWidget(r, 2, wrap_chk)
+
+            spin = QSpinBox(); spin.setRange(6, 40)
+            spin.setValue(f["font_size"])
+            spin.setAlignment(Qt.AlignCenter)
+            t.setCellWidget(r, 3, spin)
+
+            btn_rm = QPushButton("✕")
+            btn_rm.setStyleSheet("color:#ef4444; border:none; font-weight:600;")
+            btn_rm.setCursor(Qt.PointingHandCursor)
+            btn_rm.clicked.connect(lambda _, rr=r: self._tpl_remove_field(rr))
+
+            wrap_rm = QWidget()
+            wl2 = QHBoxLayout(wrap_rm)
+            wl2.setContentsMargins(0, 0, 0, 0)
+            wl2.addWidget(btn_rm)
+            wl2.setAlignment(Qt.AlignCenter)
+            t.setCellWidget(r, 4, wrap_rm)
+
+        t.selectRow(new_idx)
+        self._tpl_refresh_preview()
+
+    def _collect_fields_from_table(self) -> list:
+        """Собрать поля из таблицы в список dict."""
+        t = self.tpl_fields
+        fields = []
+        for r in range(t.rowCount()):
+            name = t.item(r, 0).text() if t.item(r, 0) else ""
+            label = t.item(r, 1).text() if t.item(r, 1) else ""
+            wrap = t.cellWidget(r, 2)
+            chk = wrap.findChild(QCheckBox) if wrap else None
+            required = chk.isChecked() if chk else False
+            spin = t.cellWidget(r, 3)
+            font_size = spin.value() if spin else 12
+            if not name:
+                continue
+            fields.append({
+                "name": name, "label": label,
+                "required": required, "font_size": font_size,
+            })
+        return fields
+
+    def _tpl_save(self):
+        """Сохранить текущий шаблон."""
+        tpl = self._current_template()
+        if not tpl:
+            self.toast.show_message("Не выбран шаблон", "warn")
+            return
+
+        name = self.tpl_name_edit.text().strip()
+        if not name:
+            self.toast.show_message("Введите название шаблона", "warn")
+            return
+
+        fields = self._collect_fields_from_table()
+        if not fields:
+            self.toast.show_message("Добавьте хотя бы одно поле", "warn")
+            return
+
+        result = self.store.update_template(
+            code=tpl["code"],
+            name=name,
+            fields=fields,
+            width_mm=self.tpl_w.value(),
+            height_mm=self.tpl_h.value(),
+            dpi=int(self.tpl_dpi.currentText()),
+        )
+        if result["ok"]:
+            self.toast.show_message(result["info"], "ok")
+            self._refresh_templates()
+        else:
+            self.toast.show_message(f"Ошибка: {result['info']}", "err")
+
+    def _tpl_make_default(self):
+        """Сделать текущий шаблон шаблоном по умолчанию."""
+        tpl = self._current_template()
+        if not tpl:
+            return
+        result = self.store.update_template(code=tpl["code"], is_default=True)
+        if result["ok"]:
+            self.toast.show_message(f"«{tpl['name']}» — по умолчанию", "ok")
+            self._refresh_templates()
+        else:
+            self.toast.show_message(f"Ошибка: {result['info']}", "err")
+
+    def _tpl_create(self):
+        """Создать новый шаблон."""
+        code, ok = QInputDialog.getText(
+            self, "Новый шаблон",
+            "Код (латиница, без пробелов, уникальный):"
+        )
+        if not ok or not code.strip():
+            return
+        code = code.strip().lower().replace(" ", "_")
+
+        name, ok = QInputDialog.getText(
+            self, "Новый шаблон", "Название:"
+        )
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+
+        # Базовый набор полей
+        default_fields = [
+            {"name": "dataMatrix", "label": "", "required": True, "font_size": 0},
+            {"name": "name_ru", "label": "Наименование", "required": True, "font_size": 13},
+            {"name": "importer", "label": "Импортёр", "required": True, "font_size": 10},
+        ]
+
+        result = self.store.create_template(
+            code=code, name=name, fields=default_fields
+        )
+        if result["ok"]:
+            self.toast.show_message(result["info"], "ok")
+            self._refresh_templates()
+        else:
+            self.toast.show_message(f"Ошибка: {result['info']}", "err")
+
+    def _tpl_delete(self):
+        """Удалить текущий шаблон."""
+        tpl = self._current_template()
+        if not tpl:
+            self.toast.show_message("Не выбран шаблон", "warn")
+            return
+
+        reply = QMessageBox.warning(
+            self, "Удалить шаблон?",
+            f"Удалить «{tpl['name']}»?\n\n"
+            "Это действие нельзя отменить.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        result = self.store.delete_template(tpl["code"])
+        if result["ok"]:
+            self.toast.show_message(result["info"], "ok")
+            self._refresh_templates()
+        else:
+            self.toast.show_message(f"Ошибка: {result['info']}", "err")
+
+    # ---------- Привязки ----------
+    def _refresh_bindings(self):
+        """Заполнить таблицу привязок."""
+        self.bind_table.setRowCount(0)
+        bindings = self.store.list_bindings()
+        tpls = {t["code"]: t["name"] for t in self.store.list_templates()}
+
+        for b in bindings:
+            r = self.bind_table.rowCount()
+            self.bind_table.insertRow(r)
+            self.bind_table.setItem(r, 0, cell(b["gtin_prefix"], mono=True))
+            self.bind_table.setItem(r, 1, cell(tpls.get(b["template_code"], b["template_code"])))
+            self.bind_table.setItem(r, 2, cell(str(b["priority"])))
+
+            btn = QPushButton("✕")
+            btn.setFixedWidth(32)
+            btn.setStyleSheet("color:#ef4444; border:none;")
+            btn.clicked.connect(lambda _, bid=b["id"]: self._tpl_bind_delete(bid))
+            self.bind_table.setCellWidget(r, 3, btn)
+
+    def _tpl_bind_create(self):
+        """Создать привязку GTIN-префикса к текущему шаблону."""
+        tpl = self._current_template()
+        if not tpl:
+            self.toast.show_message("Выберите шаблон слева", "warn")
+            return
+        prefix = self.bind_gtin.text().strip()
+        if not prefix:
+            self.toast.show_message("Введите GTIN-префикс", "warn")
+            return
+        result = self.store.create_binding(tpl["code"], prefix)
+        if result["ok"]:
+            self.toast.show_message(result["info"], "ok")
+            self.bind_gtin.clear()
+            self._refresh_bindings()
+        else:
+            self.toast.show_message(f"Ошибка: {result['info']}", "err")
+
+    def _tpl_bind_delete(self, binding_id: int):
+        result = self.store.delete_binding(binding_id)
+        if result["ok"]:
+            self.toast.show_message(result["info"], "ok")
+            self._refresh_bindings()
+        else:
+            self.toast.show_message(f"Ошибка: {result['info']}", "err")
+
+    # ==================================================================
+    # Предпросмотр шаблона
+    # ==================================================================
+    def _build_template_preview(self) -> QFrame:
+        """Панель предпросмотра шаблона (правая колонка)."""
+        card = QFrame()
+        card.setObjectName("card")
+        card.setFixedWidth(320)
+
+        v = QVBoxLayout(card)
+        v.setContentsMargins(14, 14, 14, 14)
+        v.setSpacing(10)
+
+        title = QLabel("ПРЕДПРОСМОТР ЭТИКЕТКИ")
+        title.setStyleSheet(
+            "color:#8b97a6; font-size:11px; font-weight:600; letter-spacing:1.5px;"
+        )
+        v.addWidget(title)
+
+        # Белая область — сама этикетка
+        self.tpl_preview_area = QFrame()
+        self.tpl_preview_area.setStyleSheet(
+            "background:#ffffff; border-radius:6px;"
+        )
+        self.tpl_preview_area.setMinimumHeight(180)
+
+        pv = QHBoxLayout(self.tpl_preview_area)
+        pv.setContentsMargins(12, 12, 12, 12)
+        pv.setSpacing(10)
+        pv.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+
+        # DataMatrix слева
+        self.tpl_preview_dm = QLabel()
+        self.tpl_preview_dm.setFixedSize(100, 100)
+        self.tpl_preview_dm.setStyleSheet("background:transparent;")
+        self.tpl_preview_dm.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        pv.addWidget(self.tpl_preview_dm, alignment=Qt.AlignTop)
+
+        # Текстовые поля справа
+        self.tpl_preview_text = QVBoxLayout()
+        self.tpl_preview_text.setSpacing(3)
+        self.tpl_preview_text.setAlignment(Qt.AlignTop)
+        pv.addLayout(self.tpl_preview_text, stretch=1)
+
+        v.addWidget(self.tpl_preview_area)
+
+        # Размеры
+        self.tpl_preview_size = QLabel("")
+        self.tpl_preview_size.setStyleSheet(
+            "color:#8b97a6; font-size:11px;"
+        )
+        self.tpl_preview_size.setAlignment(Qt.AlignCenter)
+        v.addWidget(self.tpl_preview_size)
+
+        v.addStretch(1)
+
+        return card
+
+    def _tpl_refresh_preview(self):
+        """Запустить дебаунс — перерисует предпросмотр через 300 мс."""
+        if hasattr(self, "_tpl_preview_timer"):
+            self._tpl_preview_timer.start()   # перезапускает таймер
+
+    def _tpl_refresh_preview_now(self):
+        """Реальная перерисовка предпросмотра."""
+        if not hasattr(self, "tpl_preview_text"):
+            return
+
+        # Очистить старые текстовые поля
+        while self.tpl_preview_text.count():
+            item = self.tpl_preview_text.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        try:
+            fields = self._collect_fields_from_table()
+        except Exception:
+            fields = []
+
+        samples = {
+            "name_ru":     "Наушники беспроводные BT-500",
+            "model":       "BT-500",
+            "importer":    "ООО «Ромашка», г. Москва",
+            "exp_date":    "12.2026",
+            "qty":         "1 шт.",
+            "material":    "Кожа натуральная",
+            "size_eu":     "42",
+            "composition": "Хлопок 100%",
+            "country":     "Китай (CN)",
+            "lot":         "LOT-2025-04",
+            "serial":      "SN0004821",
+            "gtin":        "04600123456782",
+            "manufacturer": "Shenzhen Tech Co.",
+            "batch":       "B-2025-04",
+        }
+
+        has_dm = False
+
+        for f in fields:
+            name = f.get("name", "")
+            label = f.get("label", "") or ""
+            font_size = int(f.get("font_size", 12)) or 11
+
+            if name == "dataMatrix":
+                has_dm = True
+                continue
+
+            value = samples.get(name, f"[{name}]")
+            text = f"{label}: {value}" if label else value
+
+            lbl = QLabel(text)
+            lbl.setStyleSheet(
+                f"color:#000000; background:transparent; "
+                f"font-family:'Consolas', monospace; "
+                f"font-size:{max(9, min(font_size, 20))}px;"
+            )
+            lbl.setWordWrap(True)
+            self.tpl_preview_text.addWidget(lbl)
+
+        if has_dm:
+            sample_code = "(01)04600123456782(21)SN0004821(91)ABCD(92)XYZ12345"
+            pix = render_datamatrix(sample_code, 100)
+            self.tpl_preview_dm.setPixmap(pix)
+            self.tpl_preview_dm.show()
+        else:
+            self.tpl_preview_dm.hide()
+
+        try:
+            w_mm = self.tpl_w.value()
+            h_mm = self.tpl_h.value()
+            dpi = self.tpl_dpi.currentText()
+            self.tpl_preview_size.setText(
+                f"{int(w_mm)} × {int(h_mm)} мм · {dpi} DPI"
+            )
+        except Exception:
+            pass
 
     # ==================================================================
     # POOL

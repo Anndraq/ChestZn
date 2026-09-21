@@ -29,35 +29,7 @@ class Store:
              "printer": "Godex G500", "template": "electronics"},
         ]
 
-        self.templates = [
-            {"id": "electronics", "name": "Электроника", "default": True,
-             "version": "1.4", "size": "58×40 мм",
-             "fields": [
-                 {"name": "dataMatrix", "required": True},
-                 {"name": "name_ru", "required": True},
-                 {"name": "model", "required": False},
-                 {"name": "importer", "required": True},
-                 {"name": "exp_date", "required": False},
-                 {"name": "qty", "required": False},
-             ]},
-            {"id": "shoes", "name": "Обувь (ТР ТС 017)", "default": False,
-             "version": "1.2", "size": "58×40 мм",
-             "fields": [
-                 {"name": "dataMatrix", "required": True},
-                 {"name": "name_ru", "required": True},
-                 {"name": "material", "required": True},
-                 {"name": "size_eu", "required": True},
-                 {"name": "importer", "required": True},
-             ]},
-            {"id": "clothing", "name": "Одежда (ТР ТС 017)", "default": False,
-             "version": "1.1", "size": "58×40 мм",
-             "fields": [
-                 {"name": "dataMatrix", "required": True},
-                 {"name": "name_ru", "required": True},
-                 {"name": "composition", "required": True},
-                 {"name": "importer", "required": True},
-             ]},
-        ]
+
 
         self.integrations = {
             "gis_mt": {"key": "gis_mt", "name": "ГИС МТ / Честный знак",
@@ -73,6 +45,7 @@ class Store:
         # ---------- Инициализация БД ----------
         self._ensure_seed_data()
         self._ensure_users_seeded()
+        self._ensure_templates_seeded()
 
         # --- Миграция HMAC для audit ---
         try:
@@ -228,6 +201,302 @@ class Store:
         """Всего кодов в пуле."""
         with db.get_conn() as conn:
             return conn.execute("SELECT COUNT(*) AS c FROM pool_codes").fetchone()["c"]
+
+    # ==========================================================
+    # Шаблоны этикеток
+    # ==========================================================
+    _DEFAULT_TEMPLATES = [
+        {
+            "code": "electronics",
+            "name": "Электроника",
+            "is_default": 1,
+            "width_mm": 58, "height_mm": 40, "dpi": 203,
+            "fields": [
+                {"name": "dataMatrix", "label": "", "required": True, "order": 1, "font_size": 0},
+                {"name": "name_ru", "label": "Наименование", "required": True, "order": 2, "font_size": 13},
+                {"name": "model", "label": "Модель", "required": False, "order": 3, "font_size": 11},
+                {"name": "importer", "label": "Импортёр", "required": True, "order": 4, "font_size": 10},
+                {"name": "exp_date", "label": "Срок годности", "required": False, "order": 5, "font_size": 10},
+                {"name": "qty", "label": "Кол-во", "required": False, "order": 6, "font_size": 10},
+            ],
+        },
+        {
+            "code": "shoes",
+            "name": "Обувь (ТР ТС 017)",
+            "is_default": 0,
+            "width_mm": 58, "height_mm": 40, "dpi": 203,
+            "fields": [
+                {"name": "dataMatrix", "label": "", "required": True, "order": 1, "font_size": 0},
+                {"name": "name_ru", "label": "Наименование", "required": True, "order": 2, "font_size": 13},
+                {"name": "material", "label": "Материал", "required": True, "order": 3, "font_size": 11},
+                {"name": "size_eu", "label": "Размер EU", "required": True, "order": 4, "font_size": 11},
+                {"name": "importer", "label": "Импортёр", "required": True, "order": 5, "font_size": 10},
+            ],
+        },
+        {
+            "code": "clothing",
+            "name": "Одежда (ТР ТС 017)",
+            "is_default": 0,
+            "width_mm": 58, "height_mm": 40, "dpi": 203,
+            "fields": [
+                {"name": "dataMatrix", "label": "", "required": True, "order": 1, "font_size": 0},
+                {"name": "name_ru", "label": "Наименование", "required": True, "order": 2, "font_size": 13},
+                {"name": "composition", "label": "Состав", "required": True, "order": 3, "font_size": 11},
+                {"name": "importer", "label": "Импортёр", "required": True, "order": 4, "font_size": 10},
+            ],
+        },
+    ]
+
+    def _ensure_templates_seeded(self):
+        """Наполнить таблицу шаблонов, если она пустая."""
+        import json
+        with db.get_conn() as conn:
+            n = conn.execute(
+                "SELECT COUNT(*) AS c FROM label_templates"
+            ).fetchone()["c"]
+            if n > 0:
+                return
+
+            for i, tpl in enumerate(self._DEFAULT_TEMPLATES):
+                conn.execute(
+                    "INSERT INTO label_templates "
+                    "(code, name, is_default, width_mm, height_mm, dpi, "
+                    " fields_json, sort_order) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (tpl["code"], tpl["name"], tpl["is_default"],
+                     tpl["width_mm"], tpl["height_mm"], tpl["dpi"],
+                     json.dumps(tpl["fields"], ensure_ascii=False), i * 10)
+                )
+
+    def list_templates(self) -> list:
+        """Список шаблонов с полями."""
+        import json
+        with db.get_conn() as conn:
+            rows = conn.execute(
+                "SELECT id, code, name, is_default, version, "
+                "       width_mm, height_mm, dpi, fields_json, sort_order "
+                "FROM label_templates ORDER BY sort_order, id"
+            ).fetchall()
+
+        result = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["fields"] = json.loads(d["fields_json"])
+            except Exception:
+                d["fields"] = []
+            d.pop("fields_json", None)
+            result.append(d)
+        return result
+
+    def get_template(self, code: str):
+        """Один шаблон по коду."""
+        import json
+        with db.get_conn() as conn:
+            r = conn.execute(
+                "SELECT id, code, name, is_default, version, "
+                "       width_mm, height_mm, dpi, fields_json, sort_order "
+                "FROM label_templates WHERE code = ?",
+                (code,)
+            ).fetchone()
+        if not r:
+            return None
+        d = dict(r)
+        try:
+            d["fields"] = json.loads(d["fields_json"])
+        except Exception:
+            d["fields"] = []
+        d.pop("fields_json", None)
+        return d
+
+    def get_default_template(self):
+        """Шаблон по умолчанию."""
+        with db.get_conn() as conn:
+            r = conn.execute(
+                "SELECT code FROM label_templates "
+                "WHERE is_default = 1 LIMIT 1"
+            ).fetchone()
+            if not r:
+                r = conn.execute(
+                    "SELECT code FROM label_templates "
+                    "ORDER BY sort_order, id LIMIT 1"
+                ).fetchone()
+        return self.get_template(r["code"]) if r else None
+
+    def create_template(self, code: str, name: str, fields: list = None,
+                        width_mm: float = 58, height_mm: float = 40,
+                        dpi: int = 203, is_default: bool = False) -> dict:
+        """Создать шаблон."""
+        import json
+        fields = fields or []
+        try:
+            with db.get_conn() as conn:
+                # Если ставим как default — снять с других
+                if is_default:
+                    conn.execute(
+                        "UPDATE label_templates SET is_default = 0"
+                    )
+                conn.execute(
+                    "INSERT INTO label_templates "
+                    "(code, name, is_default, width_mm, height_mm, dpi, "
+                    " fields_json, sort_order) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (code, name, 1 if is_default else 0,
+                     width_mm, height_mm, dpi,
+                     json.dumps(fields, ensure_ascii=False), 100)
+                )
+            return {"ok": True, "info": f"Шаблон «{name}» создан"}
+        except Exception as e:
+            return {"ok": False, "info": str(e)}
+
+    def update_template(self, code: str, name: str = None,
+                        fields: list = None, width_mm: float = None,
+                        height_mm: float = None, dpi: int = None,
+                        is_default: bool = None) -> dict:
+        """Обновить шаблон."""
+        import json
+        tpl = self.get_template(code)
+        if not tpl:
+            return {"ok": False, "info": "Шаблон не найден"}
+
+        new_name = name if name is not None else tpl["name"]
+        new_fields = fields if fields is not None else tpl["fields"]
+        new_w = width_mm if width_mm is not None else tpl["width_mm"]
+        new_h = height_mm if height_mm is not None else tpl["height_mm"]
+        new_dpi = dpi if dpi is not None else tpl["dpi"]
+        new_default = tpl["is_default"] if is_default is None else (1 if is_default else 0)
+
+        try:
+            with db.get_conn() as conn:
+                if new_default:
+                    conn.execute(
+                        "UPDATE label_templates SET is_default = 0 "
+                        "WHERE code != ?", (code,)
+                    )
+                conn.execute(
+                    "UPDATE label_templates SET "
+                    "  name = ?, fields_json = ?, width_mm = ?, "
+                    "  height_mm = ?, dpi = ?, is_default = ?, "
+                    "  updated_at = datetime('now','localtime') "
+                    "WHERE code = ?",
+                    (new_name, json.dumps(new_fields, ensure_ascii=False),
+                     new_w, new_h, new_dpi, new_default, code)
+                )
+            return {"ok": True, "info": f"Шаблон «{new_name}» сохранён"}
+        except Exception as e:
+            return {"ok": False, "info": str(e)}
+
+    def delete_template(self, code: str) -> dict:
+        """Удалить шаблон (если он не default и не используется)."""
+        tpl = self.get_template(code)
+        if not tpl:
+            return {"ok": False, "info": "Шаблон не найден"}
+        if tpl["is_default"]:
+            return {"ok": False, "info": "Нельзя удалить шаблон по умолчанию"}
+
+        try:
+            with db.get_conn() as conn:
+                conn.execute(
+                    "DELETE FROM template_bindings WHERE template_code = ?",
+                    (code,)
+                )
+                conn.execute(
+                    "DELETE FROM label_templates WHERE code = ?", (code,)
+                )
+            return {"ok": True, "info": f"Шаблон «{tpl['name']}» удалён"}
+        except Exception as e:
+            return {"ok": False, "info": str(e)}
+
+    # ---------- Привязки к GTIN ----------
+    def list_bindings(self) -> list:
+        """Список привязок шаблонов к GTIN-префиксам."""
+        with db.get_conn() as conn:
+            rows = conn.execute(
+                "SELECT id, template_code, gtin_prefix, priority, created_at "
+                "FROM template_bindings ORDER BY priority, gtin_prefix"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def create_binding(self, template_code: str, gtin_prefix: str,
+                       priority: int = 100) -> dict:
+        """Создать привязку GTIN-префикса к шаблону."""
+        gtin_prefix = (gtin_prefix or "").strip()
+        if not gtin_prefix:
+            return {"ok": False, "info": "Пустой GTIN-префикс"}
+        if not gtin_prefix.isdigit():
+            return {"ok": False, "info": "GTIN-префикс должен содержать только цифры"}
+        if len(gtin_prefix) < 4:
+            return {"ok": False, "info": "GTIN-префикс слишком короткий (мин. 4 цифры)"}
+
+        if not self.get_template(template_code):
+            return {"ok": False, "info": "Шаблон не найден"}
+
+        try:
+            with db.get_conn() as conn:
+                # Если уже есть привязка для этого префикса — обновляем
+                existing = conn.execute(
+                    "SELECT id FROM template_bindings WHERE gtin_prefix = ?",
+                    (gtin_prefix,)
+                ).fetchone()
+
+                if existing:
+                    conn.execute(
+                        "UPDATE template_bindings "
+                        "SET template_code = ?, priority = ? WHERE id = ?",
+                        (template_code, priority, existing["id"])
+                    )
+                    return {"ok": True, "info": f"Привязка для {gtin_prefix} обновлена"}
+
+                conn.execute(
+                    "INSERT INTO template_bindings "
+                    "(template_code, gtin_prefix, priority) VALUES (?, ?, ?)",
+                    (template_code, gtin_prefix, priority)
+                )
+            return {"ok": True, "info": f"Привязка для {gtin_prefix} создана"}
+        except Exception as e:
+            return {"ok": False, "info": str(e)}
+
+    def delete_binding(self, binding_id: int) -> dict:
+        """Удалить привязку."""
+        try:
+            with db.get_conn() as conn:
+                conn.execute(
+                    "DELETE FROM template_bindings WHERE id = ?",
+                    (binding_id,)
+                )
+            return {"ok": True, "info": "Привязка удалена"}
+        except Exception as e:
+            return {"ok": False, "info": str(e)}
+
+    def get_template_for_gtin(self, gtin: str):
+        """
+        Найти шаблон по GTIN.
+        1. Ищем самое длинное совпадение в привязках.
+        2. Если нет — возвращаем default.
+        """
+        gtin = (gtin or "").strip()
+        if gtin:
+            with db.get_conn() as conn:
+                rows = conn.execute(
+                    "SELECT template_code, gtin_prefix FROM template_bindings "
+                    "ORDER BY priority, LENGTH(gtin_prefix) DESC"
+                ).fetchall()
+
+            # Ищем наиболее специфичный префикс
+            best = None
+            best_len = 0
+            for r in rows:
+                p = r["gtin_prefix"]
+                if gtin.startswith(p) and len(p) > best_len:
+                    best = r["template_code"]
+                    best_len = len(p)
+
+            if best:
+                tpl = self.get_template(best)
+                if tpl:
+                    return tpl
+
+        return self.get_default_template()
 
     # ==========================================================
     # Счётчики
