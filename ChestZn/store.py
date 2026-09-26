@@ -8,6 +8,8 @@ import random
 import string
 import hashlib
 import os
+import re
+from pathlib import Path
 
 import db
 
@@ -16,7 +18,6 @@ class Store:
     def __init__(self):
         db.init_db()
 
-        # ---------- Статичные справочники ----------
         self.points = [
             {"id": "T-01", "name": "Склад-Восток", "address": "Корпус А, 1 этаж",
              "ip": "10.0.1.15", "online": True, "operator": "Иванов И.И.",
@@ -29,7 +30,9 @@ class Store:
              "printer": "Godex G500", "template": "electronics"},
         ]
 
-
+        self.current_point = "T-01"
+        self.current_operator = "Иванов И.И."
+        self.current_user = None
 
         self.integrations = {
             "gis_mt": {"key": "gis_mt", "name": "ГИС МТ / Честный знак",
@@ -42,27 +45,20 @@ class Store:
                      "contour": "prod · timeout"},
         }
 
-        # ---------- Инициализация БД ----------
         self._ensure_seed_data()
         self._ensure_users_seeded()
         self._ensure_templates_seeded()
 
-        # --- Миграция HMAC для audit ---
         try:
             self.migrate_audit_hmac()
         except Exception as e:
             from logger import get_logger
             get_logger("store").error("Ошибка миграции HMAC: %s", e)
 
-        # ---------- Кэши в памяти ----------
         self.counter = self._load_counter()
         self.queue   = self._load_queue()
         self.audit   = self._load_audit(limit=200)
-
-        # ---------- Маппинг GTIN (кэш из БД) ----------
         self.gtin_map = self._load_gtin_map()
-
-        # ---------- Список пользователей для отображения ----------
         self.users = self.list_users()
 
     # ==========================================================
@@ -73,13 +69,25 @@ class Store:
         with db.get_conn() as conn:
             n = conn.execute("SELECT COUNT(*) AS c FROM pool_codes").fetchone()["c"]
             if n == 0:
-                for gtin in ["04600123456782", "04600123456775", "04600123456768"]:
+                for gtin in ["04600123456782", "04600123456775"]:
                     for i in range(30):
                         code_data = self._make_cz(gtin, i)
                         conn.execute(
-                            "INSERT INTO pool_codes (gtin, code, sn) VALUES (?, ?, ?)",
-                            (code_data["gtin"], code_data["code"], code_data["sn"])
+                            "INSERT INTO pool_codes "
+                            "(gtin, code, sn, assigned_point, import_batch) "
+                            "VALUES (?, ?, ?, ?, ?)",
+                            (code_data["gtin"], code_data["code"],
+                             code_data["sn"], "T-01", "DEMO-T-01")
                         )
+                for i in range(30):
+                    code_data = self._make_cz("04600123456768", i)
+                    conn.execute(
+                        "INSERT INTO pool_codes "
+                        "(gtin, code, sn, assigned_point, import_batch) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (code_data["gtin"], code_data["code"],
+                         code_data["sn"], "T-02", "DEMO-T-02")
+                    )
 
             n = conn.execute("SELECT COUNT(*) AS c FROM gtin_map").fetchone()["c"]
             if n == 0:
@@ -89,7 +97,8 @@ class Store:
                     ("04600123456768", "04600123456768"),
                 ]:
                     conn.execute(
-                        "INSERT OR IGNORE INTO gtin_map (foreign_gtin, cz_gtin) VALUES (?, ?)",
+                        "INSERT OR IGNORE INTO gtin_map (foreign_gtin, cz_gtin) "
+                        "VALUES (?, ?)",
                         (fg, cz)
                     )
 
@@ -100,7 +109,7 @@ class Store:
         return {
             "gtin": gtin,
             "sn": sn,
-            "code": f"(01){gtin}(21){sn}(91){verify}(92){crypto}",
+            "code": f"01{gtin}21{sn}\x1d91{verify}\x1d92{crypto}",
         }
 
     def _load_counter(self) -> dict:
@@ -140,33 +149,23 @@ class Store:
     # ==========================================================
     # Пул кодов
     # ==========================================================
-    def take_code(self, gtin: str, point: str = "T-01"):
-        """Взять свободный код из пула, пометить used."""
+    def take_code(self, gtin: str, point: str = None):
+        if point is None:
+            point = self.current_point
+
         with db.get_conn() as conn:
             row = conn.execute(
                 "SELECT id, gtin, code, sn FROM pool_codes "
-                "WHERE gtin = ? AND used = 0 LIMIT 1",
-                (gtin,)
+                "WHERE gtin = ? AND assigned_point = ? AND used = 0 "
+                "ORDER BY id LIMIT 1",
+                (gtin, point)
             ).fetchone()
-
-            if not row:
-                for i in range(10):
-                    d = self._make_cz(gtin, random.randint(1000, 9999))
-                    conn.execute(
-                        "INSERT OR IGNORE INTO pool_codes (gtin, code, sn) VALUES (?, ?, ?)",
-                        (d["gtin"], d["code"], d["sn"])
-                    )
-                row = conn.execute(
-                    "SELECT id, gtin, code, sn FROM pool_codes "
-                    "WHERE gtin = ? AND used = 0 LIMIT 1",
-                    (gtin,)
-                ).fetchone()
 
             if not row:
                 return None
 
             conn.execute(
-                "UPDATE pool_codes SET used = 1, point = ? WHERE id = ?",
+                "UPDATE pool_codes SET used = 1, used_point = ? WHERE id = ?",
                 (point, row["id"])
             )
             return {
@@ -175,32 +174,417 @@ class Store:
                 "used": True, "point": point,
             }
 
-    def mark_printed(self, code: str, point: str = "T-01"):
-        """Пометить код как напечатанный."""
+    def mark_printed(self, code: str, point: str = None):
+        if point is None:
+            point = self.current_point
         with db.get_conn() as conn:
             conn.execute(
-                "UPDATE pool_codes SET printed = 1, printed_at = datetime('now','localtime') "
+                "UPDATE pool_codes SET printed = 1, "
+                "printed_at = datetime('now','localtime') "
                 "WHERE code = ?",
                 (code,)
             )
 
-    def pool_stats(self) -> list:
-        """Статистика по пулу — по каждому GTIN."""
+    def pool_stats(self, point: str = None) -> list:
+        with db.get_conn() as conn:
+            if point:
+                rows = conn.execute(
+                    "SELECT gtin, "
+                    "       COUNT(*) AS total, "
+                    "       SUM(CASE WHEN used=0 THEN 1 ELSE 0 END) AS free, "
+                    "       SUM(CASE WHEN used=1 THEN 1 ELSE 0 END) AS used, "
+                    "       SUM(CASE WHEN printed=1 THEN 1 ELSE 0 END) AS printed "
+                    "FROM pool_codes WHERE assigned_point = ? "
+                    "GROUP BY gtin ORDER BY gtin",
+                    (point,)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT gtin, "
+                    "       COUNT(*) AS total, "
+                    "       SUM(CASE WHEN used=0 THEN 1 ELSE 0 END) AS free, "
+                    "       SUM(CASE WHEN used=1 THEN 1 ELSE 0 END) AS used, "
+                    "       SUM(CASE WHEN printed=1 THEN 1 ELSE 0 END) AS printed "
+                    "FROM pool_codes GROUP BY gtin ORDER BY gtin"
+                ).fetchall()
+        return [dict(r) for r in rows]
+
+    def count_pool(self, point: str = None) -> int:
+        with db.get_conn() as conn:
+            if point:
+                return conn.execute(
+                    "SELECT COUNT(*) AS c FROM pool_codes WHERE assigned_point = ?",
+                    (point,)
+                ).fetchone()["c"]
+            return conn.execute("SELECT COUNT(*) AS c FROM pool_codes").fetchone()["c"]
+
+    def pool_remaining_for_gtin(self, gtin: str, point: str = None) -> int:
+        if point is None:
+            point = self.current_point
+        with db.get_conn() as conn:
+            return conn.execute(
+                "SELECT COUNT(*) AS c FROM pool_codes "
+                "WHERE gtin = ? AND assigned_point = ? AND used = 0",
+                (gtin, point)
+            ).fetchone()["c"]
+
+    # ==========================================================
+    # Импорт кодов ЧЗ (xlsx)
+    # ==========================================================
+    def import_codes_from_file(self, path: str, point: str,
+                               user: str = None) -> dict:
+        try:
+            from cz_import import parse_xlsx
+        except ImportError as e:
+            return {"ok": False, "info": f"Модуль cz_import не найден: {e}"}
+
+        try:
+            rows = parse_xlsx(path)
+        except Exception as e:
+            return {"ok": False, "info": f"Ошибка чтения файла: {e}"}
+
+        if not rows:
+            return {"ok": False, "info": "Файл пуст или не распознан"}
+
+        order_name = rows[0].get("order") or Path(path).stem
+
+        added = 0
+        skipped = 0
+        errors = []
+        gtin_counts = {}
+
+        with db.get_conn() as conn:
+            for i, row in enumerate(rows, start=2):
+                try:
+                    gtin = str(row.get("gtin", "")).strip()
+                    code = str(row.get("code", "")).strip()
+                    sn = str(row.get("sn", "")).strip() or "—"
+
+                    if not gtin or len(gtin) != 14 or not gtin.isdigit():
+                        errors.append(f"Строка {i}: неверный GTIN «{gtin}»")
+                        continue
+                    if not code:
+                        errors.append(f"Строка {i}: пустой код ЧЗ")
+                        continue
+
+                    cur = conn.execute(
+                        "INSERT OR IGNORE INTO pool_codes "
+                        "(gtin, code, sn, assigned_point, import_batch) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (gtin, code, sn, point, order_name)
+                    )
+                    if cur.rowcount > 0:
+                        added += 1
+                        gtin_counts[gtin] = gtin_counts.get(gtin, 0) + 1
+                    else:
+                        skipped += 1
+
+                except Exception as e:
+                    errors.append(f"Строка {i}: {e}")
+
+            conn.execute(
+                "INSERT INTO import_batches "
+                "(name, file_name, point, total_codes, imported_by) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (order_name, Path(path).name, point, added, user)
+            )
+
+        summary = (
+            f"Заказ: {order_name}\n"
+            f"Точка: {point}\n"
+            f"Добавлено: {added}, пропущено (дубли): {skipped}, "
+            f"ошибок: {len(errors)}"
+        )
+        if gtin_counts:
+            summary += "\n\nПо GTIN:\n" + "\n".join(
+                f"  {g}: {c} шт." for g, c in sorted(gtin_counts.items())
+            )
+
+        from logger import get_logger
+        get_logger("store").info("Импорт ЧЗ: %s", summary)
+
+        return {
+            "ok": True,
+            "added": added,
+            "skipped": skipped,
+            "errors": errors,
+            "order": order_name,
+            "info": summary,
+        }
+
+    def list_import_batches(self, limit: int = 100) -> list:
         with db.get_conn() as conn:
             rows = conn.execute(
-                "SELECT gtin, "
-                "       COUNT(*) AS total, "
-                "       SUM(CASE WHEN used=0 THEN 1 ELSE 0 END) AS free, "
-                "       SUM(CASE WHEN used=1 THEN 1 ELSE 0 END) AS used, "
-                "       SUM(CASE WHEN printed=1 THEN 1 ELSE 0 END) AS printed "
-                "FROM pool_codes GROUP BY gtin ORDER BY gtin"
+                "SELECT id, name, file_name, point, total_codes, "
+                "       imported_by, imported_at "
+                "FROM import_batches ORDER BY id DESC LIMIT ?",
+                (limit,)
             ).fetchall()
         return [dict(r) for r in rows]
 
-    def count_pool(self) -> int:
-        """Всего кодов в пуле."""
+    # ==========================================================
+    # Сканы: привязка ШК → ЧЗ + счётчики по GTIN
+    # ==========================================================
+    def find_scanned_shk(self, foreign_code: str):
+        """Найти последний скан по иностранному ШК (для информации)."""
         with db.get_conn() as conn:
-            return conn.execute("SELECT COUNT(*) AS c FROM pool_codes").fetchone()["c"]
+            row = conn.execute(
+                "SELECT * FROM scanned_shk WHERE foreign_code = ? "
+                "ORDER BY id DESC LIMIT 1",
+                (foreign_code,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def count_scanned_shk(self, foreign_code: str) -> int:
+        """
+        Сколько раз этот иностранный ШК уже сканировали.
+        Нужно для «умного варианта» — понять, повтор это или нет.
+        """
+        with db.get_conn() as conn:
+            return conn.execute(
+                "SELECT COUNT(*) AS c FROM scanned_shk WHERE foreign_code = ?",
+                (foreign_code,)
+            ).fetchone()["c"]
+
+    def bind_shk_to_cz(self, foreign_code, foreign_gtin, foreign_sn,
+                       cz_code, cz_gtin, cz_sn, point, operator):
+        with db.get_conn() as conn:
+            conn.execute(
+                "INSERT INTO scanned_shk "
+                "(foreign_code, foreign_gtin, foreign_sn, "
+                " cz_code, cz_gtin, cz_sn, point, operator) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (foreign_code, foreign_gtin, foreign_sn,
+                 cz_code, cz_gtin, cz_sn, point, operator)
+            )
+
+    # ---------------- Счётчик по GTIN ----------------
+
+    def _increment_gtin_counter(self, gtin: str, point: str):
+        """
+        Увеличить счётчик сканов для GTIN+точка на 1.
+        Создаёт запись, если её ещё нет.
+        """
+        with db.get_conn() as conn:
+            conn.execute(
+                "INSERT INTO gtin_counters (gtin, point, scans, last_scan_at) "
+                "VALUES (?, ?, 1, datetime('now','localtime')) "
+                "ON CONFLICT(gtin, point) DO UPDATE SET "
+                "  scans = scans + 1, "
+                "  last_scan_at = datetime('now','localtime')",
+                (gtin, point)
+            )
+
+    def _get_gtin_scans(self, gtin: str, point: str) -> int:
+        """Сколько раз пикнули этот GTIN на точке."""
+        with db.get_conn() as conn:
+            row = conn.execute(
+                "SELECT scans FROM gtin_counters WHERE gtin = ? AND point = ?",
+                (gtin, point)
+            ).fetchone()
+        return row["scans"] if row else 0
+
+    def _get_gtin_total(self, gtin: str, point: str) -> int:
+        """Сколько ВСЕГО кодов в пуле для GTIN+точка (и использованных, и свободных)."""
+        with db.get_conn() as conn:
+            return conn.execute(
+                "SELECT COUNT(*) AS c FROM pool_codes "
+                "WHERE gtin = ? AND assigned_point = ?",
+                (gtin, point)
+            ).fetchone()["c"]
+
+    # ---------------- Основной метод скана ----------------
+
+    def process_scan(self, foreign_code: str, point: str = None,
+                     operator: str = None) -> dict:
+        """
+        Обработать скан иностранного ШК.
+
+        Логика:
+        1. Считаем, сколько раз этот ШК уже был (не блокируем).
+        2. Ищем GTIN ЧЗ (через gtin_map или как есть).
+        3. Берём свободный код из пула СВОЕЙ точки.
+        4. Инкрементируем счётчик сканов по GTIN.
+        5. Привязываем.
+        6. Если scans > total — пишем «Перебор GTIN» в журнал.
+        """
+        if point is None:
+            point = self.current_point
+        if operator is None:
+            operator = self.current_operator
+
+        foreign = parse_foreign_barcode(foreign_code)
+
+        # 1. Сколько раз этот ШК уже сканировали? (не блокирует)
+        prev_count = self.count_scanned_shk(foreign_code)
+
+        # 2. GTIN ЧЗ
+        gtin_cz = self.gtin_map.get(foreign["gtin"], foreign["gtin"])
+
+        # 3. Берём свободный код
+        cz = self.take_code(gtin_cz, point=point)
+        if not cz:
+            from logger import get_logger
+            get_logger("store").warning(
+                "Нет свободных кодов для GTIN=%s на точке %s",
+                gtin_cz, point
+            )
+            return {
+                "status": "error",
+                "code": "NO_FREE_CODES",
+                "message": "Нет свободных кодов для этого товара",
+                "foreign": foreign,
+                "gtin": gtin_cz,
+            }
+
+        # 4. Счётчик по GTIN
+        self._increment_gtin_counter(gtin_cz, point)
+
+        # 5. Привязываем
+        self.bind_shk_to_cz(
+            foreign_code=foreign_code,
+            foreign_gtin=foreign["gtin"],
+            foreign_sn=foreign.get("serial"),
+            cz_code=cz["code"],
+            cz_gtin=cz["gtin"],
+            cz_sn=cz["sn"],
+            point=point,
+            operator=operator,
+        )
+
+        # 6. Проверка перебора
+        scans = self._get_gtin_scans(gtin_cz, point)
+        total = self._get_gtin_total(gtin_cz, point)
+        overflow = scans > total
+
+        if overflow:
+            from logger import get_logger
+            get_logger("store").warning(
+                "Перебор GTIN %s на точке %s: сканов %s > кодов %s",
+                gtin_cz, point, scans, total
+            )
+            try:
+                self.log(
+                    "Перебор GTIN",
+                    point=point,
+                    operator=operator,
+                    gtin=gtin_cz,
+                    result=f"сканов {scans} > кодов {total}",
+                )
+            except Exception as e:
+                from logger import get_logger
+                get_logger("store").error("Не удалось записать перебор: %s", e)
+
+        return {
+            "status": "ok",
+            "foreign": foreign,
+            "cz": cz,
+            "prev_count": prev_count,   # сколько раз ШК был до этого
+            "gtin_scans": scans,        # сколько всего раз пикнули GTIN
+            "gtin_total": total,        # сколько всего кодов у GTIN
+            "overflow": overflow,       # True, если сканов > кодов
+        }
+
+    def count_unprinted_for_point(self, point: str) -> int:
+        """
+        Сколько кодов взято, но не напечатано на точке.
+        Считаем коды, которые были использованы (used=1),
+        но печать не подтверждена (printed=0).
+        """
+        with db.get_conn() as conn:
+            return conn.execute(
+                "SELECT COUNT(*) AS c FROM pool_codes "
+                "WHERE used_point = ? AND used = 1 AND printed = 0",
+                (point,)
+            ).fetchone()["c"]
+
+
+    def list_unprinted_for_point(self, point: str, limit: int = 100) -> list:
+        """Список кодов, взятых, но не напечатанных."""
+        with db.get_conn() as conn:
+            rows = conn.execute(
+                "SELECT id, gtin, code, sn, used_point, printed_at, created_at "
+                "FROM pool_codes "
+                "WHERE used_point = ? AND used = 1 AND printed = 0 "
+                "ORDER BY id DESC LIMIT ?",
+                (point, limit)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_scanned_shk(self, point: str = None, limit: int = 500) -> list:
+        with db.get_conn() as conn:
+            if point:
+                rows = conn.execute(
+                    "SELECT * FROM scanned_shk WHERE point = ? "
+                    "ORDER BY id DESC LIMIT ?",
+                    (point, limit)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM scanned_shk ORDER BY id DESC LIMIT ?",
+                    (limit,)
+                ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ==========================================================
+    # Расхождения (для админки)
+    # ==========================================================
+    def get_discrepancies(self, point: str = None) -> list:
+        """
+        Сводка: пул vs счётчик сканов.
+        Возвращает список строк:
+          {gtin, point, total, scans, used, free, overflow}
+        где overflow = scans > total.
+        """
+        with db.get_conn() as conn:
+            if point:
+                pool_rows = conn.execute(
+                    "SELECT gtin, assigned_point AS point, "
+                    "       COUNT(*) AS total, "
+                    "       SUM(CASE WHEN used=0 THEN 1 ELSE 0 END) AS free, "
+                    "       SUM(CASE WHEN used=1 THEN 1 ELSE 0 END) AS used "
+                    "FROM pool_codes WHERE assigned_point = ? "
+                    "GROUP BY gtin, assigned_point ORDER BY gtin",
+                    (point,)
+                ).fetchall()
+
+                counter_rows = conn.execute(
+                    "SELECT gtin, point, scans FROM gtin_counters "
+                    "WHERE point = ?",
+                    (point,)
+                ).fetchall()
+            else:
+                pool_rows = conn.execute(
+                    "SELECT gtin, assigned_point AS point, "
+                    "       COUNT(*) AS total, "
+                    "       SUM(CASE WHEN used=0 THEN 1 ELSE 0 END) AS free, "
+                    "       SUM(CASE WHEN used=1 THEN 1 ELSE 0 END) AS used "
+                    "FROM pool_codes "
+                    "GROUP BY gtin, assigned_point ORDER BY assigned_point, gtin"
+                ).fetchall()
+
+                counter_rows = conn.execute(
+                    "SELECT gtin, point, scans FROM gtin_counters"
+                ).fetchall()
+
+        counters = {(r["gtin"], r["point"]): r["scans"] for r in counter_rows}
+
+        result = []
+        for p in pool_rows:
+            gtin = p["gtin"]
+            pt = p["point"] or "—"
+            scans = counters.get((gtin, pt), 0)
+            total = p["total"]
+            result.append({
+                "gtin": gtin,
+                "point": pt,
+                "total": total,
+                "scans": scans,
+                "used": p["used"],
+                "free": p["free"],
+                "overflow": scans > total,
+            })
+        return result
 
     # ==========================================================
     # Шаблоны этикеток
@@ -248,7 +632,6 @@ class Store:
     ]
 
     def _ensure_templates_seeded(self):
-        """Наполнить таблицу шаблонов, если она пустая."""
         import json
         with db.get_conn() as conn:
             n = conn.execute(
@@ -269,7 +652,6 @@ class Store:
                 )
 
     def list_templates(self) -> list:
-        """Список шаблонов с полями."""
         import json
         with db.get_conn() as conn:
             rows = conn.execute(
@@ -290,7 +672,6 @@ class Store:
         return result
 
     def get_template(self, code: str):
-        """Один шаблон по коду."""
         import json
         with db.get_conn() as conn:
             r = conn.execute(
@@ -310,7 +691,6 @@ class Store:
         return d
 
     def get_default_template(self):
-        """Шаблон по умолчанию."""
         with db.get_conn() as conn:
             r = conn.execute(
                 "SELECT code FROM label_templates "
@@ -323,19 +703,15 @@ class Store:
                 ).fetchone()
         return self.get_template(r["code"]) if r else None
 
-    def create_template(self, code: str, name: str, fields: list = None,
-                        width_mm: float = 58, height_mm: float = 40,
-                        dpi: int = 203, is_default: bool = False) -> dict:
-        """Создать шаблон."""
+    def create_template(self, code, name, fields=None,
+                        width_mm=58, height_mm=40, dpi=203,
+                        is_default=False) -> dict:
         import json
         fields = fields or []
         try:
             with db.get_conn() as conn:
-                # Если ставим как default — снять с других
                 if is_default:
-                    conn.execute(
-                        "UPDATE label_templates SET is_default = 0"
-                    )
+                    conn.execute("UPDATE label_templates SET is_default = 0")
                 conn.execute(
                     "INSERT INTO label_templates "
                     "(code, name, is_default, width_mm, height_mm, dpi, "
@@ -349,11 +725,9 @@ class Store:
         except Exception as e:
             return {"ok": False, "info": str(e)}
 
-    def update_template(self, code: str, name: str = None,
-                        fields: list = None, width_mm: float = None,
-                        height_mm: float = None, dpi: int = None,
-                        is_default: bool = None) -> dict:
-        """Обновить шаблон."""
+    def update_template(self, code, name=None, fields=None,
+                        width_mm=None, height_mm=None, dpi=None,
+                        is_default=None) -> dict:
         import json
         tpl = self.get_template(code)
         if not tpl:
@@ -387,7 +761,6 @@ class Store:
             return {"ok": False, "info": str(e)}
 
     def delete_template(self, code: str) -> dict:
-        """Удалить шаблон (если он не default и не используется)."""
         tpl = self.get_template(code)
         if not tpl:
             return {"ok": False, "info": "Шаблон не найден"}
@@ -400,16 +773,12 @@ class Store:
                     "DELETE FROM template_bindings WHERE template_code = ?",
                     (code,)
                 )
-                conn.execute(
-                    "DELETE FROM label_templates WHERE code = ?", (code,)
-                )
+                conn.execute("DELETE FROM label_templates WHERE code = ?", (code,))
             return {"ok": True, "info": f"Шаблон «{tpl['name']}» удалён"}
         except Exception as e:
             return {"ok": False, "info": str(e)}
 
-    # ---------- Привязки к GTIN ----------
     def list_bindings(self) -> list:
-        """Список привязок шаблонов к GTIN-префиксам."""
         with db.get_conn() as conn:
             rows = conn.execute(
                 "SELECT id, template_code, gtin_prefix, priority, created_at "
@@ -417,23 +786,20 @@ class Store:
             ).fetchall()
         return [dict(r) for r in rows]
 
-    def create_binding(self, template_code: str, gtin_prefix: str,
-                       priority: int = 100) -> dict:
-        """Создать привязку GTIN-префикса к шаблону."""
+    def create_binding(self, template_code, gtin_prefix, priority=100) -> dict:
         gtin_prefix = (gtin_prefix or "").strip()
         if not gtin_prefix:
             return {"ok": False, "info": "Пустой GTIN-префикс"}
         if not gtin_prefix.isdigit():
             return {"ok": False, "info": "GTIN-префикс должен содержать только цифры"}
         if len(gtin_prefix) < 4:
-            return {"ok": False, "info": "GTIN-префикс слишком короткий (мин. 4 цифры)"}
+            return {"ok": False, "info": "GTIN-префикс слишком короткий"}
 
         if not self.get_template(template_code):
             return {"ok": False, "info": "Шаблон не найден"}
 
         try:
             with db.get_conn() as conn:
-                # Если уже есть привязка для этого префикса — обновляем
                 existing = conn.execute(
                     "SELECT id FROM template_bindings WHERE gtin_prefix = ?",
                     (gtin_prefix,)
@@ -457,7 +823,6 @@ class Store:
             return {"ok": False, "info": str(e)}
 
     def delete_binding(self, binding_id: int) -> dict:
-        """Удалить привязку."""
         try:
             with db.get_conn() as conn:
                 conn.execute(
@@ -469,11 +834,6 @@ class Store:
             return {"ok": False, "info": str(e)}
 
     def get_template_for_gtin(self, gtin: str):
-        """
-        Найти шаблон по GTIN.
-        1. Ищем самое длинное совпадение в привязках.
-        2. Если нет — возвращаем default.
-        """
         gtin = (gtin or "").strip()
         if gtin:
             with db.get_conn() as conn:
@@ -482,7 +842,6 @@ class Store:
                     "ORDER BY priority, LENGTH(gtin_prefix) DESC"
                 ).fetchall()
 
-            # Ищем наиболее специфичный префикс
             best = None
             best_len = 0
             for r in rows:
@@ -504,7 +863,6 @@ class Store:
     _COUNTER_FIELDS = {"scans": "scans", "prints": "prints", "errors": "errors"}
 
     def increment_counter(self, key: str, delta: int = 1):
-        """Увеличить счётчик и обновить кэш."""
         if key not in self._COUNTER_FIELDS:
             return
         col = self._COUNTER_FIELDS[key]
@@ -516,7 +874,6 @@ class Store:
         self.counter[key] = self.counter.get(key, 0) + delta
 
     def reset_counters(self):
-        """Сбросить счётчики."""
         with db.get_conn() as conn:
             conn.execute(
                 "UPDATE counters SET scans=0, prints=0, errors=0 WHERE id = 1"
@@ -528,8 +885,11 @@ class Store:
     # ==========================================================
     # Очередь
     # ==========================================================
-    def add_queue_entry(self, gtin: str, sn: str,
-                        point: str = "T-01", operator: str = "Иванов И.И."):
+    def add_queue_entry(self, gtin, sn, point=None, operator=None):
+        if point is None:
+            point = self.current_point
+        if operator is None:
+            operator = self.current_operator
         now = datetime.now().strftime("%H:%M:%S")
         with db.get_conn() as conn:
             cur = conn.execute(
@@ -552,10 +912,6 @@ class Store:
     # Журнал + HMAC
     # ==========================================================
     def _compute_audit_hmac(self, prev_hmac: str, entry: dict) -> str:
-        """
-        Вычислить HMAC одной записи журнала.
-        HMAC-SHA256 от: ключ + (prev_hmac | time | action | point | operator | gtin | sn | result)
-        """
         import hmac as hmac_mod
         import hashlib
         from crypto import get_hmac_key
@@ -575,7 +931,6 @@ class Store:
         return hmac_mod.new(key, data, hashlib.sha256).hexdigest()
 
     def log(self, action: str, **kwargs):
-        """Добавить запись в журнал с HMAC-подписью."""
         now = datetime.now().strftime("%H:%M:%S")
         entry = {
             "time": now,
@@ -611,7 +966,6 @@ class Store:
             self.audit = self.audit[:200]
 
     def query_audit(self, filters: dict = None, limit: int = 100, offset: int = 0):
-        """Поиск записей в журнале с фильтрами и пагинацией."""
         filters = filters or {}
         where = []
         params = []
@@ -655,7 +1009,6 @@ class Store:
         return [dict(r) for r in rows], total
 
     def get_audit_filter_values(self) -> dict:
-        """Уникальные значения для фильтров журнала."""
         with db.get_conn() as conn:
             points = [r["point"] for r in conn.execute(
                 "SELECT DISTINCT point FROM audit "
@@ -671,11 +1024,7 @@ class Store:
             ).fetchall()]
         return {"points": points, "operators": operators, "results": results}
 
-    # ==========================================================
-    # HMAC-цепочка журнала
-    # ==========================================================
     def migrate_audit_hmac(self):
-        """Пересчитать HMAC-цепочку для всех записей журнала."""
         with db.get_conn() as conn:
             total = conn.execute(
                 "SELECT COUNT(*) AS c FROM audit"
@@ -722,7 +1071,6 @@ class Store:
             )
 
     def verify_audit_chain(self) -> dict:
-        """Проверить HMAC-цепочку журнала."""
         with db.get_conn() as conn:
             rows = conn.execute(
                 "SELECT id, time, action, point, operator, gtin, sn, result, "
@@ -731,8 +1079,7 @@ class Store:
             ).fetchall()
 
         if not rows:
-            return {"ok": True, "total": 0, "broken": [],
-                    "info": "Журнал пуст"}
+            return {"ok": True, "total": 0, "broken": [], "info": "Журнал пуст"}
 
         broken = []
         expected_prev = ""
@@ -774,11 +1121,10 @@ class Store:
                 "info": f"⚠ Обнаружено {len(broken)} повреждений из {total}"}
 
     # ==========================================================
-    # Пользователи и аутентификация
+    # Пользователи
     # ==========================================================
     @staticmethod
     def _hash_password(password: str, salt: bytes = None):
-        """Хэш пароля через pbkdf2_hmac. Возвращает (hash_hex, salt_hex)."""
         if salt is None:
             salt = os.urandom(16)
         h = hashlib.pbkdf2_hmac(
@@ -787,7 +1133,6 @@ class Store:
         return h.hex(), salt.hex()
 
     def _ensure_users_seeded(self):
-        """Наполнить таблицу users, если она пустая."""
         with db.get_conn() as conn:
             n = conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
             if n > 0:
@@ -812,7 +1157,6 @@ class Store:
                 )
 
     def check_login(self, login: str, password: str):
-        """Проверить логин и пароль. Возвращает dict или None."""
         if not login or not password:
             return None
 
@@ -916,11 +1260,9 @@ class Store:
         h, _ = self._hash_password(answer_norm, salt)
         return h == row["answer_hash"]
 
-    def change_password(self, login: str, old_password: str,
-                        new_password: str) -> tuple:
+    def change_password(self, login, old_password, new_password):
         if not login or not old_password or not new_password:
             return False, "Заполните все поля"
-
         if len(new_password) < 6:
             return False, "Новый пароль должен быть не короче 6 символов"
 
@@ -935,7 +1277,6 @@ class Store:
                 "WHERE login = ?",
                 (h, s, login)
             )
-
         return True, "Пароль изменён"
 
     def list_users(self) -> list:
@@ -947,13 +1288,13 @@ class Store:
         return [dict(r) for r in rows]
 
     # ==========================================================
-    # Массовый импорт
+    # Массовый импорт CSV
     # ==========================================================
-    def bulk_import_pool_codes(self, rows: list) -> dict:
-        """
-        Массовая вставка кодов ЧЗ в пул.
-        rows = [{"gtin": "04600123456782", "code": "(01)...", "sn": "SN0001"}, ...]
-        """
+    def bulk_import_pool_codes(self, rows: list, point: str = None,
+                               batch: str = None) -> dict:
+        if point is None:
+            point = self.current_point
+
         added = 0
         skipped = 0
         errors = []
@@ -977,17 +1318,17 @@ class Store:
                         continue
 
                     if not sn:
-                        import re
-                        m = re.search(r"\(21\)([^\(]+)", code)
+                        m = re.search(r"21([^\x1d]+)", code)
                         if m:
                             sn = m.group(1)
                         else:
                             sn = "—"
 
                     cur = conn.execute(
-                        "INSERT OR IGNORE INTO pool_codes (gtin, code, sn) "
-                        "VALUES (?, ?, ?)",
-                        (gtin, code, sn)
+                        "INSERT OR IGNORE INTO pool_codes "
+                        "(gtin, code, sn, assigned_point, import_batch) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (gtin, code, sn, point, batch)
                     )
                     if cur.rowcount > 0:
                         added += 1
@@ -1019,7 +1360,6 @@ class Store:
         }
 
     def bulk_import_gtin_map(self, rows: list) -> dict:
-        """Массовая вставка/обновление маппинга GTIN."""
         added = 0
         updated = 0
         errors = []
@@ -1047,7 +1387,8 @@ class Store:
 
                     if existing is None:
                         conn.execute(
-                            "INSERT INTO gtin_map (foreign_gtin, cz_gtin) VALUES (?, ?)",
+                            "INSERT INTO gtin_map (foreign_gtin, cz_gtin) "
+                            "VALUES (?, ?)",
                             (fg, cz)
                         )
                         added += 1
@@ -1080,7 +1421,6 @@ class Store:
         }
 
     def count_gtin_map(self) -> int:
-        """Всего записей в маппинге GTIN."""
         with db.get_conn() as conn:
             return conn.execute("SELECT COUNT(*) AS c FROM gtin_map").fetchone()["c"]
 
@@ -1088,7 +1428,6 @@ class Store:
     # Настройки (таблица meta)
     # ==========================================================
     def get_setting(self, key: str, default=None):
-        """Прочитать настройку из таблицы meta."""
         with db.get_conn() as conn:
             row = conn.execute(
                 "SELECT value FROM meta WHERE key = ?", (key,)
@@ -1096,7 +1435,6 @@ class Store:
         return row["value"] if row else default
 
     def set_setting(self, key: str, value):
-        """Сохранить настройку в таблицу meta."""
         with db.get_conn() as conn:
             conn.execute(
                 "INSERT INTO meta (key, value) VALUES (?, ?) "
@@ -1108,7 +1446,6 @@ class Store:
     # Очистка старых данных
     # ==========================================================
     def get_audit_retention_days(self) -> int:
-        """Сколько дней хранить журнал. По умолчанию 365."""
         v = self.get_setting("audit_retention_days", "365")
         try:
             return int(v)
@@ -1116,12 +1453,10 @@ class Store:
             return 365
 
     def set_audit_retention_days(self, days: int):
-        """Сохранить срок хранения журнала."""
         days = max(7, int(days))
         self.set_setting("audit_retention_days", str(days))
 
     def cleanup_old_audit(self) -> dict:
-        """Удалить записи audit старше N дней."""
         days = self.get_audit_retention_days()
 
         try:
@@ -1160,7 +1495,6 @@ class Store:
             return {"ok": False, "deleted": 0, "info": str(e)}
 
     def auto_cleanup_if_needed(self):
-        """Автоочистка раз в сутки."""
         from datetime import datetime
         last = self.get_setting("last_cleanup")
 
@@ -1185,25 +1519,48 @@ class Store:
 
 
 # ==========================================================
-# Парсер иностранного ШК (заглушка)
+# Парсер иностранного ШК (вне класса!)
 # ==========================================================
 def parse_foreign_barcode(raw: str) -> dict:
     raw = (raw or "").strip()
+
     gtin = "04600123456782"
     sn = "SN" + ''.join(random.choices(string.digits, k=7))
     lot = "LOT-2025-04"
+    exp = "12.2026"
 
     if raw:
-        digits = ''.join(ch for ch in raw if ch.isdigit())
-        if len(digits) >= 14:
-            gtin = digits[:14]
+        s = raw.replace("_x001D_", "\x1d")
+
+        m01 = re.search(r"01(\d{14})", s)
+        if m01:
+            gtin = m01.group(1)
+
+        m21 = re.search(r"21([^\x1d]+)", s)
+        if m21:
+            sn = m21.group(1).strip()
+
+        m10 = re.search(r"10([^\x1d]+)", s)
+        if m10:
+            lot = m10.group(1).strip()
+
+        m17 = re.search(r"17(\d{6})", s)
+        if m17:
+            d = m17.group(1)
+            yy, mm = d[:2], d[2:4]
+            exp = f"{mm}.20{yy}"
+
+        if not m01:
+            digits = ''.join(ch for ch in raw if ch.isdigit())
+            if len(digits) >= 14:
+                gtin = digits[:14]
 
     return {
-        "type": "GS1-128",
+        "type": "GS1-128" if "01" in raw else "EAN-13",
         "gtin": gtin,
         "serial": sn,
         "lot": lot,
-        "exp": "12.2026",
+        "exp": exp,
         "country": "CN",
         "name": "Наушники беспроводные BT-500",
         "model": "BT-500",

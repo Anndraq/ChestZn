@@ -32,18 +32,63 @@ CREATE TABLE IF NOT EXISTS counters (
 );
 
 CREATE TABLE IF NOT EXISTS pool_codes (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    gtin       TEXT NOT NULL,
-    code       TEXT NOT NULL UNIQUE,
-    sn         TEXT NOT NULL,
-    used       INTEGER NOT NULL DEFAULT 0,
-    printed    INTEGER NOT NULL DEFAULT 0,
-    point      TEXT,
-    printed_at TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    gtin           TEXT NOT NULL,
+    code           TEXT NOT NULL UNIQUE,
+    sn             TEXT NOT NULL,
+    used           INTEGER NOT NULL DEFAULT 0,
+    printed        INTEGER NOT NULL DEFAULT 0,
+    point          TEXT,
+    used_point     TEXT,
+    assigned_point TEXT,
+    import_batch   TEXT,
+    printed_at     TEXT,
+    created_at     TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_pool_gtin_used ON pool_codes(gtin, used);
 CREATE INDEX IF NOT EXISTS idx_pool_printed   ON pool_codes(printed);
+
+-- ВАЖНО: foreign_code БЕЗ UNIQUE.
+-- Один и тот же иностранный ШК может быть на нескольких единицах товара
+-- (например, одежда без серийников). Повторные сканы разрешены.
+CREATE TABLE IF NOT EXISTS scanned_shk (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    foreign_code TEXT NOT NULL,
+    foreign_gtin TEXT NOT NULL,
+    foreign_sn   TEXT,
+    cz_code      TEXT NOT NULL,
+    cz_gtin      TEXT NOT NULL,
+    cz_sn        TEXT NOT NULL,
+    point        TEXT NOT NULL,
+    operator     TEXT,
+    scanned_at   TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_scanned_foreign ON scanned_shk(foreign_code);
+CREATE INDEX IF NOT EXISTS idx_scanned_cz      ON scanned_shk(cz_code);
+
+-- Счётчик сканов по GTIN + точка.
+-- Нужен для «умного варианта»: если сканов > кодов в пуле —
+-- значит оператор пикнул лишний раз, ушёл лишний код.
+CREATE TABLE IF NOT EXISTS gtin_counters (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    gtin         TEXT NOT NULL,
+    point        TEXT NOT NULL,
+    scans        INTEGER NOT NULL DEFAULT 0,
+    last_scan_at TEXT,
+    UNIQUE(gtin, point)
+);
+CREATE INDEX IF NOT EXISTS idx_gtin_counters_gtin
+    ON gtin_counters(gtin, point);
+
+CREATE TABLE IF NOT EXISTS import_batches (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    name         TEXT NOT NULL,
+    file_name    TEXT NOT NULL,
+    point        TEXT NOT NULL,
+    total_codes  INTEGER NOT NULL DEFAULT 0,
+    imported_by  TEXT,
+    imported_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
 
 CREATE TABLE IF NOT EXISTS queue (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -246,7 +291,6 @@ def _migrate_to_encrypted():
     tables = ["counters", "pool_codes", "queue", "audit",
               "gtin_map", "meta", "users", "security_questions"]
 
-    # Собираем все строки ДО удаления файла
     old_data = {}
     for t in tables:
         try:
@@ -303,10 +347,184 @@ def _migrate_to_encrypted():
 
 
 # ==========================================================
+# Миграция: убрать UNIQUE на scanned_shk.foreign_code
+# ==========================================================
+def _migrate_scanned_shk_drop_unique(conn):
+    """
+    Пересоздать таблицу scanned_shk без UNIQUE на foreign_code.
+    Нужно для одежды — один и тот же иностранный ШК
+    может быть на нескольких единицах товара.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='scanned_shk'"
+    ).fetchone()
+
+    if not row:
+        # Таблицы нет — SCHEMA создаст её сразу без UNIQUE
+        return
+
+    table_sql = (row["sql"] if isinstance(row, dict) or hasattr(row, "keys")
+                 else row[0]) or ""
+
+    if "UNIQUE" not in table_sql.upper():
+        # Уже без UNIQUE — ничего не делаем
+        return
+
+    log.info("Миграция scanned_shk: убираю UNIQUE на foreign_code")
+
+    # 1. Проверяем, какие колонки реально есть (на случай старых версий)
+    existing_cols = [
+        r[1] for r in conn.execute("PRAGMA table_info(scanned_shk)").fetchall()
+    ]
+    log.debug("scanned_shk колонки: %s", existing_cols)
+
+    # 2. Создаём новую таблицу БЕЗ UNIQUE
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS scanned_shk_new (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            foreign_code TEXT NOT NULL,
+            foreign_gtin TEXT NOT NULL,
+            foreign_sn   TEXT,
+            cz_code      TEXT NOT NULL,
+            cz_gtin      TEXT NOT NULL,
+            cz_sn        TEXT NOT NULL,
+            point        TEXT NOT NULL,
+            operator     TEXT,
+            scanned_at   TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+        )
+    """)
+
+    # 3. Переносим данные (только те колонки, которые есть)
+    common = [c for c in [
+        "id", "foreign_code", "foreign_gtin", "foreign_sn",
+        "cz_code", "cz_gtin", "cz_sn", "point", "operator", "scanned_at"
+    ] if c in existing_cols]
+
+    cols_csv = ",".join(common)
+    conn.execute(
+        f"INSERT INTO scanned_shk_new ({cols_csv}) "
+        f"SELECT {cols_csv} FROM scanned_shk"
+    )
+
+    # 4. Удаляем старую, переименовываем новую
+    conn.execute("DROP TABLE scanned_shk")
+    conn.execute("ALTER TABLE scanned_shk_new RENAME TO scanned_shk")
+
+    # 5. Восстанавливаем индексы
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_scanned_foreign "
+        "ON scanned_shk(foreign_code)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_scanned_cz "
+        "ON scanned_shk(cz_code)"
+    )
+
+    log.info("Миграция scanned_shk: UNIQUE убран, индексы пересозданы")
+
+
+# ==========================================================
+# Миграция: создать gtin_counters (если ещё нет)
+# ==========================================================
+def _migrate_gtin_counters_create(conn):
+    """
+    Создать таблицу gtin_counters, если её нет.
+    На свежих БД её создаст SCHEMA, но для существующих БД — нужна миграция.
+    """
+    row = conn.execute(
+        "SELECT name FROM sqlite_master "
+        "WHERE type='table' AND name='gtin_counters'"
+    ).fetchone()
+
+    if row:
+        return  # уже есть
+
+    log.info("Миграция: создаю таблицу gtin_counters")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS gtin_counters (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            gtin         TEXT NOT NULL,
+            point        TEXT NOT NULL,
+            scans        INTEGER NOT NULL DEFAULT 0,
+            last_scan_at TEXT,
+            UNIQUE(gtin, point)
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_gtin_counters_gtin "
+        "ON gtin_counters(gtin, point)"
+    )
+    log.info("Таблица gtin_counters создана")
+
+
+# ==========================================================
+# Миграция схемы (для существующих БД)
+# ==========================================================
+def _migrate_schema(conn):
+    """
+    Добавить новые колонки / таблицы в существующие БД.
+    Безопасно вызывается при каждом запуске.
+    """
+    # --- audit.hmac / prev_hmac ---
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(audit)").fetchall()]
+    if "hmac" not in cols:
+        conn.execute("ALTER TABLE audit ADD COLUMN hmac TEXT")
+        log.info("Добавлена колонка audit.hmac")
+    if "prev_hmac" not in cols:
+        conn.execute("ALTER TABLE audit ADD COLUMN prev_hmac TEXT")
+        log.info("Добавлена колонка audit.prev_hmac")
+
+    # --- pool_codes.assigned_point / import_batch / used_point ---
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(pool_codes)").fetchall()]
+    if "assigned_point" not in cols:
+        conn.execute("ALTER TABLE pool_codes ADD COLUMN assigned_point TEXT")
+        log.info("Добавлена колонка pool_codes.assigned_point")
+    if "import_batch" not in cols:
+        conn.execute("ALTER TABLE pool_codes ADD COLUMN import_batch TEXT")
+        log.info("Добавлена колонка pool_codes.import_batch")
+    if "used_point" not in cols:
+        conn.execute("ALTER TABLE pool_codes ADD COLUMN used_point TEXT")
+        log.info("Добавлена колонка pool_codes.used_point")
+
+    # --- Заполнить assigned_point для старых кодов ---
+    try:
+        before = conn.execute(
+            "SELECT COUNT(*) AS c FROM pool_codes "
+            "WHERE assigned_point IS NULL OR assigned_point = ''"
+        ).fetchone()["c"]
+
+        if before > 0:
+            conn.execute(
+                "UPDATE pool_codes "
+                "SET assigned_point = COALESCE(point, 'T-01') "
+                "WHERE assigned_point IS NULL OR assigned_point = ''"
+            )
+            log.info("Заполнено assigned_point для %s старых кодов", before)
+    except Exception as e:
+        log.warning("Не удалось заполнить assigned_point: %s", e)
+
+    # --- Индекс (только после ALTER TABLE) ---
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pool_gtin_point_used "
+        "ON pool_codes(gtin, assigned_point, used)"
+    )
+
+    # --- NEW: убрать UNIQUE на scanned_shk.foreign_code ---
+    _migrate_scanned_shk_drop_unique(conn)
+
+    # --- NEW: создать gtin_counters ---
+    _migrate_gtin_counters_create(conn)
+
+
+# ==========================================================
 # Инициализация
 # ==========================================================
 def init_db():
-    """Создать/открыть БД. При необходимости — мигрировать в зашифрованный формат."""
+    """
+    Создать/открыть БД.
+    При необходимости — мигрировать в зашифрованный формат,
+    затем добавить новые колонки.
+    """
     APP_DIR.mkdir(parents=True, exist_ok=True)
 
     # Если есть открытая БД — мигрируем
@@ -319,15 +537,12 @@ def init_db():
         conn.executescript(SCHEMA)
         conn.execute("INSERT OR IGNORE INTO counters (id) VALUES (1)")
         conn.commit()
+
+        # Миграции существующих таблиц
+        _migrate_schema(conn)
+        conn.commit()
+
         log.info("Схема БД актуальна")
-                # --- Миграция: добавить колонки hmac в audit, если их нет ---
-        cols = [r[1] for r in conn.execute("PRAGMA table_info(audit)").fetchall()]
-        if "hmac" not in cols:
-            conn.execute("ALTER TABLE audit ADD COLUMN hmac TEXT")
-            log.info("Добавлена колонка audit.hmac")
-        if "prev_hmac" not in cols:
-            conn.execute("ALTER TABLE audit ADD COLUMN prev_hmac TEXT")
-            log.info("Добавлена колонка audit.prev_hmac")
     finally:
         conn.close()
 

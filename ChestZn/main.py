@@ -1,5 +1,6 @@
 """Точка входа desktop-приложения (PySide6)."""
 import sys
+import os
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout,
     QHBoxLayout, QLabel, QFrame, QMessageBox
@@ -29,12 +30,33 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("ChestZn · Маркировка")
         self.resize(1360, 900)
 
+        # ---------- Загрузка конфига ----------
+        from printer import load_config, save_config, detect_point, autodetect
+        cfg = load_config()
+
+        # ---------- Определение точки ----------
+        point = detect_point(cfg)
+        if not point:
+            # Не задана — оставляем как есть, оператор увидит «T-01»
+            # (админ может настроить точку в config.json)
+            point = "T-01"
+            print(f"[ChestZn] Точка не задана в config.json, "
+                  f"используется по умолчанию: {point}")
+        else:
+            print(f"[ChestZn] Точка определена: {point}")
+
+        # ---------- Создание Store ----------
         self.store = Store()
+        self.store.current_point = point
+
+        # ---------- Оператор по точке ----------
+        operator = self._operator_for_point(point)
+        self.store.current_operator = operator
+        print(f"[ChestZn] Оператор: {operator}")
 
         # ---------- Автоопределение принтера ----------
-        from printer import autodetect, load_config, save_config
-        cfg = load_config()
         if not cfg.get("printer_name") and not cfg.get("printer_ip"):
+            # Общий принтер не задан — попробуем автоопределить
             result = autodetect()
             if result["suggested"]:
                 s = result["suggested"]
@@ -45,7 +67,16 @@ class MainWindow(QMainWindow):
             else:
                 print("[ChestZn] Принтеры не найдены — настройте вручную в админке")
         else:
-            print(f"[ChestZn] Принтер из настроек: {cfg['printer_name']} ({cfg['printer_lang']})")
+            print(f"[ChestZn] Общий принтер из настроек: "
+                  f"{cfg.get('printer_name')} ({cfg.get('printer_lang')})")
+
+        # Проверим, есть ли принтер для текущей точки
+        printers = cfg.get("printers") or {}
+        if point in printers:
+            p = printers[point]
+            print(f"[ChestZn] Принтер для точки {point}: "
+                  f"{p.get('printer_name', '?')} "
+                  f"({p.get('printer_lang', 'auto')})")
 
         # ---------- Флаг: админ авторизован? ----------
         self.admin_authenticated = False
@@ -62,10 +93,13 @@ class MainWindow(QMainWindow):
         self._root_layout.setContentsMargins(0, 0, 0, 0)
         self._root_layout.setSpacing(0)
 
-        # ---------- Баннер предупреждений (если есть проблемы) ----------
+        # ---------- Баннер предупреждений ----------
         self.banner = None
         if self._initial_problems:
-            warnings_only = [p for p in self._initial_problems if p.get("status") != "ok"]
+            warnings_only = [
+                p for p in self._initial_problems
+                if p.get("status") != "ok"
+            ]
             if warnings_only:
                 self.banner = WarningBanner(warnings_only)
                 self.banner.details_clicked.connect(self.show_problems_window)
@@ -88,6 +122,25 @@ class MainWindow(QMainWindow):
         role.setObjectName("brandRole")
         h.addWidget(role)
 
+        h.addSpacing(20)
+
+        # Точка в шапке
+        point_badge = QLabel(f"● {point}")
+        point_badge.setObjectName("brandRole")
+        point_badge.setStyleSheet(
+            "background:rgba(59,130,246,.18); color:#93c5fd; "
+            "padding:3px 10px; border-radius:4px; "
+            "font-size:11px; font-weight:600;"
+        )
+        h.addWidget(point_badge)
+
+        # Название точки
+        point_name = self._point_name(point)
+        if point_name:
+            point_label = QLabel(point_name)
+            point_label.setStyleSheet("color:#8b97a6; font-size:12px;")
+            h.addWidget(point_label)
+
         h.addStretch(1)
 
         meta_online = QLabel("Система:")
@@ -98,7 +151,7 @@ class MainWindow(QMainWindow):
         ok.setObjectName("okDot")
         h.addWidget(ok)
 
-        meta_ver = QLabel("Версия: v0.1")
+        meta_ver = QLabel("Версия: v0.2")
         meta_ver.setObjectName("meta")
         h.addWidget(meta_ver)
 
@@ -130,39 +183,51 @@ class MainWindow(QMainWindow):
 
         print("[ChestZn] MainWindow создан, размер:", self.size())
         print("[ChestZn] вкладок:", self.tabs.count())
+        print(f"[ChestZn] Точка работы: {point} · Оператор: {operator}")
+
+    # ------------------------------------------------------------------
+    def _point_name(self, point_id: str) -> str:
+        """Название точки по ID."""
+        for p in self.store.points:
+            if p["id"] == point_id:
+                return p["name"]
+        return ""
+
+    def _operator_for_point(self, point_id: str) -> str:
+        """Найти ФИО оператора по точке."""
+        for p in self.store.points:
+            if p["id"] == point_id:
+                return p.get("operator") or "Оператор"
+        return "Оператор"
 
     # ------------------------------------------------------------------
     def show_problems_window(self):
-        """Показать окно проблем (по кнопке «Подробнее»)."""
+        """Показать окно проблем."""
         win = StartupProblemsWindow(self.store, self)
         win.problems_changed.connect(self.update_banner)
         win.exec()
-        # После закрытия — обновить баннер
         self.update_banner(win.problems)
 
     # ------------------------------------------------------------------
     def update_banner(self, problems: list):
-        """Обновить или скрыть баннер в главном окне."""
+        """Обновить или скрыть баннер."""
         warnings_only = [p for p in problems if p.get("status") != "ok"]
 
         if warnings_only:
             if self.banner is None:
-                # Баннера не было — создаём и вставляем первым в root_layout
                 self.banner = WarningBanner(warnings_only)
                 self.banner.details_clicked.connect(self.show_problems_window)
                 self._root_layout.insertWidget(0, self.banner)
             else:
-                # Баннер уже есть — обновляем
                 self.banner.update_problems(warnings_only)
                 self.banner.show()
         else:
-            # Проблем нет — скрыть баннер
             if self.banner is not None:
                 self.banner.hide()
 
     # ------------------------------------------------------------------
     def _on_tab_changed(self, idx: int):
-        """Переключение вкладок. При клике на «Админ» — требуем пароль."""
+        """При клике на «Админ» — требуем пароль."""
         if idx != 1:
             return
 
@@ -217,7 +282,6 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------
     def _return_to_operator(self, message: str = ""):
-        """Вернуться на вкладку Оператор."""
         self.tabs.blockSignals(True)
         self.tabs.setCurrentIndex(0)
         self.tabs.blockSignals(False)
@@ -226,7 +290,6 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------
     def _set_blur(self, enabled: bool):
-        """Размытие главного окна через скриншот + overlay."""
         if enabled:
             self._overlay = self._create_blur_overlay()
         else:
@@ -236,7 +299,6 @@ class MainWindow(QMainWindow):
                 self._overlay = None
 
     def _create_blur_overlay(self):
-        """Создать оверлей с размытой копией окна."""
         from PySide6.QtWidgets import (
             QWidget, QLabel, QGraphicsBlurEffect,
             QGraphicsScene, QGraphicsPixmapItem

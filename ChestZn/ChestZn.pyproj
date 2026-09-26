@@ -31,12 +31,14 @@
     <Compile Include="barcode.py" />
     <Compile Include="change_password_window.py" />
     <Compile Include="crypto.py" />
+    <Compile Include="cz_import.py" />
     <Compile Include="db.py" />
     <Compile Include="db_view.py" />
     <Compile Include="docs_helper.py" />
     <Compile Include="error_handler.py" />
     <Compile Include="export.py" />
     <Compile Include="importer.py" />
+    <Compile Include="import_codes_window.py" />
     <Compile Include="logger.py" />
     <Compile Include="login_window.py" />
     <Compile Include="main.py" />

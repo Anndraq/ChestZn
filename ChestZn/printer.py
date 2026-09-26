@@ -2,7 +2,20 @@
 Универсальный модуль печати.
 Поддерживает ZPL, TSPL, EZPL и печать через Windows-драйвер.
 Автоопределение принтера и языка по имени модели.
+
+Конфигурация (config.json) поддерживает:
+  - ОДИН принтер (старый формат): printer_name, printer_ip, printer_lang, ...
+  - НЕСКОЛЬКО принтеров по точкам (новый формат):
+      "point": "T-01",
+      "printers": {
+        "T-01": {"printer_name": "...", "printer_lang": "zpl"},
+        "T-02": {"printer_name": "...", "printer_lang": "tspl"}
+      }
+
+Функция get_printer_for_point(cfg, point) возвращает настройки
+принтера для указанной точки или fallback на общие.
 """
+import re
 import os
 import json
 import socket
@@ -25,10 +38,21 @@ CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "ChestZn"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
 DEFAULT_CONFIG = {
+    # Точка (гибрид: авто + fallback)
+    "point": "",
+    "point_auto": True,
+    "point_map": {},     # {"PC-LINE-01": "T-01", ...}
+
+    # Принтеры по точкам (новый формат)
+    "printers": {},      # {"T-01": {"printer_name": ..., "printer_lang": ...}}
+
+    # Общий принтер (fallback, старый формат)
     "printer_name": "",
     "printer_ip": "",
     "printer_port": 9100,
     "printer_lang": "auto",
+
+    # Параметры этикетки (общие)
     "label_width_mm": 58,
     "label_height_mm": 40,
     "dpi": 203,
@@ -36,7 +60,32 @@ DEFAULT_CONFIG = {
 }
 
 
+# ============================================================
+# Санитайз SN для bwipp (без скобок и запрещённых символов)
+# ============================================================
+
+def _sanitize_sn_for_bwipp(sn: str) -> str:
+    """
+    bwipp требует CSET 82 и не терпит скобок в SN.
+    Убираем всё, что ломает парсер.
+    """
+    if not sn:
+        return sn
+    allowed = set(
+        "0123456789"
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        "abcdefghijklmnopqrstuvwxyz"
+        "!\"%&'*+,-./:;<=>?_ "   # ← БЕЗ ( )
+    )
+    return "".join(ch for ch in sn if ch in allowed)
+
+
+# ============================================================
+# Конфиг
+# ============================================================
+
 def load_config() -> dict:
+    """Прочитать config.json. Объединить с DEFAULT_CONFIG."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     if CONFIG_FILE.exists():
         try:
@@ -49,9 +98,43 @@ def load_config() -> dict:
 
 
 def save_config(cfg: dict):
+    """Сохранить config.json."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
+
+
+# ============================================================
+# Принтер для конкретной точки
+# ============================================================
+
+def get_printer_for_point(cfg: dict, point: str) -> dict:
+    """
+    Вернуть настройки принтера для указанной точки.
+
+    Логика:
+      1. Если в cfg["printers"][point] есть — мержим поверх общих.
+      2. Иначе — возвращаем общий принтер (fallback).
+    """
+    result = dict(cfg)  # копия общих настроек
+
+    printers = cfg.get("printers") or {}
+    if point and point in printers:
+        point_cfg = printers[point] or {}
+        result.update(point_cfg)
+        result["_point_source"] = f"printers[{point}]"
+    else:
+        result["_point_source"] = "fallback"
+
+    return result
+
+
+def set_printer_for_point(cfg: dict, point: str, printer_cfg: dict) -> dict:
+    """Сохранить настройки принтера для точки в cfg."""
+    printers = dict(cfg.get("printers") or {})
+    printers[point] = dict(printer_cfg)
+    cfg["printers"] = printers
+    return cfg
 
 
 # ============================================================
@@ -66,6 +149,7 @@ _LANG_BY_BRAND = {
 
 
 def detect_language(printer_name: str) -> str:
+    """Определить язык по имени принтера. По умолчанию — windows."""
     if not printer_name:
         return "windows"
     name = printer_name.lower()
@@ -186,21 +270,50 @@ def _send_windows_raw(printer_name: str, data: bytes):
     finally:
         win32print.ClosePrinter(handle)
 
-def _render_datamatrix_png(code: str, size_mm: float = 30.0, dpi: int = 203) -> str:
-    """
-    Отрендерить DataMatrix в PNG-файл во временной папке.
-    Возвращает путь к файлу.
-    """
+
+def _render_datamatrix_png(code: str, size_mm: float = 30.0,
+                           dpi: int = 203) -> str:
+    """Отрендерить DataMatrix в PNG-файл. Автоматически конвертирует в GS1-формат."""
     import treepoem
     import tempfile
 
-    # размер в пикселях исходя из мм и dpi
+    def to_gs1_paren(c):
+        if not c:
+            return c
+        s = str(c).strip()
+        s = s.replace("_x001D_", "\x1d")
+
+        m = re.match(
+            r"^01(\d{14})21(.+?)(?:\x1d)?91([^\x1d]+)(?:\x1d)?92(.+)$",
+            s, re.DOTALL,
+        )
+        if m:
+            gtin, sn, verify, crypto = m.groups()
+            sn = _sanitize_sn_for_bwipp(sn)
+            verify = _sanitize_sn_for_bwipp(verify)
+            crypto = _sanitize_sn_for_bwipp(crypto)
+            return f"(01){gtin}(21){sn}(91){verify}(92){crypto}"
+
+        m = re.match(r"^01(\d{14})21(.+)$", s, re.DOTALL)
+        if m:
+            gtin, sn = m.groups()
+            sn = _sanitize_sn_for_bwipp(sn)
+            return f"(01){gtin}(21){sn}"
+
+        m = re.match(r"^01(\d{14})$", s)
+        if m:
+            return f"(01){m.group(1)}"
+
+        return s
+
+    gs1_code = to_gs1_paren(code)
+
     size_px = int(round(size_mm / 25.4 * dpi))
-    size_px = max(size_px, 200)   # минимум 200 px, чтобы сканер прочитал
+    size_px = max(size_px, 200)
 
     img = treepoem.generate_barcode(
         barcode_type="gs1datamatrix",
-        data=code,
+        data=gs1_code,
     )
     img = img.convert("RGB")
     img = img.resize((size_px, size_px))
@@ -209,6 +322,7 @@ def _render_datamatrix_png(code: str, size_mm: float = 30.0, dpi: int = 203) -> 
     os.close(fd)
     img.save(path, "PNG")
     return path
+
 
 def _print_image_windows(printer_name: str, image_path: str):
     if not _HAS_WIN:
@@ -235,6 +349,11 @@ def _print_image_windows(printer_name: str, image_path: str):
 # ============================================================
 
 def print_code(code: str, cfg: dict = None) -> dict:
+    """
+    Печать одного кода.
+    cfg — настройки (уже могут быть для конкретной точки).
+    Если cfg не передан — берётся общий config.json.
+    """
     if cfg is None:
         cfg = load_config()
 
@@ -246,6 +365,7 @@ def print_code(code: str, cfg: dict = None) -> dict:
     port = cfg.get("printer_port", 9100)
 
     try:
+        # --- Сетевой принтер (IP) ---
         if lang in ("zpl", "tspl", "ezpl") and ip:
             if lang == "zpl":
                 data = build_zpl(code, cfg)
@@ -256,6 +376,7 @@ def print_code(code: str, cfg: dict = None) -> dict:
             _send_tcp(ip, port, data)
             return {"ok": True, "info": f"Отправлено на {ip}:{port} ({lang})"}
 
+        # --- Локальный принтер с поддержкой ZPL/TSPL/EZPL ---
         if lang in ("zpl", "tspl", "ezpl") and cfg.get("printer_name"):
             if lang == "zpl":
                 data = build_zpl(code, cfg)
@@ -264,9 +385,12 @@ def print_code(code: str, cfg: dict = None) -> dict:
             else:
                 data = build_ezpl(code, cfg)
             _send_windows_raw(cfg["printer_name"], data)
-            return {"ok": True, "info": f"Отправлено на {cfg['printer_name']} ({lang})"}
+            return {
+                "ok": True,
+                "info": f"Отправлено на {cfg['printer_name']} ({lang})",
+            }
 
-                # ---------- Офисный принтер: рендерим PNG и шлём через драйвер ----------
+        # --- Офисный принтер: PNG через драйвер Windows ---
         if cfg.get("printer_name"):
             png_path = _render_datamatrix_png(
                 code,
@@ -276,8 +400,10 @@ def print_code(code: str, cfg: dict = None) -> dict:
             )
             try:
                 _print_image_windows(cfg["printer_name"], png_path)
-                return {"ok": True,
-                        "info": f"Отправлено на {cfg['printer_name']} (windows / PNG)"}
+                return {
+                    "ok": True,
+                    "info": f"Отправлено на {cfg['printer_name']} (windows / PNG)",
+                }
             finally:
                 try:
                     os.remove(png_path)
@@ -291,6 +417,7 @@ def print_code(code: str, cfg: dict = None) -> dict:
 
 
 def autodetect() -> dict:
+    """Найти принтеры Windows, вернуть все + лучший вариант."""
     printers = list_printers()
     default = default_printer()
 
@@ -317,3 +444,34 @@ def autodetect() -> dict:
         "all": suggestions,
         "suggested": suggestions[0] if suggestions else None,
     }
+
+
+# ============================================================
+# Определение точки на этой машине
+# ============================================================
+
+def detect_point(cfg: dict = None) -> str:
+    """
+    Определить точку для текущего компьютера.
+
+    Логика:
+      1. Если cfg["point"] задан и НЕ пустой — берём его.
+      2. Если cfg["point_auto"] и COMPUTERNAME в cfg["point_map"] — берём оттуда.
+      3. Иначе — "" (не задана).
+    """
+    if cfg is None:
+        cfg = load_config()
+
+    # Явное указание точки
+    explicit = (cfg.get("point") or "").strip()
+    if explicit:
+        return explicit
+
+    # Авто по имени компьютера
+    if cfg.get("point_auto"):
+        hostname = os.environ.get("COMPUTERNAME", "").strip()
+        point_map = cfg.get("point_map") or {}
+        if hostname and hostname in point_map:
+            return point_map[hostname]
+
+    return ""

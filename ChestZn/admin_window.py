@@ -1,4 +1,5 @@
 """Админ-панель: боковое меню + QStackedWidget с разделами."""
+import re
 from typing import Optional
 
 from PySide6.QtWidgets import (
@@ -17,7 +18,8 @@ from toast import Toast
 from change_password_window import ChangePasswordWindow
 from security_question_window import SecurityQuestionWindow
 from printer import (list_printers, detect_language, load_config,
-                     save_config, print_code, default_printer)
+                     save_config, print_code, default_printer,
+                     get_printer_for_point, set_printer_for_point)
 from logger import log_file_path, log_dir_path, get_logger
 log = get_logger("admin")
 from backup import (create_backup, list_backups, restore_backup,
@@ -27,7 +29,7 @@ from importer import (import_pool_codes, import_gtin_map,
                       download_pool_template, download_gtin_map_template)
 
 
-def table(headers: list[str]) -> QTableWidget:
+def table(headers: list) -> QTableWidget:
     t = QTableWidget(0, len(headers))
     t.setHorizontalHeaderLabels(headers)
     t.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
@@ -39,7 +41,7 @@ def table(headers: list[str]) -> QTableWidget:
     return t
 
 
-def cell(text: str, color: Optional[str] = None, mono: bool = False) -> QTableWidgetItem:
+def cell(text, color: Optional[str] = None, mono: bool = False) -> QTableWidgetItem:
     it = QTableWidgetItem(str(text) if text is not None else "—")
     if color:
         it.setForeground(QBrush(QColor(color)))
@@ -54,11 +56,10 @@ class AdminWindow(QWidget):
         self.store = store
         self.toast = Toast(self)
 
-        # Таймер дебаунса для предпросмотра шаблона
         from PySide6.QtCore import QTimer
         self._tpl_preview_timer = QTimer(self)
         self._tpl_preview_timer.setSingleShot(True)
-        self._tpl_preview_timer.setInterval(300)   # 300 мс
+        self._tpl_preview_timer.setInterval(300)
         self._tpl_preview_timer.timeout.connect(self._tpl_refresh_preview_now)
 
         root = QHBoxLayout(self)
@@ -93,33 +94,37 @@ class AdminWindow(QWidget):
         section("НАСТРОЙКА")
         self.nav_points       = nav("🏢  Точки", "points")
         self.nav_users        = nav("👥  Пользователи", "users")
-        self.nav_integrations = nav("🔌  Интеграции", "integrations")
         self.nav_templates    = nav("🏷️  Шаблоны", "templates")
         self.nav_pool         = nav("🎫  Пул кодов", "pool")
-        self.nav_printer      = nav("🖨  Принтер", "printer")
+        self.nav_imports      = nav("📥  Импорты", "imports")
+        self.nav_scanned      = nav("🔗  Привязки ШК→ЧЗ", "scanned")
+        self.nav_printer      = nav("🖨  Принтеры", "printer")
 
         section("КОНТРОЛЬ")
-        self.nav_journal  = nav("📜  Журнал", "journal")
-        self.nav_security = nav("🔒  Безопасность", "security")
-        self.nav_logs     = nav("📄  Логи", "logs")
-        self.nav_backup   = nav("💾  Бэкапы", "backup")
+        self.nav_journal       = nav("📜  Журнал", "journal")
+        self.nav_discrepancies = nav("⚠  Расхождения", "discrepancies")
+        self.nav_security      = nav("🔒  Безопасность", "security")
+        self.nav_logs          = nav("📄  Логи", "logs")
+        self.nav_backup        = nav("💾  Бэкапы", "backup")
 
         sb.addStretch(1)
 
         # ============ STACK ============
         self.stack = QStackedWidget()
-        self.stack.addWidget(self._page_dashboard())     # 0
-        self.stack.addWidget(self._page_queue())         # 1
-        self.stack.addWidget(self._page_points())        # 2
-        self.stack.addWidget(self._page_users())         # 3
-        self.stack.addWidget(self._page_integrations())  # 4
-        self.stack.addWidget(self._page_templates())     # 5
-        self.stack.addWidget(self._page_pool())          # 6
-        self.stack.addWidget(self._page_printer())       # 7
-        self.stack.addWidget(self._page_journal())       # 8
-        self.stack.addWidget(self._page_logs())          # 9
-        self.stack.addWidget(self._page_backup())        # 10
-        self.stack.addWidget(self._page_security())      # 11
+        self.stack.addWidget(self._page_dashboard())      # 0
+        self.stack.addWidget(self._page_queue())          # 1
+        self.stack.addWidget(self._page_points())         # 2
+        self.stack.addWidget(self._page_users())          # 3
+        self.stack.addWidget(self._page_templates())      # 4
+        self.stack.addWidget(self._page_pool())           # 5
+        self.stack.addWidget(self._page_imports())        # 6
+        self.stack.addWidget(self._page_scanned())        # 7
+        self.stack.addWidget(self._page_printer())        # 8
+        self.stack.addWidget(self._page_journal())        # 9
+        self.stack.addWidget(self._page_logs())           # 10
+        self.stack.addWidget(self._page_backup())         # 11
+        self.stack.addWidget(self._page_security())       # 12
+        self.stack.addWidget(self._page_discrepancies())  # 13
 
         root.addWidget(sidebar)
         root.addWidget(self.stack, stretch=1)
@@ -133,32 +138,36 @@ class AdminWindow(QWidget):
     def switch(self, page_id: str):
         pages = {
             "dashboard": 0, "queue": 1, "points": 2, "users": 3,
-            "integrations": 4, "templates": 5, "pool": 6,
-            "printer": 7, "journal": 8, "logs": 9,
-            "backup": 10, "security": 11,
+            "templates": 4, "pool": 5,
+            "imports": 6, "scanned": 7, "printer": 8,
+            "journal": 9, "logs": 10, "backup": 11, "security": 12,
+            "discrepancies": 13,
         }
         idx = pages.get(page_id, 0)
         self.stack.setCurrentIndex(idx)
         for btn in [self.nav_dashboard, self.nav_queue, self.nav_points,
-                    self.nav_users, self.nav_integrations, self.nav_templates,
-                    self.nav_pool, self.nav_printer, self.nav_journal,
-                    self.nav_logs, self.nav_backup, self.nav_security]:
+                    self.nav_users, self.nav_templates,
+                    self.nav_pool, self.nav_imports, self.nav_scanned,
+                    self.nav_printer, self.nav_journal, self.nav_logs,
+                    self.nav_backup, self.nav_security, self.nav_discrepancies]:
             btn.setChecked(btn.property("page_id") == page_id)
         self.refresh(page_id)
 
     def refresh(self, page_id: str):
-        if page_id == "dashboard":    self._refresh_dashboard()
-        if page_id == "queue":        self._refresh_queue()
-        if page_id == "points":       self._refresh_points()
-        if page_id == "users":        self._refresh_users()
-        if page_id == "integrations": self._refresh_integrations()
-        if page_id == "templates":    self._refresh_templates()
-        if page_id == "pool":         self._refresh_pool()
-        if page_id == "printer":      self._refresh_printer()
-        if page_id == "journal":      self._refresh_journal()
-        if page_id == "logs":         self._refresh_logs()
-        if page_id == "security":     self._refresh_security()
-        if page_id == "backup":       self._refresh_backup()
+        if page_id == "dashboard":      self._refresh_dashboard()
+        if page_id == "queue":          self._refresh_queue()
+        if page_id == "points":         self._refresh_points()
+        if page_id == "users":          self._refresh_users()
+        if page_id == "templates":      self._refresh_templates()
+        if page_id == "pool":           self._refresh_pool()
+        if page_id == "imports":        self._refresh_imports()
+        if page_id == "scanned":        self._refresh_scanned()
+        if page_id == "printer":        self._refresh_printer()
+        if page_id == "journal":        self._refresh_journal()
+        if page_id == "logs":           self._refresh_logs()
+        if page_id == "security":       self._refresh_security()
+        if page_id == "backup":         self._refresh_backup()
+        if page_id == "discrepancies":  self._refresh_discrepancies()
 
     # ==================================================================
     # DASHBOARD
@@ -184,24 +193,7 @@ class AdminWindow(QWidget):
         ]:
             kpi_row.addWidget(self._make_kpi(key, label, color))
         v.addLayout(kpi_row)
-
-                # Индикатор целостности журнала
-        self.journal_integrity_label = QLabel("")
-        self.journal_integrity_label.setStyleSheet(
-            "font-size:12px; padding:8px; "
-            "background:rgba(139,151,166,.1); border-radius:6px;"
-        )
-        v.addWidget(self.journal_integrity_label)
-
-        t = QLabel("ИНТЕГРАЦИИ")
-        t.setStyleSheet("color:#8b97a6; font-size:11px; font-weight:600; letter-spacing:1.5px; margin-top:10px;")
-        v.addWidget(t)
-
-        self.dash_integrations = table(["Система", "Статус", "Последний ответ", "За сутки"])
-        self.dash_integrations.setMinimumHeight(160)
-        v.addWidget(self.dash_integrations)
-
-        v.addStretch(1)
+                
         return w
 
     def _make_kpi(self, key: str, label: str, color: str) -> QFrame:
@@ -213,7 +205,10 @@ class AdminWindow(QWidget):
         val = QLabel("0")
         val.setProperty("class", "kpiValue")
         colors = {"accent": "#3b82f6", "ok": "#22c55e", "warn": "#f59e0b", "err": "#ef4444"}
-        val.setStyleSheet(f"color:{colors[color]}; font-size:24px; font-weight:600; font-family:Consolas,monospace;")
+        val.setStyleSheet(
+            f"color:{colors[color]}; font-size:24px; "
+            f"font-weight:600; font-family:Consolas,monospace;"
+        )
         v.addWidget(l); v.addWidget(val)
         self.kpi_labels[key] = val
         return box
@@ -224,39 +219,6 @@ class AdminWindow(QWidget):
         self.kpi_labels["prints"].setText(str(c["prints"]))
         self.kpi_labels["errors"].setText(str(c["errors"]))
         self.kpi_labels["queue"].setText(str(len(self.store.queue)))
-
-        t = self.dash_integrations
-        t.setRowCount(0)
-        for integ in self.store.integrations.values():
-            r = t.rowCount(); t.insertRow(r)
-            t.setItem(r, 0, cell(integ["name"]))
-            ok = integ["status"] == "ok"
-            t.setItem(r, 1, cell("работает" if ok else "ошибка",
-                                 "#22c55e" if ok else "#ef4444"))
-            t.setItem(r, 2, cell(integ["last"], mono=True))
-            t.setItem(r, 3, cell(integ["calls_today"], mono=True))
-
-        # Проверить целостность журнала
-        try:
-            res = self.store.verify_audit_chain()
-            if res["ok"]:
-                self.journal_integrity_label.setText(
-                    f"🔐 Журнал: цел ({res['total']} записей)"
-                )
-                self.journal_integrity_label.setStyleSheet(
-                    "color:#22c55e; font-size:12px; padding:8px; "
-                    "background:rgba(34,197,94,.1); border-radius:6px;"
-                )
-            else:
-                self.journal_integrity_label.setText(
-                    f"⚠ Журнал повреждён: {len(res['broken'])} из {res['total']}"
-                )
-                self.journal_integrity_label.setStyleSheet(
-                    "color:#ef4444; font-size:12px; padding:8px; "
-                    "background:rgba(239,68,68,.1); border-radius:6px;"
-                )
-        except Exception:
-            self.journal_integrity_label.setText("")
 
     # ==================================================================
     # QUEUE
@@ -324,7 +286,9 @@ class AdminWindow(QWidget):
         v.setSpacing(14)
         tt = QLabel("Точки"); tt.setStyleSheet("font-size:18px; font-weight:600;")
         v.addWidget(tt)
-        self.points_table = table(["ID", "Название", "Адрес", "Статус", "IP", "Оператор", "Принтер"])
+        self.points_table = table(
+            ["ID", "Название", "Адрес", "Статус", "IP", "Оператор", "Принтер"]
+        )
         v.addWidget(self.points_table, stretch=1)
         return w
 
@@ -352,7 +316,9 @@ class AdminWindow(QWidget):
         v.setSpacing(14)
         tt = QLabel("Пользователи"); tt.setStyleSheet("font-size:18px; font-weight:600;")
         v.addWidget(tt)
-        self.users_table = table(["ФИО", "Логин", "Роль", "Точка", "Последний вход", "Статус"])
+        self.users_table = table(
+            ["ФИО", "Логин", "Роль", "Точка", "Последний вход", "Статус"]
+        )
         v.addWidget(self.users_table, stretch=1)
         return w
 
@@ -372,141 +338,6 @@ class AdminWindow(QWidget):
                                  "#22c55e" if u["active"] else "#ef4444"))
 
     # ==================================================================
-    # INTEGRATIONS
-    # ==================================================================
-    def _page_integrations(self) -> QWidget:
-        w = QWidget()
-        v = QVBoxLayout(w)
-        v.setContentsMargins(24, 20, 24, 20)
-        v.setSpacing(14)
-        tt = QLabel("Интеграции"); tt.setStyleSheet("font-size:18px; font-weight:600;")
-        v.addWidget(tt)
-
-        self.integration_cards = QVBoxLayout()
-        self.integration_cards.setSpacing(12)
-        v.addLayout(self.integration_cards)
-
-        # ---------- Карточка: маппинг GTIN ----------
-        card_map = QFrame(); card_map.setObjectName("card")
-        cmv = QVBoxLayout(card_map)
-        cmv.setContentsMargins(18, 14, 18, 14)
-        cmv.setSpacing(10)
-
-        title_map = QLabel("МАППИНГ GTIN: ИНОСТРАННЫЙ → ЧЗ")
-        title_map.setStyleSheet(
-            "color:#8b97a6; font-size:11px; font-weight:600; letter-spacing:1.5px;"
-        )
-        cmv.addWidget(title_map)
-
-        desc_map = QLabel(
-            "Таблица соответствия: какой иностранный GTIN какому GTIN "
-            "«Честного знака» соответствует. Заполняется в Excel и "
-            "загружается CSV-файлом."
-        )
-        desc_map.setStyleSheet("color:#8b97a6; font-size:12px;")
-        desc_map.setWordWrap(True)
-        cmv.addWidget(desc_map)
-
-        h_map = QHBoxLayout()
-        h_map.setSpacing(8)
-
-        btn_imp_map = QPushButton("⬆ Импорт CSV")
-        btn_imp_map.setProperty("primary", True)
-        btn_imp_map.clicked.connect(self._import_gtin_map)
-        h_map.addWidget(btn_imp_map)
-
-        btn_tpl_map = QPushButton("📄 Скачать шаблон")
-        btn_tpl_map.clicked.connect(self._template_gtin_map)
-        h_map.addWidget(btn_tpl_map)
-
-        h_map.addStretch(1)
-
-        self.gtin_map_count_label = QLabel("")
-        self.gtin_map_count_label.setStyleSheet("color:#8b97a6; font-size:11px;")
-        h_map.addWidget(self.gtin_map_count_label)
-
-        cmv.addLayout(h_map)
-
-        v.addWidget(card_map)
-
-        v.addStretch(1)
-        return w
-
-    def _refresh_integrations(self):
-        while self.integration_cards.count():
-            item = self.integration_cards.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-
-        for integ in self.store.integrations.values():
-            card = QFrame(); card.setObjectName("card")
-            h = QHBoxLayout(card)
-            h.setContentsMargins(18, 16, 18, 16)
-            h.setSpacing(20)
-
-            left = QVBoxLayout()
-            title = QLabel(integ["name"] + ("   ● работает" if integ["status"] == "ok" else "   ● ошибка"))
-            title.setStyleSheet("font-size:14px; font-weight:600; color:#e6edf3;")
-            left.addWidget(title)
-
-            for k, val in [
-                ("Endpoint", integ["endpoint"]),
-                ("Контур", integ["contour"]),
-                ("Последний ответ", integ["last"]),
-                ("За сутки", f"{integ['calls_today']} вызовов"),
-            ]:
-                line = QLabel(f"{k}: {val}")
-                line.setStyleSheet("color:#8b97a6; font-size:12px; font-family:Consolas,monospace;")
-                left.addWidget(line)
-
-            h.addLayout(left, stretch=1)
-
-            right = QVBoxLayout()
-            btn_check = QPushButton("🔍 Проверить связь")
-            btn_check.setProperty("primary", True)
-            btn_check.clicked.connect(lambda _, k=integ["key"]: self._check_integration(k))
-            right.addWidget(btn_check)
-            btn_cfg = QPushButton("⚙ Настройки")
-            btn_cfg.clicked.connect(lambda: self.toast.show_message("Настройки", "ok"))
-            right.addWidget(btn_cfg)
-            right.addStretch(1)
-            h.addLayout(right)
-
-            self.integration_cards.addWidget(card)
-
-        # Обновить счётчик маппинга GTIN (после цикла)
-        try:
-            n = self.store.count_gtin_map()
-            self.gtin_map_count_label.setText(f"Записей: {n}")
-        except Exception:
-            pass
-
-    def _check_integration(self, key: str):
-        integ = self.store.integrations[key]
-        if key == "onec":
-            self.toast.show_message(f"{integ['name']}: timeout", "err")
-        else:
-            self.toast.show_message(f"{integ['name']}: связь в норме · 0.6 с", "ok")
-
-    def _import_gtin_map(self):
-        result = import_gtin_map(self.store, self)
-        if result["ok"]:
-            QMessageBox.information(
-                self, "Импорт выполнен",
-                result["info"]
-            )
-            self._refresh_integrations()
-        elif result["info"] != "Отменено":
-            self.toast.show_message(f"Ошибка: {result['info']}", "err")
-
-    def _template_gtin_map(self):
-        result = download_gtin_map_template(self)
-        if result["ok"]:
-            self.toast.show_message(result["info"], "ok")
-        elif result["info"] != "Отменено":
-            self.toast.show_message(f"Ошибка: {result['info']}", "err")
-
-    # ==================================================================
     # TEMPLATES
     # ==================================================================
     def _page_templates(self) -> QWidget:
@@ -515,7 +346,6 @@ class AdminWindow(QWidget):
         v.setContentsMargins(24, 20, 24, 20)
         v.setSpacing(12)
 
-        # ---------- Заголовок ----------
         head = QHBoxLayout()
         tt = QLabel("Шаблоны этикеток")
         tt.setStyleSheet("font-size:18px; font-weight:600;")
@@ -532,11 +362,9 @@ class AdminWindow(QWidget):
 
         v.addLayout(head)
 
-        # ---------- Основная область: 3 колонки ----------
         row = QHBoxLayout()
         row.setSpacing(12)
 
-        # === Слева: список шаблонов ===
         self.tpl_list = QTableWidget(0, 2)
         self.tpl_list.setHorizontalHeaderLabels(["Шаблон", "По умолч."])
         hh_l = self.tpl_list.horizontalHeader()
@@ -552,7 +380,6 @@ class AdminWindow(QWidget):
         self.tpl_list.itemSelectionChanged.connect(self._on_template_select)
         row.addWidget(self.tpl_list)
 
-        # === Центр: редактор ===
         right = QVBoxLayout()
         right.setSpacing(8)
 
@@ -597,7 +424,6 @@ class AdminWindow(QWidget):
         size_row.addStretch(1)
         right.addLayout(size_row)
 
-        # --- Заголовок секции полей + кнопки ---
         fields_head = QHBoxLayout()
         fields_head.setSpacing(6)
 
@@ -615,23 +441,8 @@ class AdminWindow(QWidget):
         btn_add_field.clicked.connect(self._tpl_add_field)
         fields_head.addWidget(btn_add_field)
 
-        btn_up = QPushButton("↑")
-        btn_up.setFixedSize(40, 30)
-        btn_up.setToolTip("Переместить вверх")
-        btn_up.setStyleSheet("font-size:18px; font-weight:700; padding:0;")
-        btn_up.clicked.connect(lambda: self._tpl_move_field(-1))
-        fields_head.addWidget(btn_up)
-
-        btn_down = QPushButton("↓")
-        btn_down.setFixedSize(40, 30)
-        btn_down.setToolTip("Переместить вниз")
-        btn_down.setStyleSheet("font-size:18px; font-weight:700; padding:0;")
-        btn_down.clicked.connect(lambda: self._tpl_move_field(1))
-        fields_head.addWidget(btn_down)
-
         right.addLayout(fields_head)
 
-        # --- Таблица полей ---
         self.tpl_fields = QTableWidget(0, 5)
         self.tpl_fields.setHorizontalHeaderLabels(
             ["Поле", "Подпись на этикетке", "Обяз.", "Шрифт", ""]
@@ -656,7 +467,6 @@ class AdminWindow(QWidget):
         self.tpl_fields.itemChanged.connect(lambda _: self._tpl_refresh_preview())
         right.addWidget(self.tpl_fields, stretch=1)
 
-        # --- Кнопки сохранения ---
         save_row = QHBoxLayout()
         save_row.setSpacing(8)
 
@@ -674,79 +484,13 @@ class AdminWindow(QWidget):
 
         row.addLayout(right, stretch=1)
 
-        # === Справа: предпросмотр ===
         row.addWidget(self._build_template_preview())
 
         v.addLayout(row, stretch=1)
 
-        # ---------- Привязки GTIN ----------
-        card_bind = QFrame()
-        card_bind.setObjectName("card")
-        cb = QVBoxLayout(card_bind)
-        cb.setContentsMargins(18, 12, 18, 12)
-        cb.setSpacing(6)
-
-        tt_bind = QLabel("ПРИВЯЗКА К GTIN (необязательно)")
-        tt_bind.setStyleSheet(
-            "color:#8b97a6; font-size:11px; font-weight:600; letter-spacing:1.5px;"
-        )
-        cb.addWidget(tt_bind)
-
-        desc_bind = QLabel(
-            "Какой шаблон использовать для GTIN, начинающегося с этих цифр. "
-            "Пример: «046001» — этот шаблон для всех GTIN на 046001."
-        )
-        desc_bind.setStyleSheet("color:#8b97a6; font-size:11px;")
-        desc_bind.setWordWrap(True)
-        cb.addWidget(desc_bind)
-
-        bind_row = QHBoxLayout()
-        bind_row.setSpacing(8)
-
-        bind_row.addWidget(QLabel("GTIN-префикс:"))
-        self.bind_gtin = QLineEdit()
-        self.bind_gtin.setPlaceholderText("4–14 цифр")
-        self.bind_gtin.setFixedWidth(140)
-        bind_row.addWidget(self.bind_gtin)
-
-        btn_bind = QPushButton("🔗 Привязать")
-        btn_bind.clicked.connect(self._tpl_bind_create)
-        bind_row.addWidget(btn_bind)
-
-        bind_row.addStretch(1)
-        cb.addLayout(bind_row)
-
-        self.bind_table = QTableWidget(0, 4)
-        self.bind_table.setHorizontalHeaderLabels(
-            ["GTIN-префикс", "Шаблон", "Приоритет", ""]
-        )
-        hb = self.bind_table.horizontalHeader()
-        hb.setSectionResizeMode(0, QHeaderView.Fixed)
-        hb.setSectionResizeMode(1, QHeaderView.Stretch)
-        hb.setSectionResizeMode(2, QHeaderView.Fixed)
-        hb.setSectionResizeMode(3, QHeaderView.Fixed)
-        self.bind_table.setColumnWidth(0, 140)
-        self.bind_table.setColumnWidth(2, 90)
-        self.bind_table.setColumnWidth(3, 50)
-        self.bind_table.verticalHeader().setVisible(False)
-        self.bind_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.bind_table.setShowGrid(False)
-        self.bind_table.setFixedHeight(90)
-        cb.addWidget(self.bind_table)
-
-        v.addWidget(card_bind)
-
         return w
 
-    def _dark_label(self, text: str, bold: bool = False) -> QLabel:
-        lbl = QLabel(text)
-        lbl.setStyleSheet(f"color:#000; font-family:Consolas,monospace; font-size:11px; "
-                          f"{'font-weight:600;' if bold else ''}")
-        return lbl
-
     def _refresh_templates(self):
-        # Блокируем сигнал выбора — чтобы selectRow(0) не дёргал
-        # _on_template_select дважды
         self.tpl_list.blockSignals(True)
         try:
             self.tpl_list.setRowCount(0)
@@ -779,21 +523,17 @@ class AdminWindow(QWidget):
         self._current_tpl_code = tpls[idx]["code"]
         tpl = tpls[idx]
 
-        # Блокируем сигналы на время заполнения —
-        # чтобы не дёргать _tpl_refresh_preview много раз подряд
         self.tpl_name_edit.blockSignals(True)
         self.tpl_w.blockSignals(True)
         self.tpl_h.blockSignals(True)
         self.tpl_fields.blockSignals(True)
 
         try:
-            # --- Поля шаблона ---
             self.tpl_name_edit.setText(tpl["name"])
             self.tpl_w.setValue(float(tpl["width_mm"]))
             self.tpl_h.setValue(float(tpl["height_mm"]))
             self.tpl_dpi.setCurrentText(str(tpl["dpi"]))
 
-            # --- Таблица полей ---
             t = self.tpl_fields
             t.setRowCount(0)
 
@@ -801,15 +541,12 @@ class AdminWindow(QWidget):
                 r = t.rowCount()
                 t.insertRow(r)
 
-                # Имя поля — не редактируется
                 item_name = QTableWidgetItem(f.get("name", ""))
                 item_name.setFlags(item_name.flags() & ~Qt.ItemIsEditable)
                 t.setItem(r, 0, item_name)
 
-                # Подпись — редактируется
                 t.setItem(r, 1, QTableWidgetItem(f.get("label", "")))
 
-                # Чекбокс «обязательное» — по центру
                 chk = QCheckBox()
                 chk.setChecked(bool(f.get("required")))
                 wrap_chk = QWidget()
@@ -819,14 +556,12 @@ class AdminWindow(QWidget):
                 wl.setAlignment(Qt.AlignCenter)
                 t.setCellWidget(r, 2, wrap_chk)
 
-                # Шрифт — по центру
                 spin = QSpinBox()
                 spin.setRange(6, 40)
                 spin.setValue(int(f.get("font_size", 12)))
                 spin.setAlignment(Qt.AlignCenter)
                 t.setCellWidget(r, 3, spin)
 
-                # Кнопка удаления — по центру
                 btn_rm = QPushButton("×")
                 btn_rm.setFixedSize(32, 26)
                 btn_rm.setStyleSheet(
@@ -850,14 +585,9 @@ class AdminWindow(QWidget):
             self.tpl_h.blockSignals(False)
             self.tpl_fields.blockSignals(False)
 
-        # Обновить предпросмотр — один раз, после всего
         self._tpl_refresh_preview()
 
-    # ==================================================================
-    # Работа с шаблонами — поля, CRUD, привязки
-    # ==================================================================
     def _current_template(self):
-        """Вернуть текущий выбранный шаблон (dict) или None."""
         rows = self.tpl_list.selectionModel().selectedRows()
         if not rows:
             return None
@@ -868,7 +598,6 @@ class AdminWindow(QWidget):
         return tpls[idx]
 
     def _tpl_add_field(self):
-        """Добавить пустое поле в конец."""
         name, ok = QInputDialog.getText(
             self, "Новое поле",
             "Системное имя (например, country, manufacturer, batch):"
@@ -881,15 +610,11 @@ class AdminWindow(QWidget):
         r = t.rowCount()
         t.insertRow(r)
 
-        # Имя поля — не редактируется
         item_name = QTableWidgetItem(name)
         item_name.setFlags(item_name.flags() & ~Qt.ItemIsEditable)
         t.setItem(r, 0, item_name)
-
-        # Подпись — редактируется
         t.setItem(r, 1, QTableWidgetItem(name))
 
-        # Чекбокс «обязательное» — по центру
         chk = QCheckBox()
         wrap_chk = QWidget()
         wl = QHBoxLayout(wrap_chk)
@@ -898,14 +623,12 @@ class AdminWindow(QWidget):
         wl.setAlignment(Qt.AlignCenter)
         t.setCellWidget(r, 2, wrap_chk)
 
-        # Шрифт — по центру
         spin = QSpinBox()
         spin.setRange(6, 40)
         spin.setValue(12)
         spin.setAlignment(Qt.AlignCenter)
         t.setCellWidget(r, 3, spin)
 
-        # Кнопка удаления — по центру, курсор-указатель
         btn_rm = QPushButton("✕")
         btn_rm.setStyleSheet("color:#ef4444; border:none; font-weight:600;")
         btn_rm.setCursor(Qt.PointingHandCursor)
@@ -922,16 +645,13 @@ class AdminWindow(QWidget):
         self._tpl_refresh_preview()
 
     def _tpl_remove_field(self, row_idx: int):
-        """Удалить поле из таблицы."""
         t = self.tpl_fields
         if 0 <= row_idx < t.rowCount():
             t.removeRow(row_idx)
-            # Переподключить кнопки к актуальным индексам
             self._relink_field_buttons()
             self._tpl_refresh_preview()
 
     def _relink_field_buttons(self):
-        """Переподключить кнопки удаления к правильным индексам (после удаления)."""
         t = self.tpl_fields
         for r in range(t.rowCount()):
             btn = t.cellWidget(r, 4)
@@ -942,75 +662,7 @@ class AdminWindow(QWidget):
                     pass
                 btn.clicked.connect(lambda _, rr=r: self._tpl_remove_field(rr))
 
-    def _tpl_move_field(self, direction: int):
-        """Переместить выбранное поле вверх (-1) или вниз (+1)."""
-        t = self.tpl_fields
-        rows = t.selectionModel().selectedRows()
-        if not rows:
-            return
-        idx = rows[0].row()
-        new_idx = idx + direction
-        if new_idx < 0 or new_idx >= t.rowCount():
-            return
-
-        # Сохранить данные всех полей
-        all_fields = []
-        for r in range(t.rowCount()):
-            name = t.item(r, 0).text() if t.item(r, 0) else ""
-            label = t.item(r, 1).text() if t.item(r, 1) else ""
-            wrap = t.cellWidget(r, 2)
-            chk = wrap.findChild(QCheckBox) if wrap else None
-            required = chk.isChecked() if chk else False
-            spin = t.cellWidget(r, 3)
-            font_size = spin.value() if spin else 12
-            all_fields.append({
-                "name": name, "label": label,
-                "required": required, "font_size": font_size
-            })
-
-        all_fields[idx], all_fields[new_idx] = all_fields[new_idx], all_fields[idx]
-
-                # Перерисовать
-        t.setRowCount(0)
-        for f in all_fields:
-            r = t.rowCount(); t.insertRow(r)
-
-            item_name = QTableWidgetItem(f["name"])
-            item_name.setFlags(item_name.flags() & ~Qt.ItemIsEditable)
-            t.setItem(r, 0, item_name)
-
-            t.setItem(r, 1, QTableWidgetItem(f["label"]))
-
-            chk = QCheckBox(); chk.setChecked(f["required"])
-            wrap_chk = QWidget()
-            wl = QHBoxLayout(wrap_chk)
-            wl.setContentsMargins(0, 0, 0, 0)
-            wl.addWidget(chk)
-            wl.setAlignment(Qt.AlignCenter)
-            t.setCellWidget(r, 2, wrap_chk)
-
-            spin = QSpinBox(); spin.setRange(6, 40)
-            spin.setValue(f["font_size"])
-            spin.setAlignment(Qt.AlignCenter)
-            t.setCellWidget(r, 3, spin)
-
-            btn_rm = QPushButton("✕")
-            btn_rm.setStyleSheet("color:#ef4444; border:none; font-weight:600;")
-            btn_rm.setCursor(Qt.PointingHandCursor)
-            btn_rm.clicked.connect(lambda _, rr=r: self._tpl_remove_field(rr))
-
-            wrap_rm = QWidget()
-            wl2 = QHBoxLayout(wrap_rm)
-            wl2.setContentsMargins(0, 0, 0, 0)
-            wl2.addWidget(btn_rm)
-            wl2.setAlignment(Qt.AlignCenter)
-            t.setCellWidget(r, 4, wrap_rm)
-
-        t.selectRow(new_idx)
-        self._tpl_refresh_preview()
-
     def _collect_fields_from_table(self) -> list:
-        """Собрать поля из таблицы в список dict."""
         t = self.tpl_fields
         fields = []
         for r in range(t.rowCount()):
@@ -1030,7 +682,6 @@ class AdminWindow(QWidget):
         return fields
 
     def _tpl_save(self):
-        """Сохранить текущий шаблон."""
         tpl = self._current_template()
         if not tpl:
             self.toast.show_message("Не выбран шаблон", "warn")
@@ -1061,7 +712,6 @@ class AdminWindow(QWidget):
             self.toast.show_message(f"Ошибка: {result['info']}", "err")
 
     def _tpl_make_default(self):
-        """Сделать текущий шаблон шаблоном по умолчанию."""
         tpl = self._current_template()
         if not tpl:
             return
@@ -1073,7 +723,6 @@ class AdminWindow(QWidget):
             self.toast.show_message(f"Ошибка: {result['info']}", "err")
 
     def _tpl_create(self):
-        """Создать новый шаблон."""
         code, ok = QInputDialog.getText(
             self, "Новый шаблон",
             "Код (латиница, без пробелов, уникальный):"
@@ -1082,14 +731,11 @@ class AdminWindow(QWidget):
             return
         code = code.strip().lower().replace(" ", "_")
 
-        name, ok = QInputDialog.getText(
-            self, "Новый шаблон", "Название:"
-        )
+        name, ok = QInputDialog.getText(self, "Новый шаблон", "Название:")
         if not ok or not name.strip():
             return
         name = name.strip()
 
-        # Базовый набор полей
         default_fields = [
             {"name": "dataMatrix", "label": "", "required": True, "font_size": 0},
             {"name": "name_ru", "label": "Наименование", "required": True, "font_size": 13},
@@ -1106,7 +752,6 @@ class AdminWindow(QWidget):
             self.toast.show_message(f"Ошибка: {result['info']}", "err")
 
     def _tpl_delete(self):
-        """Удалить текущий шаблон."""
         tpl = self._current_template()
         if not tpl:
             self.toast.show_message("Не выбран шаблон", "warn")
@@ -1114,8 +759,7 @@ class AdminWindow(QWidget):
 
         reply = QMessageBox.warning(
             self, "Удалить шаблон?",
-            f"Удалить «{tpl['name']}»?\n\n"
-            "Это действие нельзя отменить.",
+            f"Удалить «{tpl['name']}»?\n\nЭто действие нельзя отменить.",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -1129,57 +773,13 @@ class AdminWindow(QWidget):
         else:
             self.toast.show_message(f"Ошибка: {result['info']}", "err")
 
-    # ---------- Привязки ----------
     def _refresh_bindings(self):
-        """Заполнить таблицу привязок."""
-        self.bind_table.setRowCount(0)
-        bindings = self.store.list_bindings()
-        tpls = {t["code"]: t["name"] for t in self.store.list_templates()}
-
-        for b in bindings:
-            r = self.bind_table.rowCount()
-            self.bind_table.insertRow(r)
-            self.bind_table.setItem(r, 0, cell(b["gtin_prefix"], mono=True))
-            self.bind_table.setItem(r, 1, cell(tpls.get(b["template_code"], b["template_code"])))
-            self.bind_table.setItem(r, 2, cell(str(b["priority"])))
-
-            btn = QPushButton("✕")
-            btn.setFixedWidth(32)
-            btn.setStyleSheet("color:#ef4444; border:none;")
-            btn.clicked.connect(lambda _, bid=b["id"]: self._tpl_bind_delete(bid))
-            self.bind_table.setCellWidget(r, 3, btn)
-
-    def _tpl_bind_create(self):
-        """Создать привязку GTIN-префикса к текущему шаблону."""
-        tpl = self._current_template()
-        if not tpl:
-            self.toast.show_message("Выберите шаблон слева", "warn")
+        try:
+            self.bind_table.setRowCount(0)
+        except AttributeError:
             return
-        prefix = self.bind_gtin.text().strip()
-        if not prefix:
-            self.toast.show_message("Введите GTIN-префикс", "warn")
-            return
-        result = self.store.create_binding(tpl["code"], prefix)
-        if result["ok"]:
-            self.toast.show_message(result["info"], "ok")
-            self.bind_gtin.clear()
-            self._refresh_bindings()
-        else:
-            self.toast.show_message(f"Ошибка: {result['info']}", "err")
 
-    def _tpl_bind_delete(self, binding_id: int):
-        result = self.store.delete_binding(binding_id)
-        if result["ok"]:
-            self.toast.show_message(result["info"], "ok")
-            self._refresh_bindings()
-        else:
-            self.toast.show_message(f"Ошибка: {result['info']}", "err")
-
-    # ==================================================================
-    # Предпросмотр шаблона
-    # ==================================================================
     def _build_template_preview(self) -> QFrame:
-        """Панель предпросмотра шаблона (правая колонка)."""
         card = QFrame()
         card.setObjectName("card")
         card.setFixedWidth(320)
@@ -1194,7 +794,6 @@ class AdminWindow(QWidget):
         )
         v.addWidget(title)
 
-        # Белая область — сама этикетка
         self.tpl_preview_area = QFrame()
         self.tpl_preview_area.setStyleSheet(
             "background:#ffffff; border-radius:6px;"
@@ -1206,14 +805,12 @@ class AdminWindow(QWidget):
         pv.setSpacing(10)
         pv.setAlignment(Qt.AlignTop | Qt.AlignLeft)
 
-        # DataMatrix слева
         self.tpl_preview_dm = QLabel()
         self.tpl_preview_dm.setFixedSize(100, 100)
         self.tpl_preview_dm.setStyleSheet("background:transparent;")
         self.tpl_preview_dm.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         pv.addWidget(self.tpl_preview_dm, alignment=Qt.AlignTop)
 
-        # Текстовые поля справа
         self.tpl_preview_text = QVBoxLayout()
         self.tpl_preview_text.setSpacing(3)
         self.tpl_preview_text.setAlignment(Qt.AlignTop)
@@ -1221,29 +818,22 @@ class AdminWindow(QWidget):
 
         v.addWidget(self.tpl_preview_area)
 
-        # Размеры
         self.tpl_preview_size = QLabel("")
-        self.tpl_preview_size.setStyleSheet(
-            "color:#8b97a6; font-size:11px;"
-        )
+        self.tpl_preview_size.setStyleSheet("color:#8b97a6; font-size:11px;")
         self.tpl_preview_size.setAlignment(Qt.AlignCenter)
         v.addWidget(self.tpl_preview_size)
 
         v.addStretch(1)
-
         return card
 
     def _tpl_refresh_preview(self):
-        """Запустить дебаунс — перерисует предпросмотр через 300 мс."""
         if hasattr(self, "_tpl_preview_timer"):
-            self._tpl_preview_timer.start()   # перезапускает таймер
+            self._tpl_preview_timer.start()
 
     def _tpl_refresh_preview_now(self):
-        """Реальная перерисовка предпросмотра."""
         if not hasattr(self, "tpl_preview_text"):
             return
 
-        # Очистить старые текстовые поля
         while self.tpl_preview_text.count():
             item = self.tpl_preview_text.takeAt(0)
             if item.widget():
@@ -1295,7 +885,7 @@ class AdminWindow(QWidget):
             self.tpl_preview_text.addWidget(lbl)
 
         if has_dm:
-            sample_code = "(01)04600123456782(21)SN0004821(91)ABCD(92)XYZ12345"
+            sample_code = "01" + "04600123456782" + "21" + "SN0004821" + "\x1d91ABCD\x1d92XYZ12345"
             pix = render_datamatrix(sample_code, 100)
             self.tpl_preview_dm.setPixmap(pix)
             self.tpl_preview_dm.show()
@@ -1313,7 +903,7 @@ class AdminWindow(QWidget):
             pass
 
     # ==================================================================
-    # POOL
+    # POOL (с фильтром по точке + импорт xlsx)
     # ==================================================================
     def _page_pool(self) -> QWidget:
         w = QWidget()
@@ -1337,48 +927,106 @@ class AdminWindow(QWidget):
 
         v.addLayout(head)
 
-        # ---------- Панель импорта ----------
+        # Фильтр по точке
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(8)
+
+        filter_row.addWidget(QLabel("Точка:"))
+        self.pool_point_filter = QComboBox()
+        self.pool_point_filter.setFixedWidth(220)
+        self.pool_point_filter.addItem("Все точки", None)
+        for p in self.store.points:
+            self.pool_point_filter.addItem(
+                f"{p['id']} — {p['name']}", p["id"]
+            )
+        idx = self.pool_point_filter.findData(self.store.current_point)
+        if idx >= 0:
+            self.pool_point_filter.setCurrentIndex(idx)
+        self.pool_point_filter.currentIndexChanged.connect(self._refresh_pool)
+        filter_row.addWidget(self.pool_point_filter)
+
+        filter_row.addStretch(1)
+
+        self.pool_count_label = QLabel("")
+        self.pool_count_label.setStyleSheet("color:#8b97a6; font-size:11px;")
+        filter_row.addWidget(self.pool_count_label)
+
+        v.addLayout(filter_row)
+
+        # Кнопки импорта
         toolbar2 = QHBoxLayout()
         toolbar2.setSpacing(8)
 
+        btn_import_xlsx = QPushButton("📥 Импорт xlsx (ЦРПТ)")
+        btn_import_xlsx.setProperty("primary", True)
+        btn_import_xlsx.clicked.connect(self._import_codes_xlsx)
+        toolbar2.addWidget(btn_import_xlsx)
+
         btn_import = QPushButton("⬆ Импорт CSV")
-        btn_import.setProperty("primary", True)
         btn_import.clicked.connect(self._import_pool)
         toolbar2.addWidget(btn_import)
 
-        btn_template = QPushButton("📄 Скачать шаблон")
+        btn_template = QPushButton("📄 Скачать шаблон CSV")
         btn_template.clicked.connect(self._template_pool)
         toolbar2.addWidget(btn_template)
 
         toolbar2.addStretch(1)
-
-        self.pool_count_label = QLabel("")
-        self.pool_count_label.setStyleSheet("color:#8b97a6; font-size:11px;")
-        toolbar2.addWidget(self.pool_count_label)
-
         v.addLayout(toolbar2)
 
-        self.pool_table = table(["GTIN", "Всего", "Свободно", "Использовано", "Напечатано"])
+        self.pool_table = table(
+            ["GTIN", "Точка", "Всего", "Свободно", "Использовано", "Напечатано"]
+        )
         v.addWidget(self.pool_table, stretch=1)
         return w
 
     def _refresh_pool(self):
+        point = self.pool_point_filter.currentData() if hasattr(self, "pool_point_filter") else None
+
         t = self.pool_table
         t.setRowCount(0)
-        for p in self.store.pool_stats():
-            r = t.rowCount(); t.insertRow(r)
-            t.setItem(r, 0, cell(p["gtin"], mono=True))
-            t.setItem(r, 1, cell(p["total"], mono=True))
-            t.setItem(r, 2, cell(p["free"], "#22c55e", mono=True))
-            t.setItem(r, 3, cell(p["used"], "#f59e0b", mono=True))
-            t.setItem(r, 4, cell(p["printed"], mono=True))
 
-        # Общее число кодов — ПОСЛЕ цикла
+        if point:
+            rows = self._pool_stats_by_point(point)
+            for r_data in rows:
+                r = t.rowCount(); t.insertRow(r)
+                t.setItem(r, 0, cell(r_data["gtin"], mono=True))
+                t.setItem(r, 1, cell(r_data["point"], mono=True))
+                t.setItem(r, 2, cell(r_data["total"], mono=True))
+                t.setItem(r, 3, cell(r_data["free"], "#22c55e", mono=True))
+                t.setItem(r, 4, cell(r_data["used"], "#f59e0b", mono=True))
+                t.setItem(r, 5, cell(r_data["printed"], mono=True))
+        else:
+            for p_data in self.store.pool_stats():
+                r = t.rowCount(); t.insertRow(r)
+                t.setItem(r, 0, cell(p_data["gtin"], mono=True))
+                t.setItem(r, 1, cell("—"))
+                t.setItem(r, 2, cell(p_data["total"], mono=True))
+                t.setItem(r, 3, cell(p_data["free"], "#22c55e", mono=True))
+                t.setItem(r, 4, cell(p_data["used"], "#f59e0b", mono=True))
+                t.setItem(r, 5, cell(p_data["printed"], mono=True))
+
         try:
-            total = self.store.count_pool()
-            self.pool_count_label.setText(f"Всего кодов: {total}")
+            total = self.store.count_pool(point)
+            suffix = f" (точка {point})" if point else " (все точки)"
+            self.pool_count_label.setText(f"Всего кодов: {total}{suffix}")
         except Exception:
             pass
+
+    def _pool_stats_by_point(self, point: str) -> list:
+        """Статистика по GTIN с фильтром по точке."""
+        import db
+        with db.get_conn() as conn:
+            rows = conn.execute(
+                "SELECT gtin, assigned_point AS point, "
+                "       COUNT(*) AS total, "
+                "       SUM(CASE WHEN used=0 THEN 1 ELSE 0 END) AS free, "
+                "       SUM(CASE WHEN used=1 THEN 1 ELSE 0 END) AS used, "
+                "       SUM(CASE WHEN printed=1 THEN 1 ELSE 0 END) AS printed "
+                "FROM pool_codes WHERE assigned_point = ? "
+                "GROUP BY gtin ORDER BY gtin",
+                (point,)
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def _export_pool(self):
         result = export_pool(self)
@@ -1390,10 +1038,7 @@ class AdminWindow(QWidget):
     def _import_pool(self):
         result = import_pool_codes(self.store, self)
         if result["ok"]:
-            QMessageBox.information(
-                self, "Импорт выполнен",
-                result["info"]
-            )
+            QMessageBox.information(self, "Импорт выполнен", result["info"])
             self._refresh_pool()
         elif result["info"] != "Отменено":
             self.toast.show_message(f"Ошибка: {result['info']}", "err")
@@ -1405,8 +1050,524 @@ class AdminWindow(QWidget):
         elif result["info"] != "Отменено":
             self.toast.show_message(f"Ошибка: {result['info']}", "err")
 
+    def _import_codes_xlsx(self):
+        """Открыть окно импорта xlsx (ЦРПТ)."""
+        from import_codes_window import ImportCodesWindow
+
+        win = ImportCodesWindow(self.store, self)
+        result = win.exec()
+        if result == ImportCodesWindow.Accepted:
+            self._refresh_pool()
+            self._refresh_imports()
+
     # ==================================================================
-    # PRINTER
+    # IMPORTS (история импортов)
+    # ==================================================================
+    def _page_imports(self) -> QWidget:
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(24, 20, 24, 20)
+        v.setSpacing(14)
+
+        head = QHBoxLayout()
+        tt = QLabel("История импортов кодов ЧЗ")
+        tt.setStyleSheet("font-size:18px; font-weight:600;")
+        head.addWidget(tt)
+        head.addStretch(1)
+
+        btn_refresh = QPushButton("🔄 Обновить")
+        btn_refresh.clicked.connect(self._refresh_imports)
+        head.addWidget(btn_refresh)
+
+        v.addLayout(head)
+
+        self.imports_table = table(
+            ["Заказ", "Файл", "Точка", "Кодов", "Кто", "Когда"]
+        )
+        v.addWidget(self.imports_table, stretch=1)
+        return w
+
+    def _refresh_imports(self):
+        try:
+            rows = self.store.list_import_batches(limit=200)
+        except Exception:
+            rows = []
+
+        t = self.imports_table
+        t.setRowCount(0)
+        for r_data in rows:
+            r = t.rowCount(); t.insertRow(r)
+            t.setItem(r, 0, cell(r_data["name"]))
+            t.setItem(r, 1, cell(r_data["file_name"], mono=True))
+            t.setItem(r, 2, cell(r_data["point"], mono=True))
+            t.setItem(r, 3, cell(r_data["total_codes"], mono=True))
+            t.setItem(r, 4, cell(r_data["imported_by"] or "—"))
+            t.setItem(r, 5, cell(r_data["imported_at"] or "—", mono=True))
+
+    # ==================================================================
+    # SCANNED (история привязок ШК → ЧЗ)
+    # ==================================================================
+    def _page_scanned(self) -> QWidget:
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(24, 20, 24, 20)
+        v.setSpacing(14)
+
+        head = QHBoxLayout()
+        tt = QLabel("Привязки: иностранный ШК → код ЧЗ")
+        tt.setStyleSheet("font-size:18px; font-weight:600;")
+        head.addWidget(tt)
+        head.addStretch(1)
+
+        btn_refresh = QPushButton("🔄 Обновить")
+        btn_refresh.clicked.connect(self._refresh_scanned)
+        head.addWidget(btn_refresh)
+
+        v.addLayout(head)
+
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(8)
+        filter_row.addWidget(QLabel("Точка:"))
+        self.scanned_point_filter = QComboBox()
+        self.scanned_point_filter.setFixedWidth(220)
+        self.scanned_point_filter.addItem("Все точки", None)
+        for p in self.store.points:
+            self.scanned_point_filter.addItem(
+                f"{p['id']} — {p['name']}", p["id"]
+            )
+        idx = self.scanned_point_filter.findData(self.store.current_point)
+        if idx >= 0:
+            self.scanned_point_filter.setCurrentIndex(idx)
+        self.scanned_point_filter.currentIndexChanged.connect(self._refresh_scanned)
+        filter_row.addWidget(self.scanned_point_filter)
+
+        filter_row.addStretch(1)
+        v.addLayout(filter_row)
+
+        self.scanned_table = table(
+            ["Время", "Точка", "Оператор",
+             "Иностранный ШК", "GTIN (ЧЗ)", "Код ЧЗ"]
+        )
+        v.addWidget(self.scanned_table, stretch=1)
+        return w
+
+    def _refresh_scanned(self):
+        point = (self.scanned_point_filter.currentData()
+                 if hasattr(self, "scanned_point_filter") else None)
+
+        try:
+            rows = self.store.list_scanned_shk(point=point, limit=500)
+        except Exception:
+            rows = []
+
+        t = self.scanned_table
+        t.setRowCount(0)
+        for r_data in rows:
+            r = t.rowCount(); t.insertRow(r)
+            t.setItem(r, 0, cell(r_data["scanned_at"], mono=True))
+            t.setItem(r, 1, cell(r_data["point"], mono=True))
+            t.setItem(r, 2, cell(r_data["operator"] or "—"))
+            fc = r_data["foreign_code"]
+            t.setItem(r, 3, cell(
+                fc[:40] + "…" if len(fc) > 40 else fc, mono=True
+            ))
+            t.setItem(r, 4, cell(r_data["cz_gtin"], mono=True))
+            cc = r_data["cz_code"]
+            t.setItem(r, 5, cell(
+                cc[:60] + "…" if len(cc) > 60 else cc, mono=True
+            ))
+
+    # ==================================================================
+    # DISCREPANCIES (расхождения: сканы vs коды)
+    # ==================================================================
+    def _page_discrepancies(self) -> QWidget:
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(24, 20, 24, 20)
+        v.setSpacing(14)
+
+        head = QHBoxLayout()
+        tt = QLabel("Расхождения: сканы vs коды")
+        tt.setStyleSheet("font-size:18px; font-weight:600;")
+        head.addWidget(tt)
+        head.addStretch(1)
+
+        btn_export = QPushButton("⬇ Экспорт CSV")
+        btn_export.clicked.connect(self._export_discrepancies)
+        head.addWidget(btn_export)
+
+        btn_refresh = QPushButton("🔄 Обновить")
+        btn_refresh.clicked.connect(self._refresh_discrepancies)
+        head.addWidget(btn_refresh)
+
+        v.addLayout(head)
+
+        sub = QLabel(
+            "Сравнение пула кодов и счётчика сканов по GTIN. "
+            "«Перебор» = оператор пикнул больше раз, чем было кодов."
+        )
+        sub.setStyleSheet("color:#8b97a6; font-size:12px;")
+        sub.setWordWrap(True)
+        v.addWidget(sub)
+
+        # --- Фильтр по точке ---
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(8)
+        filter_row.addWidget(QLabel("Точка:"))
+
+        self.disc_point_filter = QComboBox()
+        self.disc_point_filter.setFixedWidth(220)
+        self.disc_point_filter.addItem("Все точки", None)
+        for p in self.store.points:
+            self.disc_point_filter.addItem(
+                f"{p['id']} — {p['name']}", p["id"]
+            )   
+        idx = self.disc_point_filter.findData(self.store.current_point)
+        if idx >= 0:
+            self.disc_point_filter.setCurrentIndex(idx)
+        self.disc_point_filter.currentIndexChanged.connect(
+            self._refresh_discrepancies
+        )
+        filter_row.addWidget(self.disc_point_filter)
+
+        self.disc_only_overflow = QCheckBox("Только перебор")
+        self.disc_only_overflow.stateChanged.connect(self._refresh_discrepancies)
+        filter_row.addWidget(self.disc_only_overflow)
+    
+        self.disc_only_unprinted = QCheckBox("Только с ненапечатанными")
+        self.disc_only_unprinted.stateChanged.connect(self._refresh_discrepancies)
+        filter_row.addWidget(self.disc_only_unprinted)
+
+        filter_row.addStretch(1)
+
+        self.disc_summary = QLabel("")
+        self.disc_summary.setStyleSheet("color:#8b97a6; font-size:11px;")
+        filter_row.addWidget(self.disc_summary)
+
+        v.addLayout(filter_row)
+
+        # --- Таблица ---
+        self.disc_table = table([
+            "GTIN", "Точка", "Кодов", "Сканов",
+            "Использовано", "Свободно", "Статус"
+        ])
+        v.addWidget(self.disc_table, stretch=1)
+
+        # --- Вторая таблица: ненапечатанные коды ---
+        unprinted_head = QHBoxLayout()
+        unprinted_head.setSpacing(8)
+    
+        lbl_unp = QLabel("НЕНАПЕЧАТАННЫЕ КОДЫ")
+        lbl_unp.setStyleSheet(
+            "color:#8b97a6; font-size:11px; font-weight:600; letter-spacing:1.5px;"
+        )
+        unprinted_head.addWidget(lbl_unp)
+
+        unprinted_head.addStretch(1)
+
+        self.disc_unprinted_count = QLabel("")
+        self.disc_unprinted_count.setStyleSheet("color:#8b97a6; font-size:11px;")
+        unprinted_head.addWidget(self.disc_unprinted_count)
+
+        btn_reprint = QPushButton("🖨 Перепечатать")
+        btn_reprint.setProperty("primary", True)
+        btn_reprint.clicked.connect(self._disc_reprint_selected)
+        unprinted_head.addWidget(btn_reprint)
+
+        btn_mark = QPushButton("✅ Пометить напечатанным")
+        btn_mark.clicked.connect(self._disc_mark_selected_printed)
+        unprinted_head.addWidget(btn_mark)
+
+        btn_export_unp = QPushButton("⬇ Экспорт CSV")
+        btn_export_unp.clicked.connect(self._export_unprinted)
+        unprinted_head.addWidget(btn_export_unp)
+
+        v.addLayout(unprinted_head)
+
+        self.disc_unprinted_table = table([
+            "GTIN", "Код ЧЗ", "SN", "Точка", "Оператор", "Взят"
+        ])
+        self.disc_unprinted_table.setMinimumHeight(150)
+        v.addWidget(self.disc_unprinted_table, stretch=1)
+
+        return w
+
+
+    def _refresh_discrepancies(self):
+        point = (self.disc_point_filter.currentData()
+                 if hasattr(self, "disc_point_filter") else None)
+        only_overflow = (self.disc_only_overflow.isChecked()
+                         if hasattr(self, "disc_only_overflow") else False)
+        only_unprinted = (self.disc_only_unprinted.isChecked()
+                          if hasattr(self, "disc_only_unprinted") else False)
+
+        try:
+            rows = self.store.get_discrepancies(point=point)
+        except Exception as e:
+            log.error("Ошибка get_discrepancies: %s", e)
+            rows = []
+
+        # Если «только с ненапечатанными» — оставляем только GTIN,
+        # у которых есть ненапечатанные коды
+        if only_unprinted:
+            try:
+                unprinted_by_gtin = self._count_unprinted_by_gtin(point)
+            except Exception:
+                unprinted_by_gtin = {}
+            rows = [r for r in rows
+                    if unprinted_by_gtin.get((r["gtin"], r["point"]), 0) > 0]
+
+        if only_overflow:
+            rows = [r for r in rows if r["overflow"]]
+
+        t = self.disc_table
+        t.setRowCount(0)
+
+        total_overflow = 0
+
+        for r in rows:
+            i = t.rowCount(); t.insertRow(i)
+            t.setItem(i, 0, cell(r["gtin"], mono=True))
+            t.setItem(i, 1, cell(r["point"] or "—"))
+
+            # Кодов
+            t.setItem(i, 2, cell(r["total"], mono=True))
+
+            # Сканов — подсветка, если больше
+            scans_color = "#ef4444" if r["overflow"] else "#e6edf3"
+            t.setItem(i, 3, cell(r["scans"], scans_color, mono=True))
+
+            t.setItem(i, 4, cell(r["used"], mono=True))
+            t.setItem(i, 5, cell(r["free"], "#22c55e", mono=True))
+
+            if r["overflow"]:
+                status = f"⚠ Перебор +{r['scans'] - r['total']}"
+                status_color = "#ef4444"
+                total_overflow += 1
+            else:
+                status = "✅"
+                status_color = "#22c55e"
+
+            t.setItem(i, 6, cell(status, status_color))
+
+        self.disc_summary.setText(
+            f"Всего GTIN: {len(rows)}   ·   "
+            f"с перебором: {total_overflow}"
+        )
+        if total_overflow > 0:
+            self.disc_summary.setStyleSheet(
+                "color:#ef4444; font-size:11px; font-weight:600;"
+            )
+        else:
+            self.disc_summary.setStyleSheet("color:#8b97a6; font-size:11px;")
+
+        # Обновляем вторую таблицу — ненапечатанные коды
+        self._refresh_unprinted_codes(point)
+
+
+    def _count_unprinted_by_gtin(self, point: str = None) -> dict:
+        """Сколько ненапечатанных кодов на каждый (gtin, point)."""
+        import db
+        with db.get_conn() as conn:
+            if point:
+                rows = conn.execute(
+                    "SELECT gtin, used_point AS point, COUNT(*) AS cnt "
+                    "FROM pool_codes "
+                    "WHERE used = 1 AND printed = 0 AND used_point = ? "
+                    "GROUP BY gtin, used_point",
+                    (point,)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT gtin, used_point AS point, COUNT(*) AS cnt "
+                    "FROM pool_codes "
+                    "WHERE used = 1 AND printed = 0 "
+                    "GROUP BY gtin, used_point"
+                ).fetchall()
+        return {(r["gtin"], r["point"] or "—"): r["cnt"] for r in rows}
+        
+
+    def _refresh_unprinted_codes(self, point: str = None):
+        """Обновить вторую таблицу — ненапечатанные коды."""
+        try:
+            rows = self.store.list_unprinted_for_point(
+                point or self.store.current_point, limit=500
+            )   
+        except Exception as e:
+            log.error("Ошибка list_unprinted_for_point: %s", e)
+            rows = []
+
+        t = self.disc_unprinted_table
+        t.setRowCount(0)
+
+        for r in rows:
+            i = t.rowCount(); t.insertRow(i)
+            t.setItem(i, 0, cell(r.get("gtin", ""), mono=True))
+
+            code = r.get("code") or ""
+            t.setItem(i, 1, cell(
+                code[:40] + "…" if len(code) > 40 else code, mono=True
+            ))
+            t.setItem(i, 2, cell(r.get("sn", "—"), mono=True))
+            t.setItem(i, 3, cell(r.get("used_point", "—"), mono=True))
+            t.setItem(i, 4, cell("—", "#8b97a6"))
+            t.setItem(i, 5, cell(r.get("created_at", "—"), mono=True))
+
+        n = len(rows)
+        self.disc_unprinted_count.setText(f"Всего: {n}")
+        if n > 0:
+            self.disc_unprinted_count.setStyleSheet(
+                "color:#f59e0b; font-size:11px; font-weight:600;"
+            )
+        else:
+            self.disc_unprinted_count.setStyleSheet(
+                "color:#8b97a6; font-size:11px;"
+            )
+
+        self._unprinted_rows = rows
+
+
+    def _disc_reprint_selected(self):
+        """Перепечатать выбранный ненапечатанный код."""
+        rows = self.disc_unprinted_table.selectionModel().selectedRows()
+        if not rows:
+            self.toast.show_message("Выберите код из списка", "warn")
+            return
+
+        idx = rows[0].row()
+        if idx >= len(getattr(self, "_unprinted_rows", [])):
+            return
+
+        r = self._unprinted_rows[idx]
+        code = r.get("code")
+        point = r.get("used_point") or self.store.current_point
+
+        from printer import print_code, load_config, get_printer_for_point
+        cfg = load_config()
+        cfg_for_point = get_printer_for_point(cfg, point)
+
+        try:
+            result = print_code(code, cfg_for_point)
+        except Exception as e:
+            result = {"ok": False, "info": f"{type(e).__name__}: {e}"}
+
+        if result["ok"]:
+            self.store.mark_printed(code, point=point)
+            self.store.increment_counter("prints")
+            self.store.log("Перепечать (админ)", point=point,
+                           operator="админ", result="успех")
+            self.toast.show_message(f"Напечатано: {result['info']}", "ok")
+            self._refresh_discrepancies()
+        else:
+            self.store.increment_counter("errors")
+            self.toast.show_message(f"Ошибка: {result['info']}", "err")
+                
+
+    def _disc_mark_selected_printed(self):
+        """Пометить выбранный код как напечатанный (вручную)."""
+        rows = self.disc_unprinted_table.selectionModel().selectedRows()
+        if not rows:
+            self.toast.show_message("Выберите код из списка", "warn")
+            return
+
+        idx = rows[0].row()
+        if idx >= len(getattr(self, "_unprinted_rows", [])):
+            return
+
+        r = self._unprinted_rows[idx]
+        code = r.get("code")
+        point = r.get("used_point") or self.store.current_point
+
+        reply = QMessageBox.question(
+            self, "Пометить как напечатанный?",
+            f"Пометить код как напечатанный?\n\n"
+            f"GTIN: {r.get('gtin')}\n"
+            f"SN: {r.get('sn')}\n\n"
+            f"Используйте, если этикетка напечатана вручную\n"
+            f"или принтер напечатал, но система не подтвердила.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        self.store.mark_printed(code, point=point)
+        self.store.log("Помечено напечатанным (админ)", point=point,
+                       operator="админ", result="успех")
+        self.toast.show_message("Помечено", "ok")
+        self._refresh_discrepancies()
+
+
+    def _export_unprinted(self):
+        """Экспорт ненапечатанных в CSV."""
+        from PySide6.QtWidgets import QFileDialog
+        import csv
+        from datetime import datetime
+
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Экспорт ненапечатанных",
+            f"chestzn_unprinted_{datetime.now().strftime('%Y-%m-%d_%H-%M')}.csv",
+            "CSV (*.csv);;Все файлы (*)"
+        )
+        if not path:
+            return
+            
+        rows = getattr(self, "_unprinted_rows", [])
+        try:
+            with open(path, "w", encoding="utf-8-sig", newline="") as f:
+                writer = csv.writer(f, delimiter=";")
+                writer.writerow(["GTIN", "Код ЧЗ", "SN", "Точка", "Взят"])
+                for r in rows:
+                    writer.writerow([
+                        r.get("gtin", ""),
+                        r.get("code", ""),
+                        r.get("sn", ""),
+                        r.get("used_point", ""),
+                        r.get("created_at", ""),
+                    ])
+            self.toast.show_message(f"Экспортировано: {len(rows)} строк", "ok")
+        except Exception as e:
+            self.toast.show_message(f"Ошибка: {e}", "err")
+
+
+    def _export_discrepancies(self):
+        from PySide6.QtWidgets import QFileDialog
+        import csv
+        from datetime import datetime
+            
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Экспорт расхождений",
+            f"chestzn_discrepancies_{datetime.now().strftime('%Y-%m-%d_%H-%M')}.csv",
+            "CSV (*.csv);;Все файлы (*)"
+        )
+        if not path:
+            return
+
+        try:
+            rows = self.store.get_discrepancies(
+                point=(self.disc_point_filter.currentData()
+                       if hasattr(self, "disc_point_filter") else None)
+            )
+            with open(path, "w", encoding="utf-8-sig", newline="") as f:
+                writer = csv.writer(f, delimiter=";")
+                writer.writerow([
+                    "GTIN", "Точка", "Кодов", "Сканов",
+                    "Использовано", "Свободно", "Перебор"
+                ])
+                for r in rows:
+                    writer.writerow([
+                        r["gtin"], r["point"] or "", r["total"], r["scans"],
+                        r["used"], r["free"],
+                        ("да" if r["overflow"] else "нет"),
+                    ])
+            self.toast.show_message(f"Экспортировано: {len(rows)} строк", "ok")
+        except Exception as e:
+            self.toast.show_message(f"Ошибка: {e}", "err")
+
+    # ==================================================================
+    # PRINTER (принтеры по точкам)
     # ==================================================================
     def _page_printer(self) -> QWidget:
         w = QWidget()
@@ -1414,13 +1575,38 @@ class AdminWindow(QWidget):
         v.setContentsMargins(24, 20, 24, 20)
         v.setSpacing(14)
 
-        tt = QLabel("Принтер")
+        tt = QLabel("Принтеры по точкам")
         tt.setStyleSheet("font-size:18px; font-weight:600;")
         v.addWidget(tt)
 
-        sub = QLabel("Печать Честного знака на этикеточный принтер")
+        sub = QLabel(
+            "Каждая точка использует свой принтер. "
+            "Если для точки не задан — используется общий (fallback)."
+        )
         sub.setStyleSheet("color:#8b97a6; font-size:12px;")
+        sub.setWordWrap(True)
         v.addWidget(sub)
+
+        point_card = QFrame(); point_card.setObjectName("card")
+        pc = QHBoxLayout(point_card)
+        pc.setContentsMargins(18, 12, 18, 12)
+        pc.setSpacing(10)
+
+        pc.addWidget(QLabel("Настроить принтер для точки:"))
+        self.printer_point_combo = QComboBox()
+        self.printer_point_combo.setFixedWidth(240)
+        for p in self.store.points:
+            self.printer_point_combo.addItem(
+                f"{p['id']} — {p['name']}", p["id"]
+            )
+        idx = self.printer_point_combo.findData(self.store.current_point)
+        if idx >= 0:
+            self.printer_point_combo.setCurrentIndex(idx)
+        self.printer_point_combo.currentIndexChanged.connect(self._refresh_printer_form)
+        pc.addWidget(self.printer_point_combo)
+
+        pc.addStretch(1)
+        v.addWidget(point_card)
 
         card = QFrame(); card.setObjectName("card")
         cv = QVBoxLayout(card)
@@ -1428,15 +1614,15 @@ class AdminWindow(QWidget):
         cv.setSpacing(10)
 
         h = QHBoxLayout()
-        h.addWidget(QLabel("Найденные принтеры:"))
+        h.addWidget(QLabel("Найденные принтеры Windows:"))
         btn_scan = QPushButton("🔄 Обновить список")
-        btn_scan.clicked.connect(self._refresh_printer)
+        btn_scan.clicked.connect(self._refresh_printer_table)
         h.addStretch(1)
         h.addWidget(btn_scan)
         cv.addLayout(h)
 
         self.printer_table = table(["Принтер", "Порт", "Язык", "По умолчанию"])
-        self.printer_table.setMinimumHeight(180)
+        self.printer_table.setMinimumHeight(150)
         self.printer_table.itemSelectionChanged.connect(self._on_printer_select)
         cv.addWidget(self.printer_table)
 
@@ -1475,14 +1661,40 @@ class AdminWindow(QWidget):
 
         v.addWidget(card2)
 
+        fallback_card = QFrame(); fallback_card.setObjectName("card")
+        fb = QVBoxLayout(fallback_card)
+        fb.setContentsMargins(18, 12, 18, 12)
+        fb.setSpacing(6)
+
+        fb_title = QLabel("ОБЩИЙ ПРИНТЕР (FALLBACK)")
+        fb_title.setStyleSheet(
+            "color:#8b97a6; font-size:11px; font-weight:600; letter-spacing:1.5px;"
+        )
+        fb.addWidget(fb_title)
+
+        self.fallback_label = QLabel("")
+        self.fallback_label.setStyleSheet(
+            "color:#8b97a6; font-size:11px; font-family:Consolas,monospace;"
+        )
+        self.fallback_label.setWordWrap(True)
+        fb.addWidget(self.fallback_label)
+
+        v.addWidget(fallback_card)
+
         h2 = QHBoxLayout()
-        btn_save = QPushButton("💾 Сохранить")
+        btn_save = QPushButton("💾 Сохранить для точки")
         btn_save.setProperty("primary", True)
         btn_save.clicked.connect(self._save_printer_cfg)
+        h2.addWidget(btn_save)
+
+        btn_clear = QPushButton("🗑 Очистить принтер точки")
+        btn_clear.clicked.connect(self._clear_printer_cfg)
+        h2.addWidget(btn_clear)
+
         btn_test = QPushButton("🧪 Тест печати")
         btn_test.clicked.connect(self._test_print)
-        h2.addWidget(btn_save)
         h2.addWidget(btn_test)
+
         h2.addStretch(1)
         v.addLayout(h2)
 
@@ -1490,16 +1702,10 @@ class AdminWindow(QWidget):
         return w
 
     def _refresh_printer(self):
-        cfg = load_config()
-        self.cfg_printer_name.setText(cfg.get("printer_name", ""))
-        self.cfg_printer_ip.setText(cfg.get("printer_ip", ""))
-        self.cfg_printer_port.setText(str(cfg.get("printer_port", 9100)))
-        self.cfg_printer_lang.setCurrentText(cfg.get("printer_lang", "auto"))
-        self.cfg_label_w.setText(str(cfg.get("label_width_mm", 58)))
-        self.cfg_label_h.setText(str(cfg.get("label_height_mm", 40)))
-        self.cfg_dpi.setCurrentText(str(cfg.get("dpi", 203)))
-        self.cfg_copies.setText(str(cfg.get("copies", 1)))
+        self._refresh_printer_table()
+        self._refresh_printer_form()
 
+    def _refresh_printer_table(self):
         t = self.printer_table
         t.setRowCount(0)
         try:
@@ -1514,6 +1720,38 @@ class AdminWindow(QWidget):
             t.setItem(r, 2, cell(lang))
             t.setItem(r, 3, cell("да" if p["name"] == default else "", "#22c55e"))
 
+    def _refresh_printer_form(self):
+        cfg = load_config()
+        point = self.printer_point_combo.currentData() or self.store.current_point
+        point_cfg = get_printer_for_point(cfg, point)
+
+        self.cfg_printer_name.setText(point_cfg.get("printer_name", ""))
+        self.cfg_printer_ip.setText(point_cfg.get("printer_ip", ""))
+        self.cfg_printer_port.setText(str(point_cfg.get("printer_port", 9100)))
+        self.cfg_printer_lang.setCurrentText(point_cfg.get("printer_lang", "auto"))
+        self.cfg_label_w.setText(str(point_cfg.get("label_width_mm", 58)))
+        self.cfg_label_h.setText(str(point_cfg.get("label_height_mm", 40)))
+        self.cfg_dpi.setCurrentText(str(point_cfg.get("dpi", 203)))
+        self.cfg_copies.setText(str(point_cfg.get("copies", 1)))
+
+        general_name = cfg.get("printer_name", "") or "—"
+        general_ip = cfg.get("printer_ip", "") or "—"
+        printers = cfg.get("printers") or {}
+
+        if point in printers:
+            self.fallback_label.setText(
+                f"Для точки {point} задан принтер:\n"
+                f"  {printers[point].get('printer_name', '—')} "
+                f"({printers[point].get('printer_lang', 'auto')})\n"
+                f"Общий (fallback): {general_name} / {general_ip}"
+            )
+        else:
+            self.fallback_label.setText(
+                f"Для точки {point} свой принтер НЕ задан.\n"
+                f"Будет использоваться общий (fallback): "
+                f"{general_name} / {general_ip}"
+            )
+
     def _on_printer_select(self):
         rows = self.printer_table.selectionModel().selectedRows()
         if not rows:
@@ -1526,36 +1764,79 @@ class AdminWindow(QWidget):
 
     def _save_printer_cfg(self):
         cfg = load_config()
-        cfg["printer_name"] = self.cfg_printer_name.text().strip()
-        cfg["printer_ip"]   = self.cfg_printer_ip.text().strip()
+        point = self.printer_point_combo.currentData() or self.store.current_point
+
+        printer_cfg = {
+            "printer_name": self.cfg_printer_name.text().strip(),
+            "printer_ip": self.cfg_printer_ip.text().strip(),
+            "printer_lang": self.cfg_printer_lang.currentText(),
+        }
+
         try:
-            cfg["printer_port"] = int(self.cfg_printer_port.text().strip() or 9100)
+            printer_cfg["printer_port"] = int(
+                self.cfg_printer_port.text().strip() or 9100
+            )
         except ValueError:
-            cfg["printer_port"] = 9100
-        cfg["printer_lang"] = self.cfg_printer_lang.currentText()
+            printer_cfg["printer_port"] = 9100
+
         try:
-            cfg["label_width_mm"]  = float(self.cfg_label_w.text().strip() or 58)
-            cfg["label_height_mm"] = float(self.cfg_label_h.text().strip() or 40)
+            printer_cfg["label_width_mm"] = float(
+                self.cfg_label_w.text().strip() or 58
+            )
+            printer_cfg["label_height_mm"] = float(
+                self.cfg_label_h.text().strip() or 40
+            )
         except ValueError:
             pass
-        try:
-            cfg["dpi"] = int(self.cfg_dpi.currentText())
-        except ValueError:
-            cfg["dpi"] = 203
-        try:
-            cfg["copies"] = int(self.cfg_copies.text().strip() or 1)
-        except ValueError:
-            cfg["copies"] = 1
 
+        try:
+            printer_cfg["dpi"] = int(self.cfg_dpi.currentText())
+        except ValueError:
+            printer_cfg["dpi"] = 203
+
+        try:
+            printer_cfg["copies"] = int(self.cfg_copies.text().strip() or 1)
+        except ValueError:
+            printer_cfg["copies"] = 1
+
+        cfg = set_printer_for_point(cfg, point, printer_cfg)
         save_config(cfg)
-        self.toast.show_message("Настройки принтера сохранены", "ok")
+
+        self.toast.show_message(f"Принтер для {point} сохранён", "ok")
+        self._refresh_printer_form()
+
+    def _clear_printer_cfg(self):
+        cfg = load_config()
+        point = self.printer_point_combo.currentData() or self.store.current_point
+
+        printers = dict(cfg.get("printers") or {})
+        if point in printers:
+            del printers[point]
+            cfg["printers"] = printers
+            save_config(cfg)
+            self.toast.show_message(
+                f"Принтер для {point} удалён (будет использоваться общий)", "ok"
+            )
+        else:
+            self.toast.show_message(
+                f"Для точки {point} свой принтер не задан", "warn"
+            )
+
+        self._refresh_printer_form()
 
     def _test_print(self):
         cfg = load_config()
-        sample = "(01)04600123456782(21)SN00000001(91)TEST(92)SAMPLE01"
-        result = print_code(sample, cfg)
+        point = self.printer_point_combo.currentData() or self.store.current_point
+        point_cfg = get_printer_for_point(cfg, point)
+
+        sample = "01" + "04600123456782" + "21" + "SN00000001" + "\x1d91TEST\x1d92SAMPLE01"
+        try:
+            result = print_code(sample, point_cfg)
+        except Exception as e:
+            result = {"ok": False, "info": f"{type(e).__name__}: {e}"}
+
         if result["ok"]:
-            self.toast.show_message(f"Тест: {result['info']}", "ok")
+            self.toast.show_message(f"Тест ({point}): {result['info']}", "ok")
         else:
             self.toast.show_message(f"Ошибка: {result['info']}", "err")
 
@@ -1620,7 +1901,6 @@ class AdminWindow(QWidget):
         self.backup_status.setStyleSheet("color:#8b97a6; font-size:11px;")
         v.addWidget(self.backup_status)
 
-        # ---------- Очистка старых данных ----------
         card_cleanup = QFrame(); card_cleanup.setObjectName("card")
         cvc = QVBoxLayout(card_cleanup)
         cvc.setContentsMargins(18, 14, 18, 14)
@@ -1660,7 +1940,6 @@ class AdminWindow(QWidget):
         cvc.addWidget(self.cleanup_status)
 
         v.addWidget(card_cleanup)
-
         return w
 
     def _refresh_backup(self):
@@ -1668,8 +1947,7 @@ class AdminWindow(QWidget):
         t = self.backup_table
         t.setRowCount(0)
         for f in files:
-            r = t.rowCount()
-            t.insertRow(r)
+            r = t.rowCount(); t.insertRow(r)
             t.setItem(r, 0, cell(f["name"], mono=True))
             t.setItem(r, 1, cell(f"{f['size_kb']} КБ", mono=True))
             t.setItem(r, 2, cell(f["mtime"].strftime("%Y-%m-%d %H:%M:%S"), mono=True))
@@ -1716,8 +1994,7 @@ class AdminWindow(QWidget):
         path = self.backup_table.item(idx, 3).text()
 
         reply = QMessageBox.warning(
-            self,
-            "Подтвердите восстановление",
+            self, "Подтвердите восстановление",
             f"Восстановить БД из:\n{name}\n\n"
             "Текущая база будет сохранена как резервная копия.\n"
             "После восстановления потребуется ПЕРЕЗАПУСК приложения.",
@@ -1835,13 +2112,11 @@ class AdminWindow(QWidget):
         self.logs_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.logs_table.setShowGrid(False)
         self.logs_table.setWordWrap(False)
-
         v.addWidget(self.logs_table, stretch=1)
 
         self.log_status = QLabel("")
         self.log_status.setStyleSheet("color:#8b97a6; font-size:11px;")
         v.addWidget(self.log_status)
-
         return w
 
     def _refresh_logs(self):
@@ -1880,10 +2155,8 @@ class AdminWindow(QWidget):
                 continue
             time_s, level, module, message = m.groups()
             parsed.append({
-                "time": time_s,
-                "level": level,
-                "module": module,
-                "message": message,
+                "time": time_s, "level": level,
+                "module": module, "message": message,
             })
             if len(parsed) >= limit * 3:
                 break
@@ -1903,16 +2176,13 @@ class AdminWindow(QWidget):
         t.setSortingEnabled(False)
 
         level_colors = {
-            "DEBUG":    "#64748b",
-            "INFO":     "#e6edf3",
-            "WARNING":  "#f59e0b",
-            "ERROR":    "#ef4444",
+            "DEBUG": "#64748b", "INFO": "#e6edf3",
+            "WARNING": "#f59e0b", "ERROR": "#ef4444",
             "CRITICAL": "#dc2626",
         }
 
         for entry in parsed:
-            r = t.rowCount()
-            t.insertRow(r)
+            r = t.rowCount(); t.insertRow(r)
             t.setItem(r, 0, cell(entry["time"], mono=True))
             t.setItem(r, 1, cell(entry["level"],
                                  level_colors.get(entry["level"], "#e6edf3")))
@@ -1924,7 +2194,8 @@ class AdminWindow(QWidget):
         shown = len(parsed)
         total = len(all_lines)
         self.log_status.setText(
-            f"Показано: {shown} из {total} строк (файл: {path.stat().st_size // 1024} КБ)"
+            f"Показано: {shown} из {total} строк "
+            f"(файл: {path.stat().st_size // 1024} КБ)"
         )
 
     def _open_logs_folder(self):
@@ -2087,7 +2358,6 @@ class AdminWindow(QWidget):
         pag.addWidget(self.j_total_label)
 
         v.addLayout(pag)
-
         return w
 
     def _journal_page_size(self) -> int:
@@ -2133,7 +2403,6 @@ class AdminWindow(QWidget):
         }
 
     def _journal_fill_filter_values(self):
-        """Заполнить выпадающие списки фильтров."""
         try:
             values = self.store.get_audit_filter_values()
         except Exception as e:
@@ -2180,6 +2449,8 @@ class AdminWindow(QWidget):
             "не найден": "#ef4444",
             "ошибка":    "#ef4444",
             "в очередь": "#f59e0b",
+            "повтор":    "#f59e0b",
+            "нет кодов": "#ef4444",
         }
 
         for r in rows:
@@ -2203,7 +2474,6 @@ class AdminWindow(QWidget):
         self.j_btn_next.setEnabled(self._journal_page < pages - 1)
 
     def _export_journal(self):
-        """Экспорт отфильтрованного журнала (без пагинации)."""
         from PySide6.QtWidgets import QFileDialog
         import csv
         from datetime import datetime
@@ -2247,16 +2517,11 @@ class AdminWindow(QWidget):
             self.toast.show_message(f"Ошибка: {e}", "err")
 
     def _verify_audit_chain(self):
-        """Проверить HMAC-цепочку журнала."""
         result = self.store.verify_audit_chain()
 
         if result["ok"]:
-            QMessageBox.information(
-                self, "Проверка журнала",
-                result["info"]
-            )
+            QMessageBox.information(self, "Проверка журнала", result["info"])
         else:
-            # Есть повреждения — показать детали
             lines = [f"Всего записей: {result['total']}",
                      f"Повреждений: {len(result['broken'])}", ""]
             for b in result["broken"][:20]:
@@ -2265,13 +2530,8 @@ class AdminWindow(QWidget):
             if len(result["broken"]) > 20:
                 lines.append(f"...и ещё {len(result['broken']) - 20}")
 
-            QMessageBox.warning(
-                self, "⚠ Журнал повреждён",
-                "\n".join(lines)
-            )
-
+            QMessageBox.warning(self, "⚠ Журнал повреждён", "\n".join(lines))
             log.warning("Журнал повреждён: %s повреждений", len(result["broken"]))
-
 
     # ==================================================================
     # SECURITY
@@ -2333,7 +2593,6 @@ class AdminWindow(QWidget):
         cv2.addWidget(self.btn_security)
 
         v.addWidget(card2)
-
         v.addStretch(1)
         return w
 
@@ -2343,9 +2602,7 @@ class AdminWindow(QWidget):
 
         if has_q:
             q = self.store.get_security_question(login)
-            self.security_status.setText(
-                f"✅ Вопрос настроен: <b>{q}</b>"
-            )
+            self.security_status.setText(f"✅ Вопрос настроен: <b>{q}</b>")
             self.security_status.setStyleSheet("color:#22c55e; font-size:12px;")
             self.btn_security.setText("🔒 Изменить секретный вопрос")
         else:
