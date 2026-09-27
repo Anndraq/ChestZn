@@ -172,6 +172,21 @@ CREATE TABLE IF NOT EXISTS template_bindings (
 );
 CREATE INDEX IF NOT EXISTS idx_tpl_bindings_gtin
     ON template_bindings(gtin_prefix);
+
+    
+CREATE TABLE IF NOT EXISTS points (
+    id             TEXT PRIMARY KEY,
+    name           TEXT NOT NULL,
+    address        TEXT,
+    ip             TEXT,
+    printer        TEXT,
+    operator       TEXT,
+    online         INTEGER NOT NULL DEFAULT 1,
+    template       TEXT,
+    computers_json TEXT NOT NULL DEFAULT '[]',
+    sort_order     INTEGER NOT NULL DEFAULT 100
+);
+
 """
 
 
@@ -473,6 +488,54 @@ def _migrate_schema(conn):
     if "prev_hmac" not in cols:
         conn.execute("ALTER TABLE audit ADD COLUMN prev_hmac TEXT")
         log.info("Добавлена колонка audit.prev_hmac")
+
+    # --- Миграция: добавить config_json в label_templates ---
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(label_templates)").fetchall()]
+    if "config_json" not in cols:
+            conn.execute("ALTER TABLE label_templates ADD COLUMN config_json TEXT")
+            log.info("Добавлена колонка label_templates.config_json")
+
+            # Перенести старые поля в новый формат
+            import json
+            rows = conn.execute(
+                "SELECT id, code, name, is_default, width_mm, height_mm, dpi, fields_json "
+                "FROM label_templates"
+            ).fetchall()
+
+            for r in rows:
+                try:
+                    old_fields = json.loads(r["fields_json"] or "[]")
+                except Exception:
+                    old_fields = []
+
+                # По умолчанию — режим combined
+                config = {
+                    "print_mode": "combined",
+                    "combined": {
+                        "w": r["width_mm"] or 58,
+                        "h": r["height_mm"] or 40,
+                        "dpi": r["dpi"] or 203,
+                        "fields": old_fields,
+                    },
+                    "cz": {
+                        "w": 30, "h": 30, "dpi": 203,
+                        "fields": [
+                            {"name": "dataMatrix", "label": "",
+                             "required": True, "font_size": 0, "x": 0, "y": 0}
+                        ],
+                    },
+                    "label": {
+                        "w": r["width_mm"] or 58,
+                        "h": r["height_mm"] or 40,
+                        "dpi": r["dpi"] or 203,
+                        "fields": old_fields,
+                    },
+                }
+                conn.execute(
+                    "UPDATE label_templates SET config_json = ? WHERE id = ?",
+                    (json.dumps(config, ensure_ascii=False), r["id"])
+                )
+            log.info("Миграция шаблонов: %s записей", len(rows))
 
     # --- pool_codes.assigned_point / import_batch / used_point ---
     cols = [r[1] for r in conn.execute("PRAGMA table_info(pool_codes)").fetchall()]

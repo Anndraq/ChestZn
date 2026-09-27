@@ -7,8 +7,13 @@ from PySide6.QtWidgets import (
     QPushButton, QStackedWidget, QTableWidget, QTableWidgetItem,
     QHeaderView, QGridLayout, QSizePolicy, QAbstractItemView,
     QLineEdit, QComboBox, QMessageBox, QCheckBox, QSpinBox,
-    QDoubleSpinBox, QInputDialog
+    QDoubleSpinBox, QInputDialog, QTabWidget,
+    QTreeWidget, QTreeWidgetItem
 )
+
+from edit_point_window import EditPointDialog, EditComputerDialog
+
+
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QBrush
 
@@ -59,7 +64,7 @@ class AdminWindow(QWidget):
         from PySide6.QtCore import QTimer
         self._tpl_preview_timer = QTimer(self)
         self._tpl_preview_timer.setSingleShot(True)
-        self._tpl_preview_timer.setInterval(300)
+        self._tpl_preview_timer.setInterval(500)
         self._tpl_preview_timer.timeout.connect(self._tpl_refresh_preview_now)
 
         root = QHBoxLayout(self)
@@ -93,11 +98,9 @@ class AdminWindow(QWidget):
 
         section("НАСТРОЙКА")
         self.nav_points       = nav("🏢  Точки", "points")
-        self.nav_users        = nav("👥  Пользователи", "users")
         self.nav_templates    = nav("🏷️  Шаблоны", "templates")
-        self.nav_pool         = nav("🎫  Пул кодов", "pool")
+        self.nav_pool         = nav("🎫  Склад кодов ЧЗ", "pool")
         self.nav_imports      = nav("📥  Импорты", "imports")
-        self.nav_scanned      = nav("🔗  Привязки ШК→ЧЗ", "scanned")
         self.nav_printer      = nav("🖨  Принтеры", "printer")
 
         section("КОНТРОЛЬ")
@@ -114,17 +117,15 @@ class AdminWindow(QWidget):
         self.stack.addWidget(self._page_dashboard())      # 0
         self.stack.addWidget(self._page_queue())          # 1
         self.stack.addWidget(self._page_points())         # 2
-        self.stack.addWidget(self._page_users())          # 3
-        self.stack.addWidget(self._page_templates())      # 4
-        self.stack.addWidget(self._page_pool())           # 5
-        self.stack.addWidget(self._page_imports())        # 6
-        self.stack.addWidget(self._page_scanned())        # 7
-        self.stack.addWidget(self._page_printer())        # 8
-        self.stack.addWidget(self._page_journal())        # 9
-        self.stack.addWidget(self._page_logs())           # 10
-        self.stack.addWidget(self._page_backup())         # 11
-        self.stack.addWidget(self._page_security())       # 12
-        self.stack.addWidget(self._page_discrepancies())  # 13
+        self.stack.addWidget(self._page_templates())      # 3
+        self.stack.addWidget(self._page_pool())           # 4
+        self.stack.addWidget(self._page_imports())        # 5
+        self.stack.addWidget(self._page_printer())        # 6
+        self.stack.addWidget(self._page_journal())        # 7
+        self.stack.addWidget(self._page_logs())           # 8
+        self.stack.addWidget(self._page_backup())         # 9
+        self.stack.addWidget(self._page_security())       # 10
+        self.stack.addWidget(self._page_discrepancies())  # 11
 
         root.addWidget(sidebar)
         root.addWidget(self.stack, stretch=1)
@@ -137,19 +138,19 @@ class AdminWindow(QWidget):
     # ------------------------------------------------------------------
     def switch(self, page_id: str):
         pages = {
-            "dashboard": 0, "queue": 1, "points": 2, "users": 3,
-            "templates": 4, "pool": 5,
-            "imports": 6, "scanned": 7, "printer": 8,
-            "journal": 9, "logs": 10, "backup": 11, "security": 12,
-            "discrepancies": 13,
+            "dashboard": 0, "queue": 1, "points": 2,
+            "templates": 3, "pool": 4,
+            "imports": 5, "printer": 6,
+            "journal": 7, "logs": 8, "backup": 9, "security": 10,
+            "discrepancies": 11,
         }
         idx = pages.get(page_id, 0)
         self.stack.setCurrentIndex(idx)
         for btn in [self.nav_dashboard, self.nav_queue, self.nav_points,
-                    self.nav_users, self.nav_templates,
-                    self.nav_pool, self.nav_imports, self.nav_scanned,
+                    self.nav_templates, self.nav_pool, self.nav_imports,
                     self.nav_printer, self.nav_journal, self.nav_logs,
-                    self.nav_backup, self.nav_security, self.nav_discrepancies]:
+                    self.nav_backup, self.nav_security,
+                    self.nav_discrepancies]:
             btn.setChecked(btn.property("page_id") == page_id)
         self.refresh(page_id)
 
@@ -157,11 +158,9 @@ class AdminWindow(QWidget):
         if page_id == "dashboard":      self._refresh_dashboard()
         if page_id == "queue":          self._refresh_queue()
         if page_id == "points":         self._refresh_points()
-        if page_id == "users":          self._refresh_users()
         if page_id == "templates":      self._refresh_templates()
         if page_id == "pool":           self._refresh_pool()
         if page_id == "imports":        self._refresh_imports()
-        if page_id == "scanned":        self._refresh_scanned()
         if page_id == "printer":        self._refresh_printer()
         if page_id == "journal":        self._refresh_journal()
         if page_id == "logs":           self._refresh_logs()
@@ -314,58 +313,283 @@ class AdminWindow(QWidget):
         v = QVBoxLayout(w)
         v.setContentsMargins(24, 20, 24, 20)
         v.setSpacing(14)
-        tt = QLabel("Точки"); tt.setStyleSheet("font-size:18px; font-weight:600;")
-        v.addWidget(tt)
-        self.points_table = table(
-            ["ID", "Название", "Адрес", "Статус", "IP", "Оператор", "Принтер"]
+
+        head = QHBoxLayout()
+        tt = QLabel("Точки и подключённые компьютеры")
+        tt.setStyleSheet("font-size:18px; font-weight:600;")
+        head.addWidget(tt)
+        head.addStretch(1)
+
+        btn_edit = QPushButton("✏️ Редактировать")
+        btn_edit.setProperty("primary", True)
+        btn_edit.clicked.connect(self._points_edit_selected)
+        head.addWidget(btn_edit)
+
+        btn_add_pc = QPushButton("➕ Добавить ПК")
+        btn_add_pc.clicked.connect(self._points_add_computer)
+        head.addWidget(btn_add_pc)
+
+        btn_expand = QPushButton("▾ Развернуть все")
+        btn_expand.clicked.connect(lambda: self.points_tree.expandAll())
+        head.addWidget(btn_expand)
+
+        btn_collapse = QPushButton("▸ Свернуть все")
+        btn_collapse.clicked.connect(lambda: self.points_tree.collapseAll())
+        head.addWidget(btn_collapse)
+
+        v.addLayout(head)
+
+        self.points_tree = QTreeWidget()
+        self.points_tree.setHeaderLabels([
+            "Точка / Компьютер", "Расположение / Роль",
+            "Статус", "Оператор", "IP-адрес"
+        ])
+        self.points_tree.setColumnWidth(0, 300)
+        self.points_tree.setColumnWidth(1, 220)
+        self.points_tree.setColumnWidth(2, 110)
+        self.points_tree.setColumnWidth(3, 160)
+        self.points_tree.setColumnWidth(4, 140)
+        self.points_tree.setAlternatingRowColors(False)
+        self.points_tree.setRootIsDecorated(True)
+        self.points_tree.setStyleSheet("""
+            QTreeWidget {
+                background: #161c24;
+                border: 1px solid #2a3542;
+                border-radius: 10px;
+                color: #e6edf3;
+                outline: none;
+            }
+            QTreeWidget::item {
+                padding: 9px 6px;
+                border-bottom: 1px solid #2a3542;
+                min-height: 26px;
+            }
+            QTreeWidget::item:selected {
+                background: rgba(59,130,246,.22);
+                color: #ffffff;
+            }
+            QTreeWidget::item:hover:!selected {
+                background: rgba(255,255,255,.03);
+            }
+            QTreeWidget::branch {
+                background: transparent;
+            }
+            QHeaderView::section {
+                background: #161c24;
+                color: #8b97a6;
+                padding: 10px 10px;
+                border: none;
+                border-bottom: 1px solid #2a3542;
+                font-size: 11px;
+                font-weight: 600;
+                letter-spacing: .5px;
+            }
+        """)
+
+        self.points_tree.itemDoubleClicked.connect(
+            lambda item, col: self._points_edit_item(item)
         )
-        v.addWidget(self.points_table, stretch=1)
+
+        v.addWidget(self.points_tree, stretch=1)
         return w
 
     def _refresh_points(self):
-        t = self.points_table
-        t.setRowCount(0)
+        self.points_tree.clear()
+
         for p in self.store.points:
-            r = t.rowCount(); t.insertRow(r)
-            t.setItem(r, 0, cell(p["id"], mono=True))
-            t.setItem(r, 1, cell(p["name"]))
-            t.setItem(r, 2, cell(p["address"], "#8b97a6"))
-            t.setItem(r, 3, cell("онлайн" if p["online"] else "офлайн",
-                                 "#22c55e" if p["online"] else "#f59e0b"))
-            t.setItem(r, 4, cell(p["ip"], mono=True))
-            t.setItem(r, 5, cell(p["operator"]))
-            t.setItem(r, 6, cell(p["printer"]))
+            item = QTreeWidgetItem(self.points_tree)
 
-    # ==================================================================
-    # USERS
-    # ==================================================================
-    def _page_users(self) -> QWidget:
-        w = QWidget()
-        v = QVBoxLayout(w)
-        v.setContentsMargins(24, 20, 24, 20)
-        v.setSpacing(14)
-        tt = QLabel("Пользователи"); tt.setStyleSheet("font-size:18px; font-weight:600;")
-        v.addWidget(tt)
-        self.users_table = table(
-            ["ФИО", "Логин", "Роль", "Точка", "Последний вход", "Статус"]
+            item.setText(0, f"{p['id']} — {p['name']}")
+            item.setText(1, p.get("address", "—"))
+
+            p_online = p.get("online", False)
+            item.setText(2, "🟢  онлайн" if p_online else "🟡  офлайн")
+            item.setText(3, p.get("operator", "—"))
+            item.setText(4, p.get("ip", "—"))
+
+            f = item.font(0)
+            f.setBold(True)
+            f.setPointSize(f.pointSize() + 1)
+            item.setFont(0, f)
+
+            if p_online:
+                item.setForeground(2, QBrush(QColor("#22c55e")))
+            else:
+                item.setForeground(2, QBrush(QColor("#f59e0b")))
+
+            computers = p.get("computers", [])
+
+            if not computers:
+                child = QTreeWidgetItem(item)
+                child.setText(0, "    Нет подключённых компьютеров")
+                child.setForeground(0, QBrush(QColor("#64748b")))
+            else:
+                for c in computers:
+                    ch = QTreeWidgetItem(item)
+                    ch.setText(0, f"    💻  {c.get('name', 'ПК')}")
+                    ch.setText(1, c.get("role", "Рабочее место"))
+
+                    c_online = c.get("online", False)
+                    ch.setText(2, "🟢  онлайн" if c_online else "🟡  офлайн")
+                    ch.setText(3, c.get("operator", "—"))
+                    ch.setText(4, c.get("ip", "—"))
+
+                    if c_online:
+                        ch.setForeground(2, QBrush(QColor("#22c55e")))
+                    else:
+                        ch.setForeground(2, QBrush(QColor("#f59e0b")))
+
+            item.setExpanded(p_online)
+
+    # ==========================================================
+    # Редактирование точек и компьютеров
+    # ==========================================================
+    def _points_edit_selected(self):
+        """Редактировать выбранный элемент дерева."""
+        items = self.points_tree.selectedItems()
+        if not items:
+            self.toast.show_message("Выберите точку или ПК", "warn")
+            return
+        self._points_edit_item(items[0])
+
+    def _points_edit_item(self, item):
+        """Редактировать элемент (точка или компьютер)."""
+        if item is None:
+            return
+
+        point_id = self._points_item_point_id(item)
+        if not point_id:
+            return
+
+        parent = item.parent()
+
+        if parent is None:
+            # Это точка
+            point = self.store.get_point(point_id)
+            if not point:
+                return
+            dlg = EditPointDialog(point, self)
+            if dlg.exec() == EditPointDialog.Accepted and dlg.result_data:
+                result = self.store.update_point(
+                    point_id, **dlg.result_data
+                )
+                if result["ok"]:
+                    self.toast.show_message(result["info"], "ok")
+                    self._refresh_points()
+                else:
+                    self.toast.show_message(
+                        f"Ошибка: {result['info']}", "err"
+                    )
+        else:
+            # Это компьютер
+            point = self.store.get_point(point_id)
+            if not point:
+                return
+            # Найти компьютер по имени (или по индексу)
+            computers = point.get("computers", [])
+            idx = parent.indexOfChild(item)
+            if idx < 0 or idx >= len(computers):
+                return
+            comp = computers[idx]
+
+            dlg = EditComputerDialog(comp, point.get("name", ""), self)
+            if dlg.exec() != EditComputerDialog.Accepted:
+                return
+            if not dlg.result_data:
+                return
+
+            action = dlg.result_data.get("action")
+            new_computers = list(computers)
+
+            if action == "delete":
+                new_computers.pop(idx)
+            else:
+                new_computers[idx] = {
+                    "name": dlg.result_data["name"],
+                    "ip": dlg.result_data["ip"],
+                    "role": dlg.result_data["role"],
+                    "operator": dlg.result_data["operator"],
+                    "online": dlg.result_data["online"],
+                }
+
+            result = self.store.update_point(
+                point_id, computers=new_computers
+            )
+            if result["ok"]:
+                self.toast.show_message(
+                    "Компьютер удалён" if action == "delete"
+                    else "Компьютер сохранён", "ok"
+                )
+                self._refresh_points()
+            else:
+                self.toast.show_message(
+                    f"Ошибка: {result['info']}", "err"
+                )
+
+    def _points_add_computer(self):
+        """Добавить компьютер к выбранной точке."""
+        items = self.points_tree.selectedItems()
+        if not items:
+            self.toast.show_message("Выберите точку", "warn")
+            return
+
+        item = items[0]
+        # Идём к родителю, если выбран ПК
+        if item.parent() is not None:
+            item = item.parent()
+
+        point_id = self._points_item_point_id(item)
+        if not point_id:
+            return
+
+        point = self.store.get_point(point_id)
+        if not point:
+            return
+
+        # Пустой диалог
+        empty = {"name": "ПК-01", "ip": "", "role": "Основной оператор",
+                 "operator": "—", "online": True}
+
+        dlg = EditComputerDialog(empty, point.get("name", ""), self)
+        if dlg.exec() != EditComputerDialog.Accepted:
+            return
+        if not dlg.result_data:
+            return
+
+        new_computers = list(point.get("computers", []))
+        new_computers.append({
+            "name": dlg.result_data["name"],
+            "ip": dlg.result_data["ip"],
+            "role": dlg.result_data["role"],
+            "operator": dlg.result_data["operator"],
+            "online": dlg.result_data["online"],
+        })
+
+        result = self.store.update_point(
+            point_id, computers=new_computers
         )
-        v.addWidget(self.users_table, stretch=1)
-        return w
+        if result["ok"]:
+            self.toast.show_message("Компьютер добавлен", "ok")
+            self._refresh_points()
+        else:
+            self.toast.show_message(f"Ошибка: {result['info']}", "err")
 
-    def _refresh_users(self):
-        t = self.users_table
-        t.setRowCount(0)
-        role_color = {"Администратор": "#ef4444", "Старший смены": "#f59e0b",
-                      "Оператор": "#93c5fd"}
-        for u in self.store.users:
-            r = t.rowCount(); t.insertRow(r)
-            t.setItem(r, 0, cell(u["fio"]))
-            t.setItem(r, 1, cell(u["login"], mono=True))
-            t.setItem(r, 2, cell(u["role"], role_color.get(u["role"], "#e6edf3")))
-            t.setItem(r, 3, cell(u["point"]))
-            t.setItem(r, 4, cell(u["last_login"] or "—", mono=True))
-            t.setItem(r, 5, cell("активен" if u["active"] else "отключён",
-                                 "#22c55e" if u["active"] else "#ef4444"))
+    def _points_item_point_id(self, item) -> str:
+        """Извлечь ID точки из текста элемента."""
+        try:
+            text = item.text(0).strip()
+            # Формат: "T-01 — Склад-Восток"
+            if " — " in text:
+                return text.split(" — ")[0].strip()
+            # Если элемент-компьютер, идём к родителю
+            parent = item.parent()
+            if parent is not None:
+                ptext = parent.text(0).strip()
+                if " — " in ptext:
+                    return ptext.split(" — ")[0].strip()
+        except Exception:
+            pass
+        return ""
 
     # ==================================================================
     # TEMPLATES
@@ -376,6 +600,7 @@ class AdminWindow(QWidget):
         v.setContentsMargins(24, 20, 24, 20)
         v.setSpacing(12)
 
+        # ---------- Заголовок ----------
         head = QHBoxLayout()
         tt = QLabel("Шаблоны этикеток")
         tt.setStyleSheet("font-size:18px; font-weight:600;")
@@ -392,24 +617,27 @@ class AdminWindow(QWidget):
 
         v.addLayout(head)
 
+        # ---------- Основная область ----------
         row = QHBoxLayout()
         row.setSpacing(12)
 
+        # === Слева: список шаблонов ===
         self.tpl_list = QTableWidget(0, 2)
-        self.tpl_list.setHorizontalHeaderLabels(["Шаблон", "По умолч."])
+        self.tpl_list.setHorizontalHeaderLabels(["Шаблон", "Режим"])
         hh_l = self.tpl_list.horizontalHeader()
         hh_l.setSectionResizeMode(0, QHeaderView.Stretch)
         hh_l.setSectionResizeMode(1, QHeaderView.Fixed)
-        self.tpl_list.setColumnWidth(1, 80)
+        self.tpl_list.setColumnWidth(1, 90)
         self.tpl_list.verticalHeader().setVisible(False)
         self.tpl_list.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.tpl_list.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.tpl_list.setSelectionMode(QAbstractItemView.SingleSelection)
         self.tpl_list.setShowGrid(False)
-        self.tpl_list.setFixedWidth(240)
+        self.tpl_list.setFixedWidth(260)
         self.tpl_list.itemSelectionChanged.connect(self._on_template_select)
         row.addWidget(self.tpl_list)
 
+        # === Центр: редактор ===
         right = QVBoxLayout()
         right.setSpacing(8)
 
@@ -417,85 +645,35 @@ class AdminWindow(QWidget):
         name_row.setSpacing(8)
         name_row.addWidget(QLabel("Название:"))
         self.tpl_name_edit = QLineEdit()
-        self.tpl_name_edit.textChanged.connect(self._tpl_refresh_preview)
         name_row.addWidget(self.tpl_name_edit, stretch=1)
         right.addLayout(name_row)
 
-        size_row = QHBoxLayout()
-        size_row.setSpacing(8)
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(8)
+        mode_row.addWidget(QLabel("Режим печати:"))
+        self.tpl_mode_combo = QComboBox()
+        self.tpl_mode_combo.addItem("ЧЗ + Русификатор (совмещённый)", "combined")
+        self.tpl_mode_combo.addItem("ЧЗ + Русификатор (раздельный)", "separate")
+        self.tpl_mode_combo.setFixedWidth(280)
+        self.tpl_mode_combo.currentIndexChanged.connect(self._tpl_on_mode_changed)
+        mode_row.addWidget(self.tpl_mode_combo)
+        mode_row.addStretch(1)
+        right.addLayout(mode_row)
 
-        size_row.addWidget(QLabel("Ширина:"))
-        self.tpl_w = QDoubleSpinBox()
-        self.tpl_w.setRange(20, 300)
-        self.tpl_w.setDecimals(0)
-        self.tpl_w.setSuffix(" мм")
-        self.tpl_w.setValue(58)
-        self.tpl_w.setFixedWidth(110)
-        self.tpl_w.valueChanged.connect(self._tpl_refresh_preview)
-        size_row.addWidget(self.tpl_w)
+        # --- Вкладки ---
+        self.tpl_tabs = QTabWidget()
+        self.tpl_tabs.currentChanged.connect(self._tpl_refresh_preview)
 
-        size_row.addWidget(QLabel("Высота:"))
-        self.tpl_h = QDoubleSpinBox()
-        self.tpl_h.setRange(15, 300)
-        self.tpl_h.setDecimals(0)
-        self.tpl_h.setSuffix(" мм")
-        self.tpl_h.setValue(40)
-        self.tpl_h.setFixedWidth(110)
-        self.tpl_h.valueChanged.connect(self._tpl_refresh_preview)
-        size_row.addWidget(self.tpl_h)
+        self.tab_combined = self._build_template_tab("combined")
+        self.tpl_tabs.addTab(self.tab_combined, "ЧЗ + Русификатор")
 
-        size_row.addSpacing(16)
-        size_row.addWidget(QLabel("DPI:"))
-        self.tpl_dpi = QComboBox()
-        self.tpl_dpi.addItems(["203", "300", "600"])
-        self.tpl_dpi.setFixedWidth(80)
-        size_row.addWidget(self.tpl_dpi)
+        self.tab_cz = self._build_template_tab("cz")
+        self.tpl_tabs.addTab(self.tab_cz, "ЧЗ")
 
-        size_row.addStretch(1)
-        right.addLayout(size_row)
+        self.tab_label = self._build_template_tab("label")
+        self.tpl_tabs.addTab(self.tab_label, "Русификатор")
 
-        fields_head = QHBoxLayout()
-        fields_head.setSpacing(6)
-
-        lbl_fields = QLabel("ПОЛЯ ЭТИКЕТКИ")
-        lbl_fields.setStyleSheet(
-            "color:#8b97a6; font-size:11px; font-weight:600; letter-spacing:1.5px;"
-        )
-        fields_head.addWidget(lbl_fields)
-        fields_head.addStretch(1)
-
-        btn_add_field = QPushButton("+")
-        btn_add_field.setFixedSize(40, 30)
-        btn_add_field.setToolTip("Добавить поле")
-        btn_add_field.setStyleSheet("font-size:20px; font-weight:700; padding:0;")
-        btn_add_field.clicked.connect(self._tpl_add_field)
-        fields_head.addWidget(btn_add_field)
-
-        right.addLayout(fields_head)
-
-        self.tpl_fields = QTableWidget(0, 5)
-        self.tpl_fields.setHorizontalHeaderLabels(
-            ["Поле", "Подпись на этикетке", "Обяз.", "Шрифт", ""]
-        )
-        hh = self.tpl_fields.horizontalHeader()
-        hh.setSectionResizeMode(0, QHeaderView.Interactive)
-        hh.setSectionResizeMode(1, QHeaderView.Stretch)
-        hh.setSectionResizeMode(2, QHeaderView.Fixed)
-        hh.setSectionResizeMode(3, QHeaderView.Fixed)
-        hh.setSectionResizeMode(4, QHeaderView.Fixed)
-        self.tpl_fields.setColumnWidth(0, 130)
-        self.tpl_fields.setColumnWidth(2, 50)
-        self.tpl_fields.setColumnWidth(3, 85)
-        self.tpl_fields.setColumnWidth(4, 42)
-        self.tpl_fields.verticalHeader().setVisible(True)
-        self.tpl_fields.verticalHeader().setFixedWidth(30)
-        self.tpl_fields.verticalHeader().setDefaultSectionSize(34)
-        self.tpl_fields.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.tpl_fields.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.tpl_fields.setShowGrid(False)
-        self.tpl_fields.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.tpl_fields.itemChanged.connect(lambda _: self._tpl_refresh_preview())
-        right.addWidget(self.tpl_fields, stretch=1)
+        right.addWidget(self.tpl_tabs, stretch=1)
 
         save_row = QHBoxLayout()
         save_row.setSpacing(8)
@@ -518,7 +696,174 @@ class AdminWindow(QWidget):
 
         v.addLayout(row, stretch=1)
 
+        # ---------- Привязки GTIN ----------
+        card_bind = QFrame()
+        card_bind.setObjectName("card")
+        cb = QVBoxLayout(card_bind)
+        cb.setContentsMargins(18, 12, 18, 12)
+        cb.setSpacing(6)
+
+        tt_bind = QLabel("ПРИВЯЗКА К GTIN (необязательно)")
+        tt_bind.setStyleSheet(
+            "color:#8b97a6; font-size:11px; font-weight:600; letter-spacing:1.5px;"
+        )
+        cb.addWidget(tt_bind)
+
+        bind_row = QHBoxLayout()
+        bind_row.setSpacing(8)
+
+        bind_row.addWidget(QLabel("GTIN-префикс:"))
+        self.bind_gtin = QLineEdit()
+        self.bind_gtin.setPlaceholderText("4–14 цифр")
+        self.bind_gtin.setFixedWidth(140)
+        bind_row.addWidget(self.bind_gtin)
+
+        btn_bind = QPushButton("🔗 Привязать")
+        btn_bind.clicked.connect(self._tpl_bind_create)
+        bind_row.addWidget(btn_bind)
+
+        bind_row.addStretch(1)
+        cb.addLayout(bind_row)
+
+        self.bind_table = QTableWidget(0, 4)
+        self.bind_table.setHorizontalHeaderLabels(
+            ["GTIN-префикс", "Шаблон", "Приоритет", ""]
+        )
+        hb = self.bind_table.horizontalHeader()
+        hb.setSectionResizeMode(0, QHeaderView.Fixed)
+        hb.setSectionResizeMode(1, QHeaderView.Stretch)
+        hb.setSectionResizeMode(2, QHeaderView.Fixed)
+        hb.setSectionResizeMode(3, QHeaderView.Fixed)
+        self.bind_table.setColumnWidth(0, 140)
+        self.bind_table.setColumnWidth(2, 90)
+        self.bind_table.setColumnWidth(3, 50)
+        self.bind_table.verticalHeader().setVisible(False)
+        self.bind_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.bind_table.setShowGrid(False)
+        self.bind_table.setFixedHeight(90)
+        cb.addWidget(self.bind_table)
+
+        v.addWidget(card_bind)
         return w
+
+    def _build_template_tab(self, tab_key: str) -> QWidget:
+        """Построить одну вкладку редактора шаблона."""
+        tab = QWidget()
+        v = QVBoxLayout(tab)
+        v.setContentsMargins(14, 14, 14, 14)
+        v.setSpacing(10)
+
+        size_row = QHBoxLayout()
+        size_row.setSpacing(8)
+
+        size_row.addWidget(QLabel("Ширина:"))
+        w_spin = QDoubleSpinBox()
+        w_spin.setRange(10, 500)
+        w_spin.setDecimals(0)
+        w_spin.setSuffix(" мм")
+        w_spin.setValue(58)
+        w_spin.setFixedWidth(110)
+        w_spin.valueChanged.connect(self._tpl_refresh_preview)
+        size_row.addWidget(w_spin)
+
+        size_row.addWidget(QLabel("Высота:"))
+        h_spin = QDoubleSpinBox()
+        h_spin.setRange(10, 500)
+        h_spin.setDecimals(0)
+        h_spin.setSuffix(" мм")
+        h_spin.setValue(40)
+        h_spin.setFixedWidth(110)
+        h_spin.valueChanged.connect(self._tpl_refresh_preview)
+        size_row.addWidget(h_spin)
+
+        size_row.addSpacing(16)
+        size_row.addWidget(QLabel("DPI:"))
+        dpi_combo = QComboBox()
+        dpi_combo.addItems(["203", "300", "600"])
+        dpi_combo.setFixedWidth(80)
+        dpi_combo.currentIndexChanged.connect(self._tpl_refresh_preview)
+        size_row.addWidget(dpi_combo)
+        size_row.addStretch(1)
+        v.addLayout(size_row)
+
+        fields_head = QHBoxLayout()
+        fields_head.setSpacing(6)
+
+        lbl_fields = QLabel("ПОЛЯ ЭТИКЕТКИ")
+        lbl_fields.setStyleSheet(
+            "color:#8b97a6; font-size:11px; font-weight:600; letter-spacing:1.5px;"
+        )
+        fields_head.addWidget(lbl_fields)
+        fields_head.addStretch(1)
+
+        btn_add = QPushButton("+")
+        btn_add.setFixedSize(40, 30)
+        btn_add.setToolTip("Добавить поле")
+        btn_add.setStyleSheet("font-size:20px; font-weight:700; padding:0;")
+        btn_add.clicked.connect(lambda: self._tpl_add_field(tab_key))
+        fields_head.addWidget(btn_add)
+
+        btn_up = QPushButton("↑")
+        btn_up.setFixedSize(40, 30)
+        btn_up.setToolTip("Вверх")
+        btn_up.setStyleSheet("font-size:18px; font-weight:700; padding:0;")
+        btn_up.clicked.connect(lambda: self._tpl_move_field(tab_key, -1))
+        fields_head.addWidget(btn_up)
+
+        btn_down = QPushButton("↓")
+        btn_down.setFixedSize(40, 30)
+        btn_down.setToolTip("Вниз")
+        btn_down.setStyleSheet("font-size:18px; font-weight:700; padding:0;")
+        btn_down.clicked.connect(lambda: self._tpl_move_field(tab_key, 1))
+        fields_head.addWidget(btn_down)
+
+        v.addLayout(fields_head)
+
+        # 7 колонок: Поле, Подпись, Обяз., Шрифт, Размер, X Y, ""
+        t = QTableWidget(0, 7)
+        t.setHorizontalHeaderLabels(
+            ["Поле", "Подпись", "Обяз.", "Шрифт", "Размер", "X, Y", ""]
+        )
+        hh = t.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.Interactive)
+        hh.setSectionResizeMode(1, QHeaderView.Stretch)
+        hh.setSectionResizeMode(2, QHeaderView.Fixed)
+        hh.setSectionResizeMode(3, QHeaderView.Fixed)
+        hh.setSectionResizeMode(4, QHeaderView.Fixed)
+        hh.setSectionResizeMode(5, QHeaderView.Fixed)
+        hh.setSectionResizeMode(6, QHeaderView.Fixed)
+        t.setColumnWidth(0, 110)
+        t.setColumnWidth(2, 45)
+        t.setColumnWidth(3, 70)
+        t.setColumnWidth(4, 90)
+        t.setColumnWidth(5, 90)
+        t.setColumnWidth(6, 38)
+        t.verticalHeader().setVisible(True)
+        t.verticalHeader().setFixedWidth(26)
+        t.verticalHeader().setDefaultSectionSize(32)
+        t.setSelectionBehavior(QAbstractItemView.SelectRows)
+        t.setSelectionMode(QAbstractItemView.SingleSelection)
+        t.setShowGrid(False)
+        t.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        t.itemChanged.connect(lambda _: self._tpl_refresh_preview())
+
+        v.addWidget(t, stretch=1)
+
+        if not hasattr(self, "_tpl_tab_widgets"):
+            self._tpl_tab_widgets = {}
+        self._tpl_tab_widgets[tab_key] = {
+            "w": w_spin, "h": h_spin, "dpi": dpi_combo, "fields": t,
+        }
+        return tab
+
+
+    def _tpl_on_mode_changed(self):
+        mode = self.tpl_mode_combo.currentData()
+        if mode == "combined":
+            self.tpl_tabs.setCurrentIndex(0)
+        elif mode == "separate":
+            self.tpl_tabs.setCurrentIndex(1)
+        self._tpl_refresh_preview()
 
     def _refresh_templates(self):
         self.tpl_list.blockSignals(True)
@@ -529,10 +874,9 @@ class AdminWindow(QWidget):
                 r = self.tpl_list.rowCount()
                 self.tpl_list.insertRow(r)
                 self.tpl_list.setItem(r, 0, cell(tpl["name"]))
-                self.tpl_list.setItem(r, 1, cell(
-                    "⭐" if tpl["is_default"] else "",
-                    "#f59e0b"
-                ))
+                mode_label = ("Совмещ." if tpl.get("print_mode") == "combined"
+                              else "Раздел.")
+                self.tpl_list.setItem(r, 1, cell(mode_label, "#93c5fd"))
         finally:
             self.tpl_list.blockSignals(False)
 
@@ -554,29 +898,61 @@ class AdminWindow(QWidget):
         tpl = tpls[idx]
 
         self.tpl_name_edit.blockSignals(True)
-        self.tpl_w.blockSignals(True)
-        self.tpl_h.blockSignals(True)
-        self.tpl_fields.blockSignals(True)
-
+        self.tpl_mode_combo.blockSignals(True)
         try:
             self.tpl_name_edit.setText(tpl["name"])
-            self.tpl_w.setValue(float(tpl["width_mm"]))
-            self.tpl_h.setValue(float(tpl["height_mm"]))
-            self.tpl_dpi.setCurrentText(str(tpl["dpi"]))
 
-            t = self.tpl_fields
+            mode = tpl.get("print_mode", "combined")
+            mode_idx = self.tpl_mode_combo.findData(mode)
+            if mode_idx >= 0:
+                self.tpl_mode_combo.setCurrentIndex(mode_idx)
+
+            config = tpl.get("config", {})
+            for tab_key in ("combined", "cz", "label"):
+                self._fill_template_tab(tab_key, config.get(tab_key, {}))
+
+            if mode == "combined":
+                self.tpl_tabs.setCurrentIndex(0)
+            else:
+                self.tpl_tabs.setCurrentIndex(1)
+        finally:
+            self.tpl_name_edit.blockSignals(False)
+            self.tpl_mode_combo.blockSignals(False)
+
+        self._tpl_refresh_preview()
+
+    def _fill_template_tab(self, tab_key: str, tab_cfg: dict):
+        widgets = self._tpl_tab_widgets.get(tab_key)
+        if not widgets:
+            return
+
+        t = widgets["fields"]
+        t.blockSignals(True)
+        widgets["w"].blockSignals(True)
+        widgets["h"].blockSignals(True)
+
+        try:
+            widgets["w"].setValue(float(tab_cfg.get("w", 58)))
+            widgets["h"].setValue(float(tab_cfg.get("h", 40)))
+            widgets["dpi"].setCurrentText(str(tab_cfg.get("dpi", 203)))
+
             t.setRowCount(0)
-
-            for f in tpl["fields"]:
+            for f in tab_cfg.get("fields", []):
                 r = t.rowCount()
                 t.insertRow(r)
 
-                item_name = QTableWidgetItem(f.get("name", ""))
+                name = f.get("name", "")
+                is_dm = (name == "dataMatrix")
+
+                # Колонка 0: Имя поля (не редактируется)
+                item_name = QTableWidgetItem(name)
                 item_name.setFlags(item_name.flags() & ~Qt.ItemIsEditable)
                 t.setItem(r, 0, item_name)
 
+                # Колонка 1: Подпись
                 t.setItem(r, 1, QTableWidgetItem(f.get("label", "")))
 
+                # Колонка 2: Обяз. — чекбокс
                 chk = QCheckBox()
                 chk.setChecked(bool(f.get("required")))
                 wrap_chk = QWidget()
@@ -586,36 +962,60 @@ class AdminWindow(QWidget):
                 wl.setAlignment(Qt.AlignCenter)
                 t.setCellWidget(r, 2, wrap_chk)
 
-                spin = QSpinBox()
-                spin.setRange(6, 40)
-                spin.setValue(int(f.get("font_size", 12)))
-                spin.setAlignment(Qt.AlignCenter)
-                t.setCellWidget(r, 3, spin)
+                # Колонка 3: Шрифт
+                spin_font = QSpinBox()
+                spin_font.setRange(6, 40)
+                spin_font.setValue(int(f.get("font_size", 12)))
+                spin_font.setAlignment(Qt.AlignCenter)
+                if is_dm:
+                    spin_font.setEnabled(False)
+                    spin_font.setValue(0)
+                spin_font.valueChanged.connect(self._tpl_refresh_preview)
+                t.setCellWidget(r, 3, spin_font)
 
+                # Колонка 4: Размер (только для DataMatrix)
+                spin_size = QDoubleSpinBox()
+                spin_size.setRange(0, 200)
+                spin_size.setDecimals(0)
+                spin_size.setSuffix(" мм")
+                spin_size.setValue(float(f.get("size", 20)))
+                spin_size.setAlignment(Qt.AlignCenter)
+                if not is_dm:
+                    spin_size.setEnabled(False)
+                    spin_size.setValue(0)
+                spin_size.valueChanged.connect(self._tpl_refresh_preview)
+                t.setCellWidget(r, 4, spin_size)
+
+                # Колонка 5: X, Y
+                xy_text = f"X:{f.get('x', 0)} Y:{f.get('y', 0)}"
+                item_xy = QTableWidgetItem(xy_text)
+                item_xy.setFlags(item_xy.flags() & ~Qt.ItemIsEditable)
+                t.setItem(r, 5, item_xy)
+
+                # Колонка 6: Кнопка удаления
                 btn_rm = QPushButton("×")
-                btn_rm.setFixedSize(32, 26)
+                btn_rm.setFixedSize(28, 24)
                 btn_rm.setStyleSheet(
                     "color:#ef4444; border:none; font-weight:700; "
-                    "font-size:18px; padding:0; background:transparent;"
+                    "font-size:16px; padding:0; background:transparent;"
                 )
                 btn_rm.setCursor(Qt.PointingHandCursor)
-                btn_rm.clicked.connect(lambda _, rr=r: self._tpl_remove_field(rr))
-
+                btn_rm.clicked.connect(
+                    lambda _, k=tab_key, rr=r: self._tpl_remove_field(k, rr)
+                )
                 wrap_rm = QWidget()
                 wl2 = QHBoxLayout(wrap_rm)
                 wl2.setContentsMargins(0, 0, 0, 0)
                 wl2.addWidget(btn_rm)
                 wl2.setAlignment(Qt.AlignCenter)
-                t.setCellWidget(r, 4, wrap_rm)
+                t.setCellWidget(r, 6, wrap_rm)
 
             t.resizeRowsToContents()
         finally:
-            self.tpl_name_edit.blockSignals(False)
-            self.tpl_w.blockSignals(False)
-            self.tpl_h.blockSignals(False)
-            self.tpl_fields.blockSignals(False)
+            t.blockSignals(False)
+            widgets["w"].blockSignals(False)
+            widgets["h"].blockSignals(False)
 
-        self._tpl_refresh_preview()
 
     def _current_template(self):
         rows = self.tpl_list.selectionModel().selectedRows()
@@ -627,7 +1027,7 @@ class AdminWindow(QWidget):
             return None
         return tpls[idx]
 
-    def _tpl_add_field(self):
+    def _tpl_add_field(self, tab_key: str):
         name, ok = QInputDialog.getText(
             self, "Новое поле",
             "Системное имя (например, country, manufacturer, batch):"
@@ -636,9 +1036,15 @@ class AdminWindow(QWidget):
             return
         name = name.strip().lower().replace(" ", "_")
 
-        t = self.tpl_fields
+        widgets = self._tpl_tab_widgets.get(tab_key)
+        if not widgets:
+            return
+        t = widgets["fields"]
+
         r = t.rowCount()
         t.insertRow(r)
+
+        is_dm = (name == "dataMatrix")
 
         item_name = QTableWidgetItem(name)
         item_name.setFlags(item_name.flags() & ~Qt.ItemIsEditable)
@@ -653,63 +1059,309 @@ class AdminWindow(QWidget):
         wl.setAlignment(Qt.AlignCenter)
         t.setCellWidget(r, 2, wrap_chk)
 
-        spin = QSpinBox()
-        spin.setRange(6, 40)
-        spin.setValue(12)
-        spin.setAlignment(Qt.AlignCenter)
-        t.setCellWidget(r, 3, spin)
+        spin_font = QSpinBox()
+        spin_font.setRange(6, 40)
+        spin_font.setValue(12)
+        spin_font.setAlignment(Qt.AlignCenter)
+        if is_dm:
+            spin_font.setEnabled(False)
+            spin_font.setValue(0)
+        spin_font.valueChanged.connect(self._tpl_refresh_preview)
+        t.setCellWidget(r, 3, spin_font)
 
-        btn_rm = QPushButton("✕")
-        btn_rm.setStyleSheet("color:#ef4444; border:none; font-weight:600;")
+        spin_size = QDoubleSpinBox()
+        spin_size.setRange(0, 200)
+        spin_size.setDecimals(0)
+        spin_size.setSuffix(" мм")
+        spin_size.setValue(20 if is_dm else 0)
+        spin_size.setAlignment(Qt.AlignCenter)
+        if not is_dm:
+            spin_size.setEnabled(False)
+        spin_size.valueChanged.connect(self._tpl_refresh_preview)
+        t.setCellWidget(r, 4, spin_size)
+
+        item_xy = QTableWidgetItem("X:0 Y:0")
+        item_xy.setFlags(item_xy.flags() & ~Qt.ItemIsEditable)
+        t.setItem(r, 5, item_xy)
+
+        btn_rm = QPushButton("×")
+        btn_rm.setFixedSize(28, 24)
+        btn_rm.setStyleSheet(
+            "color:#ef4444; border:none; font-weight:700; "
+            "font-size:16px; padding:0; background:transparent;"
+        )
         btn_rm.setCursor(Qt.PointingHandCursor)
-        btn_rm.clicked.connect(lambda _, rr=r: self._tpl_remove_field(rr))
-
+        btn_rm.clicked.connect(
+            lambda _, k=tab_key, rr=r: self._tpl_remove_field(k, rr)
+        )
         wrap_rm = QWidget()
         wl2 = QHBoxLayout(wrap_rm)
         wl2.setContentsMargins(0, 0, 0, 0)
         wl2.addWidget(btn_rm)
         wl2.setAlignment(Qt.AlignCenter)
-        t.setCellWidget(r, 4, wrap_rm)
+        t.setCellWidget(r, 6, wrap_rm)
 
         t.resizeRowsToContents()
         self._tpl_refresh_preview()
 
-    def _tpl_remove_field(self, row_idx: int):
-        t = self.tpl_fields
+    def _tpl_remove_field(self, tab_key: str, row_idx: int):
+        widgets = self._tpl_tab_widgets.get(tab_key)
+        if not widgets:
+            return
+        t = widgets["fields"]
         if 0 <= row_idx < t.rowCount():
             t.removeRow(row_idx)
-            self._relink_field_buttons()
             self._tpl_refresh_preview()
 
-    def _relink_field_buttons(self):
-        t = self.tpl_fields
-        for r in range(t.rowCount()):
-            btn = t.cellWidget(r, 4)
-            if btn:
-                try:
-                    btn.clicked.disconnect()
-                except Exception:
-                    pass
-                btn.clicked.connect(lambda _, rr=r: self._tpl_remove_field(rr))
+    def _tpl_move_field(self, tab_key: str, direction: int):
+        widgets = self._tpl_tab_widgets.get(tab_key)
+        if not widgets:
+            return
+        t = widgets["fields"]
+        rows = t.selectionModel().selectedRows()
+        if not rows:
+            return
+        idx = rows[0].row()
+        new_idx = idx + direction
+        if new_idx < 0 or new_idx >= t.rowCount():
+            return
 
-    def _collect_fields_from_table(self) -> list:
-        t = self.tpl_fields
+        # Собрать данные всех полей
+        all_fields = []
+        for r in range(t.rowCount()):
+            name = t.item(r, 0).text() if t.item(r, 0) else ""
+            label = t.item(r, 1).text() if t.item(r, 1) else ""
+
+            wrap = t.cellWidget(r, 2)
+            chk = wrap.findChild(QCheckBox) if wrap else None
+            required = chk.isChecked() if chk else False
+
+            spin_font = t.cellWidget(r, 3)
+            font_size = spin_font.value() if spin_font else 12
+
+            spin_size = t.cellWidget(r, 4)
+            size = (float(spin_size.value()) if spin_size and spin_size.value() > 0
+                    else None)
+
+            xy_text = t.item(r, 5).text() if t.item(r, 5) else "X:0 Y:0"
+            x, y = 0, 0
+            try:
+                parts = xy_text.split()
+                x = int(parts[0].split(":")[1])
+                y = int(parts[1].split(":")[1])
+            except Exception:
+                pass
+
+            all_fields.append({
+                "name": name, "label": label,
+                "required": required, "font_size": font_size,
+                "size": size, "x": x, "y": y,
+            })
+
+        all_fields[idx], all_fields[new_idx] = all_fields[new_idx], all_fields[idx]
+
+        t.blockSignals(True)
+        t.setRowCount(0)
+        for f in all_fields:
+            r = t.rowCount()
+            t.insertRow(r)
+
+            is_dm = (f["name"] == "dataMatrix")
+
+            item_name = QTableWidgetItem(f["name"])
+            item_name.setFlags(item_name.flags() & ~Qt.ItemIsEditable)
+            t.setItem(r, 0, item_name)
+            t.setItem(r, 1, QTableWidgetItem(f["label"]))
+
+            chk = QCheckBox(); chk.setChecked(f["required"])
+            wrap_chk = QWidget()
+            wl = QHBoxLayout(wrap_chk)
+            wl.setContentsMargins(0, 0, 0, 0)
+            wl.addWidget(chk)
+            wl.setAlignment(Qt.AlignCenter)
+            t.setCellWidget(r, 2, wrap_chk)
+
+            spin_font = QSpinBox()
+            spin_font.setRange(6, 40)
+            spin_font.setValue(f["font_size"] if f["font_size"] else 12)
+            spin_font.setAlignment(Qt.AlignCenter)
+            if is_dm:
+                spin_font.setEnabled(False)
+                spin_font.setValue(0)
+            spin_font.valueChanged.connect(self._tpl_refresh_preview)
+            t.setCellWidget(r, 3, spin_font)
+
+            spin_size = QDoubleSpinBox()
+            spin_size.setRange(0, 200)
+            spin_size.setDecimals(0)
+            spin_size.setSuffix(" мм")
+            spin_size.setValue(f["size"] if f["size"] else (20 if is_dm else 0))
+            spin_size.setAlignment(Qt.AlignCenter)
+            if not is_dm:
+                spin_size.setEnabled(False)
+            spin_size.valueChanged.connect(self._tpl_refresh_preview)
+            t.setCellWidget(r, 4, spin_size)
+
+            item_xy = QTableWidgetItem(f"X:{f['x']} Y:{f['y']}")
+            item_xy.setFlags(item_xy.flags() & ~Qt.ItemIsEditable)
+            t.setItem(r, 5, item_xy)
+
+            btn_rm = QPushButton("×")
+            btn_rm.setFixedSize(28, 24)
+            btn_rm.setStyleSheet(
+                "color:#ef4444; border:none; font-weight:700; "
+                "font-size:16px; padding:0; background:transparent;"
+            )
+            btn_rm.setCursor(Qt.PointingHandCursor)
+            btn_rm.clicked.connect(
+                lambda _, k=tab_key, rr=r: self._tpl_remove_field(k, rr)
+            )
+            wrap_rm = QWidget()
+            wl2 = QHBoxLayout(wrap_rm)
+            wl2.setContentsMargins(0, 0, 0, 0)
+            wl2.addWidget(btn_rm)
+            wl2.setAlignment(Qt.AlignCenter)
+            t.setCellWidget(r, 6, wrap_rm)
+
+        t.blockSignals(False)
+        t.selectRow(new_idx)
+        self._tpl_refresh_preview()
+
+
+    def _collect_fields_from_table(self, tab_key: str) -> list:
+        widgets = self._tpl_tab_widgets.get(tab_key)
+        if not widgets:
+            return []
+
+        t = widgets["fields"]
         fields = []
         for r in range(t.rowCount()):
             name = t.item(r, 0).text() if t.item(r, 0) else ""
             label = t.item(r, 1).text() if t.item(r, 1) else ""
+
+            # Обяз.
             wrap = t.cellWidget(r, 2)
             chk = wrap.findChild(QCheckBox) if wrap else None
             required = chk.isChecked() if chk else False
-            spin = t.cellWidget(r, 3)
-            font_size = spin.value() if spin else 12
+
+            # Шрифт
+            spin_font = t.cellWidget(r, 3)
+            font_size = spin_font.value() if spin_font else 12
+
+            # Размер (только для dataMatrix)
+            spin_size = t.cellWidget(r, 4)
+            size = None
+            if name == "dataMatrix" and spin_size and spin_size.value() > 0:
+                size = float(spin_size.value())
+
+            # X, Y
+            xy_text = t.item(r, 5).text() if t.item(r, 5) else "X:0 Y:0"
+            x, y = 0, 0
+            try:
+                parts = xy_text.split()
+                x = int(parts[0].split(":")[1])
+                y = int(parts[1].split(":")[1])
+            except Exception:
+                pass
+
             if not name:
                 continue
-            fields.append({
-                "name": name, "label": label,
-                "required": required, "font_size": font_size,
-            })
+
+            field = {
+                "name": name,
+                "label": label,
+                "required": required,
+                "font_size": font_size,
+                "x": x,
+                "y": y,
+            }
+            if size is not None:
+                field["size"] = size
+            fields.append(field)
         return fields
+
+
+    def _update_field_position(self, tab_key: str, row_idx: int,
+                                x: int, y: int):
+        widgets = self._tpl_tab_widgets.get(tab_key)
+        if not widgets:
+            return
+        t = widgets["fields"]
+        if row_idx < 0 or row_idx >= t.rowCount():
+            return
+
+        t.blockSignals(True)
+        try:
+            item = t.item(row_idx, 5)
+            if item is None:
+                item = QTableWidgetItem(f"X:{x} Y:{y}")
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                t.setItem(row_idx, 5, item)
+            else:
+                item.setText(f"X:{x} Y:{y}")
+        finally:
+            t.blockSignals(False)
+
+    def _update_field_size(self, tab_key: str, row_idx: int, size_mm: float):
+        """Обновить размер DataMatrix — через спинбокс колонки 4."""
+        widgets = self._tpl_tab_widgets.get(tab_key)
+        if not widgets:
+            return
+        t = widgets["fields"]
+        if row_idx < 0 or row_idx >= t.rowCount():
+            return
+
+        spin = t.cellWidget(row_idx, 4)
+        if spin:
+            spin.blockSignals(True)
+            spin.setValue(float(size_mm))
+            spin.blockSignals(False)
+
+    def _update_field_font(self, tab_key: str, row_idx: int, font_size: int):
+        """Обновить размер шрифта текстового поля."""
+        widgets = self._tpl_tab_widgets.get(tab_key)
+        if not widgets:
+            return
+        t = widgets["fields"]
+        if row_idx < 0 or row_idx >= t.rowCount():
+            return
+
+        spin = t.cellWidget(row_idx, 3)
+        if spin:
+            spin.blockSignals(True)
+            spin.setValue(int(font_size))
+            spin.blockSignals(False)
+
+
+    def _update_field_font(self, tab_key: str, row_idx: int, font_size: int):
+        """Обновить размер шрифта текстового поля."""
+        widgets = self._tpl_tab_widgets.get(tab_key)
+        if not widgets:
+            return
+        t = widgets["fields"]
+        if row_idx < 0 or row_idx >= t.rowCount():
+            return
+
+        spin = t.cellWidget(row_idx, 3)
+        if spin:
+            spin.blockSignals(True)
+            spin.setValue(font_size)
+            spin.blockSignals(False)
+
+
+    def _collect_all_config(self) -> dict:
+        config = {"print_mode": self.tpl_mode_combo.currentData()}
+        for tab_key in ("combined", "cz", "label"):
+            widgets = self._tpl_tab_widgets.get(tab_key)
+            if not widgets:
+                continue
+            config[tab_key] = {
+                "w": widgets["w"].value(),
+                "h": widgets["h"].value(),
+                "dpi": int(widgets["dpi"].currentText()),
+                "fields": self._collect_fields_from_table(tab_key),
+            }
+        return config
 
     def _tpl_save(self):
         tpl = self._current_template()
@@ -722,18 +1374,24 @@ class AdminWindow(QWidget):
             self.toast.show_message("Введите название шаблона", "warn")
             return
 
-        fields = self._collect_fields_from_table()
-        if not fields:
-            self.toast.show_message("Добавьте хотя бы одно поле", "warn")
+        config = self._collect_all_config()
+
+        combined_fields = config.get("combined", {}).get("fields", [])
+        if not any(f["name"] == "dataMatrix" for f in combined_fields):
+            self.toast.show_message(
+                "В «ЧЗ + Русификатор» должно быть поле dataMatrix", "warn"
+            )
+            return
+
+        cz_fields = config.get("cz", {}).get("fields", [])
+        if not any(f["name"] == "dataMatrix" for f in cz_fields):
+            self.toast.show_message(
+                "В «ЧЗ» должно быть поле dataMatrix", "warn"
+            )
             return
 
         result = self.store.update_template(
-            code=tpl["code"],
-            name=name,
-            fields=fields,
-            width_mm=self.tpl_w.value(),
-            height_mm=self.tpl_h.value(),
-            dpi=int(self.tpl_dpi.currentText()),
+            code=tpl["code"], name=name, config=config,
         )
         if result["ok"]:
             self.toast.show_message(result["info"], "ok")
@@ -766,14 +1424,39 @@ class AdminWindow(QWidget):
             return
         name = name.strip()
 
-        default_fields = [
-            {"name": "dataMatrix", "label": "", "required": True, "font_size": 0},
-            {"name": "name_ru", "label": "Наименование", "required": True, "font_size": 13},
-            {"name": "importer", "label": "Импортёр", "required": True, "font_size": 10},
-        ]
+        config = {
+            "print_mode": "combined",
+            "combined": {
+                "w": 58, "h": 40, "dpi": 203,
+                "fields": [
+                    {"name": "dataMatrix", "label": "", "required": True,
+                     "font_size": 0, "x": 5, "y": 5},
+                    {"name": "name_ru", "label": "", "required": True,
+                     "font_size": 13, "x": 100, "y": 5},
+                    {"name": "importer", "label": "Импортёр",
+                     "required": True, "font_size": 10, "x": 100, "y": 40},
+                ],
+            },
+            "cz": {
+                "w": 30, "h": 30, "dpi": 203,
+                "fields": [
+                    {"name": "dataMatrix", "label": "", "required": True,
+                     "font_size": 0, "x": 5, "y": 5},
+                ],
+            },
+            "label": {
+                "w": 58, "h": 40, "dpi": 203,
+                "fields": [
+                    {"name": "name_ru", "label": "", "required": True,
+                     "font_size": 13, "x": 5, "y": 5},
+                    {"name": "importer", "label": "Импортёр",
+                     "required": True, "font_size": 10, "x": 5, "y": 25},
+                ],
+            },
+        }
 
         result = self.store.create_template(
-            code=code, name=name, fields=default_fields
+            code=code, name=name, config=config,
         )
         if result["ok"]:
             self.toast.show_message(result["info"], "ok")
@@ -806,13 +1489,68 @@ class AdminWindow(QWidget):
     def _refresh_bindings(self):
         try:
             self.bind_table.setRowCount(0)
+            bindings = self.store.list_bindings()
+            tpls = {t["code"]: t["name"] for t in self.store.list_templates()}
+
+            for b in bindings:
+                r = self.bind_table.rowCount()
+                self.bind_table.insertRow(r)
+                self.bind_table.setItem(r, 0, cell(b["gtin_prefix"], mono=True))
+                self.bind_table.setItem(
+                    r, 1, cell(tpls.get(b["template_code"], b["template_code"]))
+                )
+                self.bind_table.setItem(r, 2, cell(str(b["priority"])))
+
+                btn = QPushButton("×")
+                btn.setFixedSize(32, 26)
+                btn.setStyleSheet(
+                    "color:#ef4444; border:none; font-weight:700; "
+                    "font-size:18px; padding:0; background:transparent;"
+                )
+                btn.setCursor(Qt.PointingHandCursor)
+                btn.clicked.connect(
+                    lambda _, bid=b["id"]: self._tpl_bind_delete(bid)
+                )
+                wrap = QWidget()
+                wl = QHBoxLayout(wrap)
+                wl.setContentsMargins(0, 0, 0, 0)
+                wl.addWidget(btn)
+                wl.setAlignment(Qt.AlignCenter)
+                self.bind_table.setCellWidget(r, 3, wrap)
         except AttributeError:
             return
 
+    def _tpl_bind_create(self):
+        tpl = self._current_template()
+        if not tpl:
+            self.toast.show_message("Выберите шаблон", "warn")
+            return
+        prefix = self.bind_gtin.text().strip()
+        if not prefix:
+            self.toast.show_message("Введите GTIN-префикс", "warn")
+            return
+        result = self.store.create_binding(tpl["code"], prefix)
+        if result["ok"]:
+            self.toast.show_message(result["info"], "ok")
+            self.bind_gtin.clear()
+            self._refresh_bindings()
+        else:
+            self.toast.show_message(f"Ошибка: {result['info']}", "err")
+
+    def _tpl_bind_delete(self, binding_id: int):
+        result = self.store.delete_binding(binding_id)
+        if result["ok"]:
+            self.toast.show_message(result["info"], "ok")
+            self._refresh_bindings()
+        else:
+            self.toast.show_message(f"Ошибка: {result['info']}", "err")
+
     def _build_template_preview(self) -> QFrame:
+        from label_preview import LabelPreviewWidget
+
         card = QFrame()
         card.setObjectName("card")
-        card.setFixedWidth(320)
+        card.setFixedWidth(360)
 
         v = QVBoxLayout(card)
         v.setContentsMargins(14, 14, 14, 14)
@@ -824,111 +1562,40 @@ class AdminWindow(QWidget):
         )
         v.addWidget(title)
 
-        self.tpl_preview_area = QFrame()
-        self.tpl_preview_area.setStyleSheet(
-            "background:#ffffff; border-radius:6px;"
-        )
-        self.tpl_preview_area.setMinimumHeight(180)
-
-        pv = QHBoxLayout(self.tpl_preview_area)
-        pv.setContentsMargins(12, 12, 12, 12)
-        pv.setSpacing(10)
-        pv.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-
-        self.tpl_preview_dm = QLabel()
-        self.tpl_preview_dm.setFixedSize(100, 100)
-        self.tpl_preview_dm.setStyleSheet("background:transparent;")
-        self.tpl_preview_dm.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        pv.addWidget(self.tpl_preview_dm, alignment=Qt.AlignTop)
-
-        self.tpl_preview_text = QVBoxLayout()
-        self.tpl_preview_text.setSpacing(3)
-        self.tpl_preview_text.setAlignment(Qt.AlignTop)
-        pv.addLayout(self.tpl_preview_text, stretch=1)
-
-        v.addWidget(self.tpl_preview_area)
+        self.label_preview = LabelPreviewWidget(self)
+        self.label_preview.setMinimumHeight(340)
+        v.addWidget(self.label_preview, stretch=1)
 
         self.tpl_preview_size = QLabel("")
-        self.tpl_preview_size.setStyleSheet("color:#8b97a6; font-size:11px;")
+        self.tpl_preview_size.setStyleSheet(
+            "color:#8b97a6; font-size:11px;"
+        )
         self.tpl_preview_size.setAlignment(Qt.AlignCenter)
         v.addWidget(self.tpl_preview_size)
 
         v.addStretch(1)
         return card
 
+
     def _tpl_refresh_preview(self):
         if hasattr(self, "_tpl_preview_timer"):
             self._tpl_preview_timer.start()
 
     def _tpl_refresh_preview_now(self):
-        if not hasattr(self, "tpl_preview_text"):
-            return
-
-        while self.tpl_preview_text.count():
-            item = self.tpl_preview_text.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-
+        """Обновить предпросмотр — виджет сам перерисуется."""
+        if hasattr(self, "label_preview"):
+            self.label_preview.update()
+        # Обновить подпись с размерами
         try:
-            fields = self._collect_fields_from_table()
-        except Exception:
-            fields = []
-
-        samples = {
-            "name_ru":     "Наушники беспроводные BT-500",
-            "model":       "BT-500",
-            "importer":    "ООО «Ромашка», г. Москва",
-            "exp_date":    "12.2026",
-            "qty":         "1 шт.",
-            "material":    "Кожа натуральная",
-            "size_eu":     "42",
-            "composition": "Хлопок 100%",
-            "country":     "Китай (CN)",
-            "lot":         "LOT-2025-04",
-            "serial":      "SN0004821",
-            "gtin":        "04600123456782",
-            "manufacturer": "Shenzhen Tech Co.",
-            "batch":       "B-2025-04",
-        }
-
-        has_dm = False
-
-        for f in fields:
-            name = f.get("name", "")
-            label = f.get("label", "") or ""
-            font_size = int(f.get("font_size", 12)) or 11
-
-            if name == "dataMatrix":
-                has_dm = True
-                continue
-
-            value = samples.get(name, f"[{name}]")
-            text = f"{label}: {value}" if label else value
-
-            lbl = QLabel(text)
-            lbl.setStyleSheet(
-                f"color:#000000; background:transparent; "
-                f"font-family:'Consolas', monospace; "
-                f"font-size:{max(9, min(font_size, 20))}px;"
-            )
-            lbl.setWordWrap(True)
-            self.tpl_preview_text.addWidget(lbl)
-
-        if has_dm:
-            sample_code = "01" + "04600123456782" + "21" + "SN0004821" + "\x1d91ABCD\x1d92XYZ12345"
-            pix = render_datamatrix(sample_code, 100)
-            self.tpl_preview_dm.setPixmap(pix)
-            self.tpl_preview_dm.show()
-        else:
-            self.tpl_preview_dm.hide()
-
-        try:
-            w_mm = self.tpl_w.value()
-            h_mm = self.tpl_h.value()
-            dpi = self.tpl_dpi.currentText()
-            self.tpl_preview_size.setText(
-                f"{int(w_mm)} × {int(h_mm)} мм · {dpi} DPI"
-            )
+            tab_key = ["combined", "cz", "label"][self.tpl_tabs.currentIndex()]
+            widgets = self._tpl_tab_widgets.get(tab_key)
+            if widgets:
+                w_mm = widgets["w"].value()
+                h_mm = widgets["h"].value()
+                dpi = widgets["dpi"].currentText()
+                self.tpl_preview_size.setText(
+                    f"{int(w_mm)} × {int(h_mm)} мм · {dpi} DPI"
+                )
         except Exception:
             pass
 
@@ -942,7 +1609,7 @@ class AdminWindow(QWidget):
         v.setSpacing(14)
 
         head = QHBoxLayout()
-        tt = QLabel("Пул кодов ЧЗ")
+        tt = QLabel("Склад кодов ЧЗ")
         tt.setStyleSheet("font-size:18px; font-weight:600;")
         head.addWidget(tt)
         head.addStretch(1)
@@ -1134,78 +1801,6 @@ class AdminWindow(QWidget):
             t.setItem(r, 4, cell(r_data["imported_by"] or "—"))
             t.setItem(r, 5, cell(r_data["imported_at"] or "—", mono=True))
 
-    # ==================================================================
-    # SCANNED (история привязок ШК → ЧЗ)
-    # ==================================================================
-    def _page_scanned(self) -> QWidget:
-        w = QWidget()
-        v = QVBoxLayout(w)
-        v.setContentsMargins(24, 20, 24, 20)
-        v.setSpacing(14)
-
-        head = QHBoxLayout()
-        tt = QLabel("Привязки: иностранный ШК → код ЧЗ")
-        tt.setStyleSheet("font-size:18px; font-weight:600;")
-        head.addWidget(tt)
-        head.addStretch(1)
-
-        btn_refresh = QPushButton("🔄 Обновить")
-        btn_refresh.clicked.connect(self._refresh_scanned)
-        head.addWidget(btn_refresh)
-
-        v.addLayout(head)
-
-        filter_row = QHBoxLayout()
-        filter_row.setSpacing(8)
-        filter_row.addWidget(QLabel("Точка:"))
-        self.scanned_point_filter = QComboBox()
-        self.scanned_point_filter.setFixedWidth(220)
-        self.scanned_point_filter.addItem("Все точки", None)
-        for p in self.store.points:
-            self.scanned_point_filter.addItem(
-                f"{p['id']} — {p['name']}", p["id"]
-            )
-        idx = self.scanned_point_filter.findData(self.store.current_point)
-        if idx >= 0:
-            self.scanned_point_filter.setCurrentIndex(idx)
-        self.scanned_point_filter.currentIndexChanged.connect(self._refresh_scanned)
-        filter_row.addWidget(self.scanned_point_filter)
-
-        filter_row.addStretch(1)
-        v.addLayout(filter_row)
-
-        self.scanned_table = table(
-            ["Время", "Точка", "Оператор",
-             "Иностранный ШК", "GTIN (ЧЗ)", "Код ЧЗ"]
-        )
-        v.addWidget(self.scanned_table, stretch=1)
-        return w
-
-    def _refresh_scanned(self):
-        point = (self.scanned_point_filter.currentData()
-                 if hasattr(self, "scanned_point_filter") else None)
-
-        try:
-            rows = self.store.list_scanned_shk(point=point, limit=500)
-        except Exception:
-            rows = []
-
-        t = self.scanned_table
-        t.setRowCount(0)
-        for r_data in rows:
-            r = t.rowCount(); t.insertRow(r)
-            t.setItem(r, 0, cell(r_data["scanned_at"], mono=True))
-            t.setItem(r, 1, cell(r_data["point"], mono=True))
-            t.setItem(r, 2, cell(r_data["operator"] or "—"))
-            fc = r_data["foreign_code"]
-            t.setItem(r, 3, cell(
-                fc[:40] + "…" if len(fc) > 40 else fc, mono=True
-            ))
-            t.setItem(r, 4, cell(r_data["cz_gtin"], mono=True))
-            cc = r_data["cz_code"]
-            t.setItem(r, 5, cell(
-                cc[:60] + "…" if len(cc) > 60 else cc, mono=True
-            ))
 
     # ==================================================================
     # DISCREPANCIES (расхождения: сканы vs коды)

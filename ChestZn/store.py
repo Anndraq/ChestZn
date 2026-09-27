@@ -18,17 +18,9 @@ class Store:
     def __init__(self):
         db.init_db()
 
-        self.points = [
-            {"id": "T-01", "name": "Склад-Восток", "address": "Корпус А, 1 этаж",
-             "ip": "10.0.1.15", "online": True, "operator": "Иванов И.И.",
-             "printer": "Zebra ZD421", "template": "electronics"},
-            {"id": "T-02", "name": "Склад-Запад", "address": "Корпус Б, 2 этаж",
-             "ip": "10.0.2.15", "online": True, "operator": "Петрова А.С.",
-             "printer": "TSC TE200", "template": "shoes"},
-            {"id": "T-03", "name": "Пост-Север", "address": "КПП-3",
-             "ip": "10.0.3.15", "online": False, "operator": "Сидоров В.П.",
-             "printer": "Godex G500", "template": "electronics"},
-        ]
+        # ---------- Точки (из БД) ----------
+        self._ensure_points_seeded()
+        self.points = self._load_points()
 
         self.current_point = "T-01"
         self.current_operator = "Иванов И.И."
@@ -60,6 +52,141 @@ class Store:
         self.audit   = self._load_audit(limit=200)
         self.gtin_map = self._load_gtin_map()
         self.users = self.list_users()
+
+    # ==========================================================
+    # Точки и компьютеры
+    # ==========================================================
+    _DEFAULT_POINTS = [
+        {
+            "id": "T-01", "name": "Склад-Восток",
+            "address": "Корпус А, 1 этаж",
+            "ip": "10.0.1.15", "printer": "Zebra ZD421",
+            "operator": "Иванов И.И.", "online": 1,
+            "template": "electronics", "sort_order": 10,
+            "computers": [
+                {"name": "ПК-01", "ip": "10.0.1.10",
+                 "role": "Основной оператор", "online": 1,
+                 "operator": "Иванов И.И."},
+                {"name": "ПК-02", "ip": "10.0.1.11",
+                 "role": "Резервный", "online": 0,
+                 "operator": "—"},
+            ],
+        },
+        {
+            "id": "T-02", "name": "Склад-Запад",
+            "address": "Корпус Б, 2 этаж",
+            "ip": "10.0.2.15", "printer": "TSC TE200",
+            "operator": "Петрова А.С.", "online": 1,
+            "template": "shoes", "sort_order": 20,
+            "computers": [
+                {"name": "ПК-01", "ip": "10.0.2.10",
+                 "role": "Основной оператор", "online": 1,
+                 "operator": "Петрова А.С."},
+            ],
+        },
+        {
+            "id": "T-03", "name": "Пост-Север",
+            "address": "КПП-3",
+            "ip": "10.0.3.15", "printer": "Godex G500",
+            "operator": "Сидоров В.П.", "online": 0,
+            "template": "electronics", "sort_order": 30,
+            "computers": [],
+        },
+    ]
+
+    def _ensure_points_seeded(self):
+        """Наполнить таблицу points, если она пустая."""
+        import json
+        with db.get_conn() as conn:
+            n = conn.execute(
+                "SELECT COUNT(*) AS c FROM points"
+            ).fetchone()["c"]
+            if n > 0:
+                return
+
+            for p in self._DEFAULT_POINTS:
+                conn.execute(
+                    "INSERT INTO points "
+                    "(id, name, address, ip, printer, operator, online, "
+                    " template, computers_json, sort_order) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (p["id"], p["name"], p["address"], p["ip"],
+                     p["printer"], p["operator"], p["online"],
+                     p["template"],
+                     json.dumps(p["computers"], ensure_ascii=False),
+                     p["sort_order"])
+                )
+
+    def _load_points(self) -> list:
+        """Загрузить точки из БД."""
+        import json
+        with db.get_conn() as conn:
+            rows = conn.execute(
+                "SELECT id, name, address, ip, printer, operator, "
+                "       online, template, computers_json, sort_order "
+                "FROM points ORDER BY sort_order, id"
+            ).fetchall()
+
+        result = []
+        for r in rows:
+            d = dict(r)
+            d["online"] = bool(d["online"])
+            try:
+                d["computers"] = json.loads(d.get("computers_json") or "[]")
+            except Exception:
+                d["computers"] = []
+            d.pop("computers_json", None)
+            result.append(d)
+        return result
+
+    def get_point(self, point_id: str):
+        """Одна точка."""
+        for p in self.points:
+            if p["id"] == point_id:
+                return p
+        return None
+
+    def update_point(self, point_id: str, **kwargs) -> dict:
+        """Обновить точку. Принимает name, address, ip, printer,
+        operator, online, template, computers."""
+        import json
+        p = self.get_point(point_id)
+        if not p:
+            return {"ok": False, "info": "Точка не найдена"}
+
+        new = dict(p)
+        for k in ("name", "address", "ip", "printer", "operator",
+                  "template"):
+            if k in kwargs:
+                new[k] = kwargs[k]
+        if "online" in kwargs:
+            new["online"] = bool(kwargs["online"])
+        if "computers" in kwargs:
+            new["computers"] = kwargs["computers"]
+
+        try:
+            with db.get_conn() as conn:
+                conn.execute(
+                    "UPDATE points SET "
+                    "  name = ?, address = ?, ip = ?, printer = ?, "
+                    "  operator = ?, online = ?, template = ?, "
+                    "  computers_json = ? "
+                    "WHERE id = ?",
+                    (new["name"], new["address"], new["ip"],
+                     new["printer"], new["operator"],
+                     1 if new["online"] else 0, new["template"],
+                     json.dumps(new["computers"], ensure_ascii=False),
+                     point_id)
+                )
+
+            for i, pp in enumerate(self.points):
+                if pp["id"] == point_id:
+                    self.points[i] = new
+                    break
+
+            return {"ok": True, "info": f"Точка «{new['name']}» сохранена"}
+        except Exception as e:
+            return {"ok": False, "info": str(e)}
 
     # ==========================================================
     # Seed / загрузка
@@ -336,10 +463,6 @@ class Store:
         return dict(row) if row else None
 
     def count_scanned_shk(self, foreign_code: str) -> int:
-        """
-        Сколько раз этот иностранный ШК уже сканировали.
-        Нужно для «умного варианта» — понять, повтор это или нет.
-        """
         with db.get_conn() as conn:
             return conn.execute(
                 "SELECT COUNT(*) AS c FROM scanned_shk WHERE foreign_code = ?",
@@ -358,13 +481,7 @@ class Store:
                  cz_code, cz_gtin, cz_sn, point, operator)
             )
 
-    # ---------------- Счётчик по GTIN ----------------
-
     def _increment_gtin_counter(self, gtin: str, point: str):
-        """
-        Увеличить счётчик сканов для GTIN+точка на 1.
-        Создаёт запись, если её ещё нет.
-        """
         with db.get_conn() as conn:
             conn.execute(
                 "INSERT INTO gtin_counters (gtin, point, scans, last_scan_at) "
@@ -376,7 +493,6 @@ class Store:
             )
 
     def _get_gtin_scans(self, gtin: str, point: str) -> int:
-        """Сколько раз пикнули этот GTIN на точке."""
         with db.get_conn() as conn:
             row = conn.execute(
                 "SELECT scans FROM gtin_counters WHERE gtin = ? AND point = ?",
@@ -385,7 +501,6 @@ class Store:
         return row["scans"] if row else 0
 
     def _get_gtin_total(self, gtin: str, point: str) -> int:
-        """Сколько ВСЕГО кодов в пуле для GTIN+точка (и использованных, и свободных)."""
         with db.get_conn() as conn:
             return conn.execute(
                 "SELECT COUNT(*) AS c FROM pool_codes "
@@ -393,35 +508,17 @@ class Store:
                 (gtin, point)
             ).fetchone()["c"]
 
-    # ---------------- Основной метод скана ----------------
-
     def process_scan(self, foreign_code: str, point: str = None,
                      operator: str = None) -> dict:
-        """
-        Обработать скан иностранного ШК.
-
-        Логика:
-        1. Считаем, сколько раз этот ШК уже был (не блокируем).
-        2. Ищем GTIN ЧЗ (через gtin_map или как есть).
-        3. Берём свободный код из пула СВОЕЙ точки.
-        4. Инкрементируем счётчик сканов по GTIN.
-        5. Привязываем.
-        6. Если scans > total — пишем «Перебор GTIN» в журнал.
-        """
         if point is None:
             point = self.current_point
         if operator is None:
             operator = self.current_operator
 
         foreign = parse_foreign_barcode(foreign_code)
-
-        # 1. Сколько раз этот ШК уже сканировали? (не блокирует)
         prev_count = self.count_scanned_shk(foreign_code)
-
-        # 2. GTIN ЧЗ
         gtin_cz = self.gtin_map.get(foreign["gtin"], foreign["gtin"])
 
-        # 3. Берём свободный код
         cz = self.take_code(gtin_cz, point=point)
         if not cz:
             from logger import get_logger
@@ -437,10 +534,8 @@ class Store:
                 "gtin": gtin_cz,
             }
 
-        # 4. Счётчик по GTIN
         self._increment_gtin_counter(gtin_cz, point)
 
-        # 5. Привязываем
         self.bind_shk_to_cz(
             foreign_code=foreign_code,
             foreign_gtin=foreign["gtin"],
@@ -452,7 +547,6 @@ class Store:
             operator=operator,
         )
 
-        # 6. Проверка перебора
         scans = self._get_gtin_scans(gtin_cz, point)
         total = self._get_gtin_total(gtin_cz, point)
         overflow = scans > total
@@ -479,18 +573,13 @@ class Store:
             "status": "ok",
             "foreign": foreign,
             "cz": cz,
-            "prev_count": prev_count,   # сколько раз ШК был до этого
-            "gtin_scans": scans,        # сколько всего раз пикнули GTIN
-            "gtin_total": total,        # сколько всего кодов у GTIN
-            "overflow": overflow,       # True, если сканов > кодов
+            "prev_count": prev_count,
+            "gtin_scans": scans,
+            "gtin_total": total,
+            "overflow": overflow,
         }
 
     def count_unprinted_for_point(self, point: str) -> int:
-        """
-        Сколько кодов взято, но не напечатано на точке.
-        Считаем коды, которые были использованы (used=1),
-        но печать не подтверждена (printed=0).
-        """
         with db.get_conn() as conn:
             return conn.execute(
                 "SELECT COUNT(*) AS c FROM pool_codes "
@@ -498,9 +587,7 @@ class Store:
                 (point,)
             ).fetchone()["c"]
 
-
     def list_unprinted_for_point(self, point: str, limit: int = 100) -> list:
-        """Список кодов, взятых, но не напечатанных."""
         with db.get_conn() as conn:
             rows = conn.execute(
                 "SELECT id, gtin, code, sn, used_point, printed_at, created_at "
@@ -530,12 +617,6 @@ class Store:
     # Расхождения (для админки)
     # ==========================================================
     def get_discrepancies(self, point: str = None) -> list:
-        """
-        Сводка: пул vs счётчик сканов.
-        Возвращает список строк:
-          {gtin, point, total, scans, used, free, overflow}
-        где overflow = scans > total.
-        """
         with db.get_conn() as conn:
             if point:
                 pool_rows = conn.execute(
@@ -594,44 +675,121 @@ class Store:
             "code": "electronics",
             "name": "Электроника",
             "is_default": 1,
-            "width_mm": 58, "height_mm": 40, "dpi": 203,
-            "fields": [
-                {"name": "dataMatrix", "label": "", "required": True, "order": 1, "font_size": 0},
-                {"name": "name_ru", "label": "Наименование", "required": True, "order": 2, "font_size": 13},
-                {"name": "model", "label": "Модель", "required": False, "order": 3, "font_size": 11},
-                {"name": "importer", "label": "Импортёр", "required": True, "order": 4, "font_size": 10},
-                {"name": "exp_date", "label": "Срок годности", "required": False, "order": 5, "font_size": 10},
-                {"name": "qty", "label": "Кол-во", "required": False, "order": 6, "font_size": 10},
-            ],
+            "config": {
+                "print_mode": "combined",
+                "combined": {
+                    "w": 58, "h": 40, "dpi": 203,
+                    "fields": [
+                        {"name": "dataMatrix", "label": "", "required": True,
+                         "font_size": 0, "x": 5, "y": 5},
+                        {"name": "name_ru", "label": "", "required": True,
+                         "font_size": 13, "x": 100, "y": 5},
+                        {"name": "model", "label": "Модель", "required": False,
+                         "font_size": 11, "x": 100, "y": 25},
+                        {"name": "importer", "label": "Импортёр", "required": True,
+                         "font_size": 10, "x": 100, "y": 40},
+                        {"name": "exp_date", "label": "Срок годности", "required": False,
+                         "font_size": 10, "x": 100, "y": 55},
+                    ],
+                },
+                "cz": {
+                    "w": 30, "h": 30, "dpi": 203,
+                    "fields": [
+                        {"name": "dataMatrix", "label": "", "required": True,
+                         "font_size": 0, "x": 5, "y": 5},
+                    ],
+                },
+                "label": {
+                    "w": 58, "h": 40, "dpi": 203,
+                    "fields": [
+                        {"name": "name_ru", "label": "", "required": True,
+                         "font_size": 13, "x": 5, "y": 5},
+                        {"name": "model", "label": "Модель", "required": False,
+                         "font_size": 11, "x": 5, "y": 25},
+                        {"name": "importer", "label": "Импортёр", "required": True,
+                         "font_size": 10, "x": 5, "y": 40},
+                        {"name": "exp_date", "label": "Срок годности", "required": False,
+                         "font_size": 10, "x": 5, "y": 55},
+                    ],
+                },
+            },
         },
         {
             "code": "shoes",
             "name": "Обувь (ТР ТС 017)",
             "is_default": 0,
-            "width_mm": 58, "height_mm": 40, "dpi": 203,
-            "fields": [
-                {"name": "dataMatrix", "label": "", "required": True, "order": 1, "font_size": 0},
-                {"name": "name_ru", "label": "Наименование", "required": True, "order": 2, "font_size": 13},
-                {"name": "material", "label": "Материал", "required": True, "order": 3, "font_size": 11},
-                {"name": "size_eu", "label": "Размер EU", "required": True, "order": 4, "font_size": 11},
-                {"name": "importer", "label": "Импортёр", "required": True, "order": 5, "font_size": 10},
-            ],
+            "config": {
+                "print_mode": "separate",
+                "combined": {
+                    "w": 58, "h": 40, "dpi": 203,
+                    "fields": [
+                        {"name": "dataMatrix", "label": "", "required": True,
+                         "font_size": 0, "x": 5, "y": 5},
+                        {"name": "name_ru", "label": "", "required": True,
+                         "font_size": 13, "x": 100, "y": 5},
+                    ],
+                },
+                "cz": {
+                    "w": 30, "h": 30, "dpi": 203,
+                    "fields": [
+                        {"name": "dataMatrix", "label": "", "required": True,
+                         "font_size": 0, "x": 5, "y": 5},
+                    ],
+                },
+                "label": {
+                    "w": 58, "h": 40, "dpi": 203,
+                    "fields": [
+                        {"name": "name_ru", "label": "", "required": True,
+                         "font_size": 13, "x": 5, "y": 5},
+                        {"name": "material", "label": "Материал", "required": True,
+                         "font_size": 11, "x": 5, "y": 25},
+                        {"name": "size_eu", "label": "Размер EU", "required": True,
+                         "font_size": 11, "x": 5, "y": 40},
+                        {"name": "importer", "label": "Импортёр", "required": True,
+                         "font_size": 10, "x": 5, "y": 55},
+                    ],
+                },
+            },
         },
         {
             "code": "clothing",
             "name": "Одежда (ТР ТС 017)",
             "is_default": 0,
-            "width_mm": 58, "height_mm": 40, "dpi": 203,
-            "fields": [
-                {"name": "dataMatrix", "label": "", "required": True, "order": 1, "font_size": 0},
-                {"name": "name_ru", "label": "Наименование", "required": True, "order": 2, "font_size": 13},
-                {"name": "composition", "label": "Состав", "required": True, "order": 3, "font_size": 11},
-                {"name": "importer", "label": "Импортёр", "required": True, "order": 4, "font_size": 10},
-            ],
+            "config": {
+                "print_mode": "separate",
+                "combined": {
+                    "w": 58, "h": 40, "dpi": 203,
+                    "fields": [
+                        {"name": "dataMatrix", "label": "", "required": True,
+                         "font_size": 0, "x": 5, "y": 5},
+                        {"name": "name_ru", "label": "", "required": True,
+                         "font_size": 13, "x": 100, "y": 5},
+                    ],
+                },
+                "cz": {
+                    "w": 30, "h": 30, "dpi": 203,
+                    "fields": [
+                        {"name": "dataMatrix", "label": "", "required": True,
+                         "font_size": 0, "x": 5, "y": 5},
+                    ],
+                },
+                "label": {
+                    "w": 58, "h": 40, "dpi": 203,
+                    "fields": [
+                        {"name": "name_ru", "label": "", "required": True,
+                         "font_size": 13, "x": 5, "y": 5},
+                        {"name": "composition", "label": "Состав", "required": True,
+                         "font_size": 11, "x": 5, "y": 25},
+                        {"name": "importer", "label": "Импортёр", "required": True,
+                         "font_size": 10, "x": 5, "y": 40},
+                    ],
+                },
+            },
         },
     ]
 
     def _ensure_templates_seeded(self):
+        """Наполнить таблицу шаблонов, если она пустая."""
         import json
         with db.get_conn() as conn:
             n = conn.execute(
@@ -644,19 +802,24 @@ class Store:
                 conn.execute(
                     "INSERT INTO label_templates "
                     "(code, name, is_default, width_mm, height_mm, dpi, "
-                    " fields_json, sort_order) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    " fields_json, sort_order, config_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (tpl["code"], tpl["name"], tpl["is_default"],
-                     tpl["width_mm"], tpl["height_mm"], tpl["dpi"],
-                     json.dumps(tpl["fields"], ensure_ascii=False), i * 10)
+                     58, 40, 203,
+                     json.dumps(tpl["config"]["combined"]["fields"],
+                                ensure_ascii=False),
+                     i * 10,
+                     json.dumps(tpl["config"], ensure_ascii=False))
                 )
 
     def list_templates(self) -> list:
+        """Список шаблонов с конфигурацией."""
         import json
         with db.get_conn() as conn:
             rows = conn.execute(
                 "SELECT id, code, name, is_default, version, "
-                "       width_mm, height_mm, dpi, fields_json, sort_order "
+                "       width_mm, height_mm, dpi, fields_json, "
+                "       sort_order, config_json "
                 "FROM label_templates ORDER BY sort_order, id"
             ).fetchall()
 
@@ -664,33 +827,88 @@ class Store:
         for r in rows:
             d = dict(r)
             try:
-                d["fields"] = json.loads(d["fields_json"])
+                config = json.loads(d.get("config_json") or "{}")
             except Exception:
-                d["fields"] = []
+                config = {}
+
+            if not config:
+                old_fields = []
+                try:
+                    old_fields = json.loads(d.get("fields_json") or "[]")
+                except Exception:
+                    pass
+                config = {
+                    "print_mode": "combined",
+                    "combined": {
+                        "w": d["width_mm"], "h": d["height_mm"],
+                        "dpi": d["dpi"], "fields": old_fields,
+                    },
+                    "cz": {"w": 30, "h": 30, "dpi": 203,
+                           "fields": [{"name": "dataMatrix", "label": "",
+                                       "required": True, "font_size": 0,
+                                       "x": 5, "y": 5}]},
+                    "label": {"w": d["width_mm"], "h": d["height_mm"],
+                              "dpi": d["dpi"], "fields": old_fields},
+                }
+
+            d["config"] = config
+            d["print_mode"] = config.get("print_mode", "combined")
+            d["width_mm"] = config.get("combined", {}).get("w", d["width_mm"])
+            d["height_mm"] = config.get("combined", {}).get("h", d["height_mm"])
+            d["dpi"] = config.get("combined", {}).get("dpi", d["dpi"])
+            d["fields"] = config.get("combined", {}).get("fields", [])
+
             d.pop("fields_json", None)
+            d.pop("config_json", None)
             result.append(d)
         return result
 
     def get_template(self, code: str):
+        """Один шаблон по коду."""
         import json
         with db.get_conn() as conn:
             r = conn.execute(
                 "SELECT id, code, name, is_default, version, "
-                "       width_mm, height_mm, dpi, fields_json, sort_order "
+                "       width_mm, height_mm, dpi, fields_json, "
+                "       sort_order, config_json "
                 "FROM label_templates WHERE code = ?",
                 (code,)
             ).fetchone()
         if not r:
             return None
+
         d = dict(r)
         try:
-            d["fields"] = json.loads(d["fields_json"])
+            config = json.loads(d.get("config_json") or "{}")
         except Exception:
-            d["fields"] = []
+            config = {}
+
+        if not config:
+            old_fields = []
+            try:
+                old_fields = json.loads(d.get("fields_json") or "[]")
+            except Exception:
+                pass
+            config = {
+                "print_mode": "combined",
+                "combined": {"w": d["width_mm"], "h": d["height_mm"],
+                             "dpi": d["dpi"], "fields": old_fields},
+                "cz": {"w": 30, "h": 30, "dpi": 203,
+                       "fields": [{"name": "dataMatrix", "label": "",
+                                   "required": True, "font_size": 0,
+                                   "x": 5, "y": 5}]},
+                "label": {"w": d["width_mm"], "h": d["height_mm"],
+                          "dpi": d["dpi"], "fields": old_fields},
+            }
+
+        d["config"] = config
+        d["print_mode"] = config.get("print_mode", "combined")
         d.pop("fields_json", None)
+        d.pop("config_json", None)
         return d
 
     def get_default_template(self):
+        """Шаблон по умолчанию."""
         with db.get_conn() as conn:
             r = conn.execute(
                 "SELECT code FROM label_templates "
@@ -703,41 +921,70 @@ class Store:
                 ).fetchone()
         return self.get_template(r["code"]) if r else None
 
-    def create_template(self, code, name, fields=None,
-                        width_mm=58, height_mm=40, dpi=203,
-                        is_default=False) -> dict:
+    def create_template(self, code: str, name: str,
+                        config: dict = None,
+                        is_default: bool = False) -> dict:
+        """Создать шаблон с конфигурацией трёх вкладок."""
         import json
-        fields = fields or []
+
+        if config is None:
+            config = {
+                "print_mode": "combined",
+                "combined": {"w": 58, "h": 40, "dpi": 203,
+                             "fields": [
+                                 {"name": "dataMatrix", "label": "",
+                                  "required": True, "font_size": 0,
+                                  "x": 5, "y": 5},
+                                 {"name": "name_ru", "label": "",
+                                  "required": True, "font_size": 13,
+                                  "x": 100, "y": 5},
+                             ]},
+                "cz": {"w": 30, "h": 30, "dpi": 203,
+                       "fields": [{"name": "dataMatrix", "label": "",
+                                   "required": True, "font_size": 0,
+                                   "x": 5, "y": 5}]},
+                "label": {"w": 58, "h": 40, "dpi": 203,
+                          "fields": [
+                              {"name": "name_ru", "label": "",
+                               "required": True, "font_size": 13,
+                               "x": 5, "y": 5},
+                          ]},
+            }
+
         try:
             with db.get_conn() as conn:
                 if is_default:
-                    conn.execute("UPDATE label_templates SET is_default = 0")
+                    conn.execute(
+                        "UPDATE label_templates SET is_default = 0"
+                    )
                 conn.execute(
                     "INSERT INTO label_templates "
                     "(code, name, is_default, width_mm, height_mm, dpi, "
-                    " fields_json, sort_order) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    " fields_json, sort_order, config_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (code, name, 1 if is_default else 0,
-                     width_mm, height_mm, dpi,
-                     json.dumps(fields, ensure_ascii=False), 100)
+                     config["combined"]["w"],
+                     config["combined"]["h"],
+                     config["combined"]["dpi"],
+                     json.dumps(config["combined"]["fields"], ensure_ascii=False),
+                     100,
+                     json.dumps(config, ensure_ascii=False))
                 )
             return {"ok": True, "info": f"Шаблон «{name}» создан"}
         except Exception as e:
             return {"ok": False, "info": str(e)}
 
-    def update_template(self, code, name=None, fields=None,
-                        width_mm=None, height_mm=None, dpi=None,
-                        is_default=None) -> dict:
+    def update_template(self, code: str, name: str = None,
+                        config: dict = None,
+                        is_default: bool = None) -> dict:
+        """Обновить шаблон."""
         import json
         tpl = self.get_template(code)
         if not tpl:
             return {"ok": False, "info": "Шаблон не найден"}
 
         new_name = name if name is not None else tpl["name"]
-        new_fields = fields if fields is not None else tpl["fields"]
-        new_w = width_mm if width_mm is not None else tpl["width_mm"]
-        new_h = height_mm if height_mm is not None else tpl["height_mm"]
-        new_dpi = dpi if dpi is not None else tpl["dpi"]
+        new_config = config if config is not None else tpl["config"]
         new_default = tpl["is_default"] if is_default is None else (1 if is_default else 0)
 
         try:
@@ -749,12 +996,21 @@ class Store:
                     )
                 conn.execute(
                     "UPDATE label_templates SET "
-                    "  name = ?, fields_json = ?, width_mm = ?, "
-                    "  height_mm = ?, dpi = ?, is_default = ?, "
+                    "  name = ?, "
+                    "  width_mm = ?, height_mm = ?, dpi = ?, "
+                    "  fields_json = ?, "
+                    "  config_json = ?, "
+                    "  is_default = ?, "
                     "  updated_at = datetime('now','localtime') "
                     "WHERE code = ?",
-                    (new_name, json.dumps(new_fields, ensure_ascii=False),
-                     new_w, new_h, new_dpi, new_default, code)
+                    (new_name,
+                     new_config["combined"]["w"],
+                     new_config["combined"]["h"],
+                     new_config["combined"]["dpi"],
+                     json.dumps(new_config["combined"]["fields"],
+                                ensure_ascii=False),
+                     json.dumps(new_config, ensure_ascii=False),
+                     new_default, code)
                 )
             return {"ok": True, "info": f"Шаблон «{new_name}» сохранён"}
         except Exception as e:
@@ -1007,6 +1263,25 @@ class Store:
             ).fetchall()
 
         return [dict(r) for r in rows], total
+
+    def get_recent_audit(self, limit: int = 5,
+                         actions: list = None) -> list:
+        """
+        Последние N записей журнала для мини-журнала оператора.
+        По умолчанию возвращает только сканы и печати.
+        """
+        if actions is None:
+            actions = ["Скан", "Автопечать", "Повтор печати"]
+
+        placeholders = ",".join("?" * len(actions))
+        with db.get_conn() as conn:
+            rows = conn.execute(
+                f"SELECT time, action, point, operator, gtin, sn, result "
+                f"FROM audit WHERE action IN ({placeholders}) "
+                f"ORDER BY id DESC LIMIT ?",
+                actions + [limit]
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def get_audit_filter_values(self) -> dict:
         with db.get_conn() as conn:
