@@ -178,12 +178,19 @@ class AdminWindow(QWidget):
         v.setContentsMargins(24, 20, 24, 20)
         v.setSpacing(14)
 
-        title = QLabel("Дашборд"); title.setStyleSheet("font-size:18px; font-weight:600;")
+        # ---------- Заголовок ----------
+        title = QLabel("Дашборд")
+        title.setStyleSheet("font-size:18px; font-weight:600;")
         v.addWidget(title)
-        sub = QLabel("Сводка за смену"); sub.setStyleSheet("color:#8b97a6; font-size:12px;")
+
+        sub = QLabel("Сводка за смену")
+        sub.setStyleSheet("color:#8b97a6; font-size:12px;")
         v.addWidget(sub)
 
-        kpi_row = QHBoxLayout(); kpi_row.setSpacing(12)
+        # ---------- KPI ----------
+        kpi_row = QHBoxLayout()
+        kpi_row.setSpacing(12)
+
         self.kpi_labels = {}
         for key, label, color in [
             ("scans",  "Сканов",     "accent"),
@@ -192,24 +199,47 @@ class AdminWindow(QWidget):
             ("errors", "Ошибок",     "err"),
         ]:
             kpi_row.addWidget(self._make_kpi(key, label, color))
+
         v.addLayout(kpi_row)
-                
+
+        
+
+        # ---------- Всё лишнее место — вниз ----------
+        v.addStretch(1)
+
         return w
 
     def _make_kpi(self, key: str, label: str, color: str) -> QFrame:
-        box = QFrame(); box.setObjectName("kpi")
+        box = QFrame()
+        box.setObjectName("kpi")
+        box.setFixedHeight(90)
+        box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
         v = QVBoxLayout(box)
         v.setContentsMargins(16, 14, 16, 14)
-        l = QLabel(label); l.setProperty("class", "kpiLabel")
-        l.setStyleSheet("color:#8b97a6; font-size:11px; letter-spacing:.5px;")
+        v.setSpacing(6)
+
+        l = QLabel(label)
+        l.setStyleSheet(
+            "color:#8b97a6; font-size:11px; letter-spacing:.5px;"
+        )
+
         val = QLabel("0")
-        val.setProperty("class", "kpiValue")
-        colors = {"accent": "#3b82f6", "ok": "#22c55e", "warn": "#f59e0b", "err": "#ef4444"}
+        colors = {
+            "accent": "#3b82f6",
+            "ok":     "#22c55e",
+            "warn":   "#f59e0b",
+            "err":    "#ef4444",
+        }
         val.setStyleSheet(
-            f"color:{colors[color]}; font-size:24px; "
+            f"color:{colors[color]}; font-size:26px; "
             f"font-weight:600; font-family:Consolas,monospace;"
         )
-        v.addWidget(l); v.addWidget(val)
+
+        v.addWidget(l)
+        v.addWidget(val)
+        v.addStretch(1)
+
         self.kpi_labels[key] = val
         return box
 
