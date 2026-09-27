@@ -39,8 +39,6 @@ class EditPointDialog(QDialog):
         self.printer_edit = QLineEdit(self._point.get("printer", ""))
         form.addRow("Принтер:", self.printer_edit)
 
-        self.operator_edit = QLineEdit(self._point.get("operator", ""))
-        form.addRow("Основной оператор:", self.operator_edit)
 
         self.template_edit = QLineEdit(self._point.get("template", ""))
         form.addRow("Шаблон по умолчанию:", self.template_edit)
@@ -82,7 +80,6 @@ class EditPointDialog(QDialog):
             "address": self.address_edit.text().strip(),
             "ip": self.ip_edit.text().strip(),
             "printer": self.printer_edit.text().strip(),
-            "operator": self.operator_edit.text().strip(),
             "template": self.template_edit.text().strip(),
             "online": self.online_chk.isChecked(),
         }
@@ -119,8 +116,6 @@ class EditComputerDialog(QDialog):
         self.role_edit = QLineEdit(self._c.get("role", ""))
         form.addRow("Роль / назначение:", self.role_edit)
 
-        self.operator_edit = QLineEdit(self._c.get("operator", ""))
-        form.addRow("Оператор:", self.operator_edit)
 
         self.online_chk = QCheckBox("Компьютер онлайн")
         self.online_chk.setChecked(bool(self._c.get("online", True)))
@@ -156,7 +151,6 @@ class EditComputerDialog(QDialog):
             "name": name,
             "ip": self.ip_edit.text().strip(),
             "role": self.role_edit.text().strip(),
-            "operator": self.operator_edit.text().strip(),
             "online": self.online_chk.isChecked(),
         }
         self.accept()

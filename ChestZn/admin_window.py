@@ -342,13 +342,12 @@ class AdminWindow(QWidget):
         self.points_tree = QTreeWidget()
         self.points_tree.setHeaderLabels([
             "Точка / Компьютер", "Расположение / Роль",
-            "Статус", "Оператор", "IP-адрес"
+            "Статус", "IP-адрес"
         ])
-        self.points_tree.setColumnWidth(0, 300)
-        self.points_tree.setColumnWidth(1, 220)
-        self.points_tree.setColumnWidth(2, 110)
+        self.points_tree.setColumnWidth(0, 320)
+        self.points_tree.setColumnWidth(1, 260)
+        self.points_tree.setColumnWidth(2, 120)
         self.points_tree.setColumnWidth(3, 160)
-        self.points_tree.setColumnWidth(4, 140)
         self.points_tree.setAlternatingRowColors(False)
         self.points_tree.setRootIsDecorated(True)
         self.points_tree.setStyleSheet("""
@@ -404,8 +403,7 @@ class AdminWindow(QWidget):
 
             p_online = p.get("online", False)
             item.setText(2, "🟢  онлайн" if p_online else "🟡  офлайн")
-            item.setText(3, p.get("operator", "—"))
-            item.setText(4, p.get("ip", "—"))
+            item.setText(3, p.get("ip", "—"))
 
             f = item.font(0)
             f.setBold(True)
@@ -431,8 +429,7 @@ class AdminWindow(QWidget):
 
                     c_online = c.get("online", False)
                     ch.setText(2, "🟢  онлайн" if c_online else "🟡  офлайн")
-                    ch.setText(3, c.get("operator", "—"))
-                    ch.setText(4, c.get("ip", "—"))
+                    ch.setText(3, c.get("ip", "—"))
 
                     if c_online:
                         ch.setForeground(2, QBrush(QColor("#22c55e")))
