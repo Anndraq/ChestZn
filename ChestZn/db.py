@@ -41,8 +41,11 @@ CREATE TABLE IF NOT EXISTS pool_codes (
     point          TEXT,
     used_point     TEXT,
     assigned_point TEXT,
+    assigned_node_id TEXT,
     import_batch   TEXT,
     printed_at     TEXT,
+    synced_at      TEXT,
+    exported_at    TEXT,
     created_at     TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_pool_gtin_used ON pool_codes(gtin, used);
@@ -67,8 +70,6 @@ CREATE INDEX IF NOT EXISTS idx_scanned_foreign ON scanned_shk(foreign_code);
 CREATE INDEX IF NOT EXISTS idx_scanned_cz      ON scanned_shk(cz_code);
 
 -- Счётчик сканов по GTIN + точка.
--- Нужен для «умного варианта»: если сканов > кодов в пуле —
--- значит оператор пикнул лишний раз, ушёл лишний код.
 CREATE TABLE IF NOT EXISTS gtin_counters (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     gtin         TEXT NOT NULL,
@@ -173,7 +174,6 @@ CREATE TABLE IF NOT EXISTS template_bindings (
 CREATE INDEX IF NOT EXISTS idx_tpl_bindings_gtin
     ON template_bindings(gtin_prefix);
 
-    
 CREATE TABLE IF NOT EXISTS points (
     id             TEXT PRIMARY KEY,
     name           TEXT NOT NULL,
@@ -186,6 +186,137 @@ CREATE TABLE IF NOT EXISTS points (
     computers_json TEXT NOT NULL DEFAULT '[]',
     sort_order     INTEGER NOT NULL DEFAULT 100
 );
+
+-- ==========================================================
+-- Распределённая конфигурация: ПК -> принтеры -> сканеры
+-- ==========================================================
+
+CREATE TABLE IF NOT EXISTS computers (
+    id          TEXT PRIMARY KEY,
+    node_id     TEXT NOT NULL DEFAULT '',
+    point_id    TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    ip          TEXT,
+    role        TEXT,
+    sync_node   TEXT NOT NULL DEFAULT '',
+    sync_enabled INTEGER NOT NULL DEFAULT 0,
+    online      INTEGER NOT NULL DEFAULT 1,
+    last_seen_at TEXT,
+    deleted     INTEGER NOT NULL DEFAULT 0,
+    sort_order  INTEGER NOT NULL DEFAULT 100,
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_computers_point ON computers(point_id);
+CREATE INDEX IF NOT EXISTS idx_computers_node  ON computers(node_id);
+CREATE INDEX IF NOT EXISTS idx_computers_sync  ON computers(sync_node);
+
+CREATE TABLE IF NOT EXISTS printers (
+    id          TEXT PRIMARY KEY,
+    node_id     TEXT NOT NULL DEFAULT '',
+    computer_id TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    ip          TEXT,
+    port        INTEGER NOT NULL DEFAULT 9100,
+    lang        TEXT NOT NULL DEFAULT 'auto',
+    width_mm    REAL NOT NULL DEFAULT 58,
+    height_mm   REAL NOT NULL DEFAULT 40,
+    dpi         INTEGER NOT NULL DEFAULT 203,
+    copies      INTEGER NOT NULL DEFAULT 1,
+    online      INTEGER NOT NULL DEFAULT 1,
+    deleted     INTEGER NOT NULL DEFAULT 0,
+    sort_order  INTEGER NOT NULL DEFAULT 100,
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    FOREIGN KEY (computer_id) REFERENCES computers(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_printers_computer ON printers(computer_id);
+
+CREATE TABLE IF NOT EXISTS scanners (
+    id            TEXT PRIMARY KEY,
+    node_id       TEXT NOT NULL DEFAULT '',
+    computer_id   TEXT NOT NULL,
+    printer_id    TEXT,
+    name          TEXT NOT NULL,
+    operator      TEXT,
+    connect_type  TEXT NOT NULL DEFAULT 'usb',
+    com_port      TEXT,
+    bt_address    TEXT,
+    ip            TEXT,
+    port          INTEGER NOT NULL DEFAULT 9100,
+    enabled       INTEGER NOT NULL DEFAULT 1,
+    deleted       INTEGER NOT NULL DEFAULT 0,
+    sort_order    INTEGER NOT NULL DEFAULT 100,
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    FOREIGN KEY (computer_id) REFERENCES computers(id) ON DELETE CASCADE,
+    FOREIGN KEY (printer_id)  REFERENCES printers(id)  ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_scanners_computer ON scanners(computer_id);
+CREATE INDEX IF NOT EXISTS idx_scanners_printer  ON scanners(printer_id);
+
+CREATE TABLE IF NOT EXISTS assignments (
+    id          TEXT PRIMARY KEY,
+    node_id     TEXT NOT NULL DEFAULT '',
+    scanner_id  TEXT NOT NULL,
+    gtin        TEXT,
+    code_from   INTEGER,
+    code_to     INTEGER,
+    quota       INTEGER,
+    priority    INTEGER NOT NULL DEFAULT 100,
+    active      INTEGER NOT NULL DEFAULT 1,
+    created_by  TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    deleted     INTEGER NOT NULL DEFAULT 0,
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    FOREIGN KEY (scanner_id) REFERENCES scanners(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_assignments_scanner ON assignments(scanner_id);
+CREATE INDEX IF NOT EXISTS idx_assignments_gtin    ON assignments(gtin);
+
+CREATE TABLE IF NOT EXISTS scan_events (
+    id            TEXT PRIMARY KEY,
+    node_id       TEXT NOT NULL DEFAULT '',
+    scanner_id    TEXT,
+    printer_id    TEXT,
+    computer_id   TEXT,
+    point_id      TEXT,
+    operator      TEXT,
+    assignment_id TEXT,
+    cz_code       TEXT,
+    gtin          TEXT,
+    sn            TEXT,
+    status        TEXT NOT NULL DEFAULT 'scanned',
+    error         TEXT,
+    scanned_at    TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    printed_at    TEXT,
+    synced_at     TEXT,
+    exported_at   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_scan_events_scanner ON scan_events(scanner_id);
+CREATE INDEX IF NOT EXISTS idx_scan_events_synced  ON scan_events(synced_at);
+CREATE INDEX IF NOT EXISTS idx_scan_events_export  ON scan_events(exported_at);
+CREATE INDEX IF NOT EXISTS idx_scan_events_point   ON scan_events(point_id);
+
+CREATE TABLE IF NOT EXISTS sync_applied (
+    key         TEXT PRIMARY KEY,
+    node_id     TEXT,
+    direction   TEXT,
+    applied_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_sync_applied_node ON sync_applied(node_id);
+
+CREATE TABLE IF NOT EXISTS sync_outbox (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity      TEXT NOT NULL,
+    entity_id   TEXT NOT NULL,
+    op          TEXT NOT NULL DEFAULT 'upsert',
+    payload     TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    sent_at     TEXT,
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    last_error  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_sync_outbox_sent ON sync_outbox(sent_at);
+CREATE INDEX IF NOT EXISTS idx_sync_outbox_entity
+    ON sync_outbox(entity, entity_id);
 
 """
 
@@ -375,25 +506,21 @@ def _migrate_scanned_shk_drop_unique(conn):
     ).fetchone()
 
     if not row:
-        # Таблицы нет — SCHEMA создаст её сразу без UNIQUE
         return
 
     table_sql = (row["sql"] if isinstance(row, dict) or hasattr(row, "keys")
                  else row[0]) or ""
 
     if "UNIQUE" not in table_sql.upper():
-        # Уже без UNIQUE — ничего не делаем
         return
 
     log.info("Миграция scanned_shk: убираю UNIQUE на foreign_code")
 
-    # 1. Проверяем, какие колонки реально есть (на случай старых версий)
     existing_cols = [
         r[1] for r in conn.execute("PRAGMA table_info(scanned_shk)").fetchall()
     ]
     log.debug("scanned_shk колонки: %s", existing_cols)
 
-    # 2. Создаём новую таблицу БЕЗ UNIQUE
     conn.execute("""
         CREATE TABLE IF NOT EXISTS scanned_shk_new (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -409,7 +536,6 @@ def _migrate_scanned_shk_drop_unique(conn):
         )
     """)
 
-    # 3. Переносим данные (только те колонки, которые есть)
     common = [c for c in [
         "id", "foreign_code", "foreign_gtin", "foreign_sn",
         "cz_code", "cz_gtin", "cz_sn", "point", "operator", "scanned_at"
@@ -421,11 +547,9 @@ def _migrate_scanned_shk_drop_unique(conn):
         f"SELECT {cols_csv} FROM scanned_shk"
     )
 
-    # 4. Удаляем старую, переименовываем новую
     conn.execute("DROP TABLE scanned_shk")
     conn.execute("ALTER TABLE scanned_shk_new RENAME TO scanned_shk")
 
-    # 5. Восстанавливаем индексы
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_scanned_foreign "
         "ON scanned_shk(foreign_code)"
@@ -444,7 +568,6 @@ def _migrate_scanned_shk_drop_unique(conn):
 def _migrate_gtin_counters_create(conn):
     """
     Создать таблицу gtin_counters, если её нет.
-    На свежих БД её создаст SCHEMA, но для существующих БД — нужна миграция.
     """
     row = conn.execute(
         "SELECT name FROM sqlite_master "
@@ -452,7 +575,7 @@ def _migrate_gtin_counters_create(conn):
     ).fetchone()
 
     if row:
-        return  # уже есть
+        return
 
     log.info("Миграция: создаю таблицу gtin_counters")
     conn.execute("""
@@ -473,6 +596,177 @@ def _migrate_gtin_counters_create(conn):
 
 
 # ==========================================================
+# Идентификатор узла (для синхронизации мастер <-> склады)
+# ==========================================================
+NODE_META_KEY = "node_id"
+
+
+def get_node_id(conn=None) -> str:
+    """
+    Вернуть стабильный идентификатор этого узла (ПК).
+    Генерируется один раз и хранится в таблице meta.
+    """
+    if conn is not None:
+        return _get_or_create_node_id(conn)
+
+    with get_conn() as c:
+        return _get_or_create_node_id(c)
+
+
+def _get_or_create_node_id(conn) -> str:
+    import uuid
+
+    row = conn.execute(
+        "SELECT value FROM meta WHERE key = ?", (NODE_META_KEY,)
+    ).fetchone()
+    if row and row["value"]:
+        return row["value"]
+
+    node_id = uuid.uuid4().hex
+    conn.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+        (NODE_META_KEY, node_id)
+    )
+    log.info("Сгенерирован идентификатор узла: %s", node_id)
+    return node_id
+
+
+# ==========================================================
+# Миграция: points.computers_json -> таблица computers
+# ==========================================================
+def _migrate_computers_to_tables(conn):
+    """
+    Перенести ПК из плоского points.computers_json в таблицу computers.
+    Идемпотентна: повторный вызов не создаёт дубликатов.
+    """
+    import json
+    import uuid
+
+    # Колонка sync_node появилась позже — добавим при необходимости
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(computers)").fetchall()]
+    if "sync_node" not in cols:
+        conn.execute(
+            "ALTER TABLE computers ADD COLUMN sync_node TEXT NOT NULL DEFAULT ''"
+        )
+        log.info("Добавлена колонка computers.sync_node")
+    if "sync_enabled" not in cols:
+        conn.execute(
+            "ALTER TABLE computers "
+            "ADD COLUMN sync_enabled INTEGER NOT NULL DEFAULT 0"
+        )
+        log.info("Добавлена колонка computers.sync_enabled (выключена)")
+
+    try:
+        rows = conn.execute(
+            "SELECT id, computers_json FROM points"
+        ).fetchall()
+    except Exception as e:
+        log.warning("Миграция ПК пропущена: %s", e)
+        return
+
+    created = 0
+    for row in rows:
+        point_id = row["id"]
+        try:
+            computers = json.loads(row["computers_json"] or "[]")
+        except Exception:
+            computers = []
+        if not isinstance(computers, list):
+            continue
+
+        for idx, comp in enumerate(computers):
+            if not isinstance(comp, dict):
+                continue
+            name = (comp.get("name") or "").strip()
+            if not name:
+                continue
+
+            exists = conn.execute(
+                "SELECT id FROM computers "
+                "WHERE point_id = ? AND name = ? AND deleted = 0",
+                (point_id, name)
+            ).fetchone()
+            if exists:
+                continue
+
+            conn.execute(
+                "INSERT INTO computers "
+                "(id, node_id, point_id, name, ip, role, sync_node, online, "
+                " sort_order, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))",
+                (uuid.uuid4().hex, _get_or_create_node_id(conn), point_id,
+                 name, (comp.get("ip") or "").strip(),
+                 (comp.get("role") or "").strip(),
+                 name,
+                 1 if comp.get("online", True) else 0,
+                 (idx + 1) * 10)
+            )
+            created += 1
+
+    # Убедиться, что у остальных ПК имя узла заполнено
+    missing = conn.execute(
+        "SELECT id, name FROM computers "
+        "WHERE COALESCE(sync_node, '') = '' AND deleted = 0"
+    ).fetchall()
+    for r in missing:
+        conn.execute(
+            "UPDATE computers SET sync_node = ? WHERE id = ?",
+            (r["name"], r["id"])
+        )
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_computers_sync ON computers(sync_node)"
+    )
+
+    if created:
+        log.info("Миграция ПК: перенесено %s записей в таблицу computers",
+                 created)
+
+
+# ==========================================================
+# Обратная сборка points.computers_json из таблицы computers
+# ==========================================================
+def sync_computers_json(conn, point_id: str = None):
+    """
+    Пересобрать legacy-поле points.computers_json из таблицы computers.
+    Нужно, чтобы существующий код видел актуальный список ПК.
+    """
+    import json
+
+    if point_id:
+        point_ids = [point_id]
+    else:
+        point_ids = [r["id"] for r in conn.execute(
+            "SELECT id FROM points"
+        ).fetchall()]
+
+    for pid in point_ids:
+        comps = conn.execute(
+            "SELECT name, ip, role, online FROM computers "
+            "WHERE point_id = ? AND deleted = 0 "
+            "ORDER BY sort_order, name",
+            (pid,)
+        ).fetchall()
+
+        data = [
+            {
+                "name": c["name"],
+                "ip": c["ip"] or "",
+                "role": c["role"] or "",
+                "online": bool(c["online"]),
+                "operator": "—",
+            }
+            for c in comps
+        ]
+
+        blob = json.dumps(data, ensure_ascii=False)
+        conn.execute(
+            "UPDATE points SET computers_json = ? WHERE id = ?",
+            (blob, pid)
+        )
+
+
+# ==========================================================
 # Миграция схемы (для существующих БД)
 # ==========================================================
 def _migrate_schema(conn):
@@ -490,55 +784,55 @@ def _migrate_schema(conn):
         log.info("Добавлена колонка audit.prev_hmac")
 
     # --- Миграция: добавить config_json в label_templates ---
-    cols = [r[1] for r in conn.execute("PRAGMA table_info(label_templates)").fetchall()]
+    cols = [r[1] for r in conn.execute(
+        "PRAGMA table_info(label_templates)").fetchall()]
     if "config_json" not in cols:
-            conn.execute("ALTER TABLE label_templates ADD COLUMN config_json TEXT")
-            log.info("Добавлена колонка label_templates.config_json")
+        conn.execute("ALTER TABLE label_templates ADD COLUMN config_json TEXT")
+        log.info("Добавлена колонка label_templates.config_json")
 
-            # Перенести старые поля в новый формат
-            import json
-            rows = conn.execute(
-                "SELECT id, code, name, is_default, width_mm, height_mm, dpi, fields_json "
-                "FROM label_templates"
-            ).fetchall()
+        import json
+        rows = conn.execute(
+            "SELECT id, code, name, is_default, width_mm, height_mm, dpi, "
+            "       fields_json FROM label_templates"
+        ).fetchall()
 
-            for r in rows:
-                try:
-                    old_fields = json.loads(r["fields_json"] or "[]")
-                except Exception:
-                    old_fields = []
+        for r in rows:
+            try:
+                old_fields = json.loads(r["fields_json"] or "[]")
+            except Exception:
+                old_fields = []
 
-                # По умолчанию — режим combined
-                config = {
-                    "print_mode": "combined",
-                    "combined": {
-                        "w": r["width_mm"] or 58,
-                        "h": r["height_mm"] or 40,
-                        "dpi": r["dpi"] or 203,
-                        "fields": old_fields,
-                    },
-                    "cz": {
-                        "w": 30, "h": 30, "dpi": 203,
-                        "fields": [
-                            {"name": "dataMatrix", "label": "",
-                             "required": True, "font_size": 0, "x": 0, "y": 0}
-                        ],
-                    },
-                    "label": {
-                        "w": r["width_mm"] or 58,
-                        "h": r["height_mm"] or 40,
-                        "dpi": r["dpi"] or 203,
-                        "fields": old_fields,
-                    },
-                }
-                conn.execute(
-                    "UPDATE label_templates SET config_json = ? WHERE id = ?",
-                    (json.dumps(config, ensure_ascii=False), r["id"])
-                )
-            log.info("Миграция шаблонов: %s записей", len(rows))
+            config = {
+                "print_mode": "combined",
+                "combined": {
+                    "w": r["width_mm"] or 58,
+                    "h": r["height_mm"] or 40,
+                    "dpi": r["dpi"] or 203,
+                    "fields": old_fields,
+                },
+                "cz": {
+                    "w": 30, "h": 30, "dpi": 203,
+                    "fields": [
+                        {"name": "dataMatrix", "label": "",
+                         "required": True, "font_size": 0, "x": 0, "y": 0}
+                    ],
+                },
+                "label": {
+                    "w": r["width_mm"] or 58,
+                    "h": r["height_mm"] or 40,
+                    "dpi": r["dpi"] or 203,
+                    "fields": old_fields,
+                },
+            }
+            conn.execute(
+                "UPDATE label_templates SET config_json = ? WHERE id = ?",
+                (json.dumps(config, ensure_ascii=False), r["id"])
+            )
+        log.info("Миграция шаблонов: %s записей", len(rows))
 
     # --- pool_codes.assigned_point / import_batch / used_point ---
-    cols = [r[1] for r in conn.execute("PRAGMA table_info(pool_codes)").fetchall()]
+    cols = [r[1] for r in conn.execute(
+        "PRAGMA table_info(pool_codes)").fetchall()]
     if "assigned_point" not in cols:
         conn.execute("ALTER TABLE pool_codes ADD COLUMN assigned_point TEXT")
         log.info("Добавлена колонка pool_codes.assigned_point")
@@ -548,6 +842,17 @@ def _migrate_schema(conn):
     if "used_point" not in cols:
         conn.execute("ALTER TABLE pool_codes ADD COLUMN used_point TEXT")
         log.info("Добавлена колонка pool_codes.used_point")
+    # --- Привязка кода к узлу склада (синхронизация мастер -> склад) ---
+    if "assigned_node_id" not in cols:
+        conn.execute("ALTER TABLE pool_codes ADD COLUMN assigned_node_id TEXT")
+        log.info("Добавлена колонка pool_codes.assigned_node_id")
+    if "synced_at" not in cols:
+        conn.execute("ALTER TABLE pool_codes ADD COLUMN synced_at TEXT")
+        log.info("Добавлена колонка pool_codes.synced_at")
+    # --- Отметка выгрузки статуса кода в SQL Server ---
+    if "exported_at" not in cols:
+        conn.execute("ALTER TABLE pool_codes ADD COLUMN exported_at TEXT")
+        log.info("Добавлена колонка pool_codes.exported_at")
 
     # --- Заполнить assigned_point для старых кодов ---
     try:
@@ -566,17 +871,43 @@ def _migrate_schema(conn):
     except Exception as e:
         log.warning("Не удалось заполнить assigned_point: %s", e)
 
-    # --- Индекс (только после ALTER TABLE) ---
+    # --- Индексы (только после ALTER TABLE) ---
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_pool_gtin_point_used "
         "ON pool_codes(gtin, assigned_point, used)"
     )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pool_assigned_node "
+        "ON pool_codes(assigned_node_id, used)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pool_exported "
+        "ON pool_codes(exported_at)"
+    )
 
-    # --- NEW: убрать UNIQUE на scanned_shk.foreign_code ---
+    # --- убрать UNIQUE на scanned_shk.foreign_code ---
     _migrate_scanned_shk_drop_unique(conn)
 
-    # --- NEW: создать gtin_counters ---
+    # --- создать gtin_counters ---
     _migrate_gtin_counters_create(conn)
+
+    # --- распределённая конфигурация ---
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_computers_node ON computers(node_id)"
+    )
+    _migrate_computers_to_tables(conn)
+    sync_computers_json(conn)
+
+    # --- scan_events: отметка выгрузки в SQL Server ---
+    cols = [r[1] for r in conn.execute(
+        "PRAGMA table_info(scan_events)").fetchall()]
+    if "exported_at" not in cols:
+        conn.execute("ALTER TABLE scan_events ADD COLUMN exported_at TEXT")
+        log.info("Добавлена колонка scan_events.exported_at")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_scan_events_export "
+        "ON scan_events(exported_at)"
+    )
 
 
 # ==========================================================
@@ -590,19 +921,19 @@ def init_db():
     """
     APP_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Если есть открытая БД — мигрируем
     if _is_valid_plain_sqlite():
         _migrate_to_encrypted()
 
-    # Открываем зашифрованную (или создаём новую)
     conn = _open_encrypted()
     try:
         conn.executescript(SCHEMA)
         conn.execute("INSERT OR IGNORE INTO counters (id) VALUES (1)")
         conn.commit()
 
-        # Миграции существующих таблиц
         _migrate_schema(conn)
+        conn.commit()
+
+        _get_or_create_node_id(conn)
         conn.commit()
 
         log.info("Схема БД актуальна")

@@ -383,3 +383,4 @@ config.json
 Thumbs.db
 .DS_Store
 desktop.ini
+/agy.exe

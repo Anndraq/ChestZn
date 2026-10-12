@@ -189,6 +189,338 @@ class Store:
             return {"ok": False, "info": str(e)}
 
     # ==========================================================
+    # Компьютеры / Принтеры / Сканеры
+    # ==========================================================
+    def list_computers(self, point_id: str = None) -> list:
+        """Список компьютеров (опционально — только для точки)."""
+        with db.get_conn() as conn:
+            if point_id:
+                rows = conn.execute(
+                    "SELECT id, node_id, point_id, name, ip, role, "
+                    "       sync_node, sync_enabled, online, last_seen_at, "
+                    "       sort_order "
+                    "FROM computers WHERE point_id = ? AND deleted = 0 "
+                    "ORDER BY sort_order, name",
+                    (point_id,)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT id, node_id, point_id, name, ip, role, "
+                    "       sync_node, sync_enabled, online, last_seen_at, "
+                    "       sort_order "
+                    "FROM computers WHERE deleted = 0 "
+                    "ORDER BY point_id, sort_order, name"
+                ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_computer(self, computer_id: str):
+        with db.get_conn() as conn:
+            r = conn.execute(
+                "SELECT id, node_id, point_id, name, ip, role, "
+                "       sync_node, sync_enabled, online, last_seen_at, "
+                "       sort_order "
+                "FROM computers WHERE id = ?",
+                (computer_id,)
+            ).fetchone()
+        return dict(r) if r else None
+
+    def create_computer(self, point_id: str, name: str, ip: str = "",
+                        role: str = "", sync_node: str = "",
+                        sync_enabled: bool = True,
+                        online: bool = True) -> dict:
+        import uuid
+        cid = uuid.uuid4().hex
+        node_id = db.get_node_id()
+        sync_node = sync_node or name
+
+        try:
+            with db.get_conn() as conn:
+                conn.execute(
+                    "INSERT INTO computers "
+                    "(id, node_id, point_id, name, ip, role, "
+                    " sync_node, sync_enabled, online, sort_order) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 100)",
+                    (cid, node_id, point_id, name, ip, role,
+                     sync_node, 1 if sync_enabled else 0,
+                     1 if online else 0)
+                )
+                db.sync_computers_json(conn, point_id)
+            return {"ok": True, "info": f"ПК «{name}» создан", "id": cid}
+        except Exception as e:
+            return {"ok": False, "info": str(e)}
+
+    def update_computer(self, computer_id: str, **kwargs) -> dict:
+        c = self.get_computer(computer_id)
+        if not c:
+            return {"ok": False, "info": "ПК не найден"}
+
+        new = dict(c)
+        for k in ("name", "ip", "role", "sync_node"):
+            if k in kwargs:
+                new[k] = kwargs[k]
+        for k in ("sync_enabled", "online"):
+            if k in kwargs:
+                new[k] = bool(kwargs[k])
+
+        try:
+            with db.get_conn() as conn:
+                conn.execute(
+                    "UPDATE computers SET "
+                    "  name = ?, ip = ?, role = ?, sync_node = ?, "
+                    "  sync_enabled = ?, online = ?, "
+                    "  updated_at = datetime('now','localtime') "
+                    "WHERE id = ?",
+                    (new["name"], new["ip"], new["role"], new["sync_node"],
+                     1 if new["sync_enabled"] else 0,
+                     1 if new["online"] else 0, computer_id)
+                )
+                db.sync_computers_json(conn, c["point_id"])
+            return {"ok": True, "info": f"ПК «{new['name']}» сохранён"}
+        except Exception as e:
+            return {"ok": False, "info": str(e)}
+
+    def delete_computer(self, computer_id: str) -> dict:
+        c = self.get_computer(computer_id)
+        if not c:
+            return {"ok": False, "info": "ПК не найден"}
+
+        try:
+            with db.get_conn() as conn:
+                conn.execute(
+                    "UPDATE computers SET deleted = 1, "
+                    "updated_at = datetime('now','localtime') WHERE id = ?",
+                    (computer_id,)
+                )
+                # Удалить дочерние принтеры и сканеры
+                conn.execute(
+                    "UPDATE printers SET deleted = 1 WHERE computer_id = ?",
+                    (computer_id,)
+                )
+                conn.execute(
+                    "UPDATE scanners SET deleted = 1 WHERE computer_id = ?",
+                    (computer_id,)
+                )
+                db.sync_computers_json(conn, c["point_id"])
+            return {"ok": True, "info": f"ПК «{c['name']}» удалён"}
+        except Exception as e:
+            return {"ok": False, "info": str(e)}
+
+    # ---------- Принтеры ----------
+    def list_printers_for_computer(self, computer_id: str) -> list:
+        with db.get_conn() as conn:
+            rows = conn.execute(
+                "SELECT id, node_id, computer_id, name, ip, port, lang, "
+                "       width_mm, height_mm, dpi, copies, online, sort_order "
+                "FROM printers WHERE computer_id = ? AND deleted = 0 "
+                "ORDER BY sort_order, name",
+                (computer_id,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_printer(self, printer_id: str):
+        with db.get_conn() as conn:
+            r = conn.execute(
+                "SELECT id, node_id, computer_id, name, ip, port, lang, "
+                "       width_mm, height_mm, dpi, copies, online, sort_order "
+                "FROM printers WHERE id = ?",
+                (printer_id,)
+            ).fetchone()
+        return dict(r) if r else None
+
+    def create_printer(self, computer_id: str, name: str,
+                       ip: str = "", port: int = 9100,
+                       lang: str = "auto",
+                       width_mm: float = 58, height_mm: float = 40,
+                       dpi: int = 203, copies: int = 1,
+                       online: bool = True) -> dict:
+        import uuid
+        pid = uuid.uuid4().hex
+        node_id = db.get_node_id()
+
+        try:
+            with db.get_conn() as conn:
+                conn.execute(
+                    "INSERT INTO printers "
+                    "(id, node_id, computer_id, name, ip, port, lang, "
+                    " width_mm, height_mm, dpi, copies, online, sort_order) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 100)",
+                    (pid, node_id, computer_id, name, ip, port, lang,
+                     width_mm, height_mm, dpi, copies,
+                     1 if online else 0)
+                )
+            return {"ok": True, "info": f"Принтер «{name}» создан", "id": pid}
+        except Exception as e:
+            return {"ok": False, "info": str(e)}
+
+    def update_printer(self, printer_id: str, **kwargs) -> dict:
+        p = self.get_printer(printer_id)
+        if not p:
+            return {"ok": False, "info": "Принтер не найден"}
+
+        new = dict(p)
+        for k in ("name", "ip", "lang"):
+            if k in kwargs:
+                new[k] = kwargs[k]
+        for k in ("port", "dpi", "copies"):
+            if k in kwargs:
+                try:
+                    new[k] = int(kwargs[k])
+                except (ValueError, TypeError):
+                    pass
+        for k in ("width_mm", "height_mm"):
+            if k in kwargs:
+                try:
+                    new[k] = float(kwargs[k])
+                except (ValueError, TypeError):
+                    pass
+        if "online" in kwargs:
+            new["online"] = bool(kwargs["online"])
+
+        try:
+            with db.get_conn() as conn:
+                conn.execute(
+                    "UPDATE printers SET "
+                    "  name = ?, ip = ?, port = ?, lang = ?, "
+                    "  width_mm = ?, height_mm = ?, dpi = ?, copies = ?, "
+                    "  online = ?, updated_at = datetime('now','localtime') "
+                    "WHERE id = ?",
+                    (new["name"], new["ip"], new["port"], new["lang"],
+                     new["width_mm"], new["height_mm"], new["dpi"],
+                     new["copies"], 1 if new["online"] else 0, printer_id)
+                )
+            return {"ok": True, "info": f"Принтер «{new['name']}» сохранён"}
+        except Exception as e:
+            return {"ok": False, "info": str(e)}
+
+    def delete_printer(self, printer_id: str) -> dict:
+        p = self.get_printer(printer_id)
+        if not p:
+            return {"ok": False, "info": "Принтер не найден"}
+
+        try:
+            with db.get_conn() as conn:
+                conn.execute(
+                    "UPDATE printers SET deleted = 1, "
+                    "updated_at = datetime('now','localtime') WHERE id = ?",
+                    (printer_id,)
+                )
+                # Отвязать сканеры
+                conn.execute(
+                    "UPDATE scanners SET printer_id = NULL WHERE printer_id = ?",
+                    (printer_id,)
+                )
+            return {"ok": True, "info": f"Принтер «{p['name']}» удалён"}
+        except Exception as e:
+            return {"ok": False, "info": str(e)}
+
+    # ---------- Сканеры ----------
+    def list_scanners_for_computer(self, computer_id: str) -> list:
+        with db.get_conn() as conn:
+            rows = conn.execute(
+                "SELECT id, node_id, computer_id, printer_id, name, operator, "
+                "       connect_type, com_port, bt_address, ip, port, "
+                "       enabled, sort_order "
+                "FROM scanners WHERE computer_id = ? AND deleted = 0 "
+                "ORDER BY sort_order, name",
+                (computer_id,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_scanner(self, scanner_id: str):
+        with db.get_conn() as conn:
+            r = conn.execute(
+                "SELECT id, node_id, computer_id, printer_id, name, operator, "
+                "       connect_type, com_port, bt_address, ip, port, "
+                "       enabled, sort_order "
+                "FROM scanners WHERE id = ?",
+                (scanner_id,)
+            ).fetchone()
+        return dict(r) if r else None
+
+    def create_scanner(self, computer_id: str, name: str,
+                       operator: str = "",
+                       printer_id: str = None,
+                       connect_type: str = "usb",
+                       com_port: str = "",
+                       bt_address: str = "",
+                       ip: str = "",
+                       port: int = 9100,
+                       enabled: bool = True) -> dict:
+        import uuid
+        sid = uuid.uuid4().hex
+        node_id = db.get_node_id()
+
+        try:
+            with db.get_conn() as conn:
+                conn.execute(
+                    "INSERT INTO scanners "
+                    "(id, node_id, computer_id, printer_id, name, operator, "
+                    " connect_type, com_port, bt_address, ip, port, "
+                    " enabled, sort_order) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 100)",
+                    (sid, node_id, computer_id, printer_id, name, operator,
+                     connect_type, com_port, bt_address, ip, port,
+                     1 if enabled else 0)
+                )
+            return {"ok": True, "info": f"Сканер «{name}» создан", "id": sid}
+        except Exception as e:
+            return {"ok": False, "info": str(e)}
+
+    def update_scanner(self, scanner_id: str, **kwargs) -> dict:
+        s = self.get_scanner(scanner_id)
+        if not s:
+            return {"ok": False, "info": "Сканер не найден"}
+
+        new = dict(s)
+        for k in ("name", "operator", "connect_type",
+                  "com_port", "bt_address", "ip"):
+            if k in kwargs:
+                new[k] = kwargs[k]
+        if "printer_id" in kwargs:
+            new["printer_id"] = kwargs["printer_id"] or None
+        if "port" in kwargs:
+            try:
+                new["port"] = int(kwargs["port"])
+            except (ValueError, TypeError):
+                pass
+        if "enabled" in kwargs:
+            new["enabled"] = bool(kwargs["enabled"])
+
+        try:
+            with db.get_conn() as conn:
+                conn.execute(
+                    "UPDATE scanners SET "
+                    "  name = ?, operator = ?, printer_id = ?, "
+                    "  connect_type = ?, com_port = ?, bt_address = ?, "
+                    "  ip = ?, port = ?, enabled = ?, "
+                    "  updated_at = datetime('now','localtime') "
+                    "WHERE id = ?",
+                    (new["name"], new["operator"], new["printer_id"],
+                     new["connect_type"], new["com_port"], new["bt_address"],
+                     new["ip"], new["port"], 1 if new["enabled"] else 0,
+                     scanner_id)
+                )
+            return {"ok": True, "info": f"Сканер «{new['name']}» сохранён"}
+        except Exception as e:
+            return {"ok": False, "info": str(e)}
+
+    def delete_scanner(self, scanner_id: str) -> dict:
+        s = self.get_scanner(scanner_id)
+        if not s:
+            return {"ok": False, "info": "Сканер не найден"}
+
+        try:
+            with db.get_conn() as conn:
+                conn.execute(
+                    "UPDATE scanners SET deleted = 1, "
+                    "updated_at = datetime('now','localtime') WHERE id = ?",
+                    (scanner_id,)
+                )
+            return {"ok": True, "info": f"Сканер «{s['name']}» удалён"}
+        except Exception as e:
+            return {"ok": False, "info": str(e)}
+
+    # ==========================================================
     # Seed / загрузка
     # ==========================================================
     def _ensure_seed_data(self):
@@ -1716,6 +2048,124 @@ class Store:
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (key, str(value))
             )
+
+    # ==========================================================
+    # СИНХРОНИЗАЦИЯ МАСТЕР ↔ ТОЧКИ
+    # ==========================================================
+    def get_codes_for_export(self, point_id: str,
+                             since: str = None) -> list:
+        """Коды точки для выгрузки мастером в outbox/to_{point}.json."""
+        with db.get_conn() as conn:
+            if since:
+                rows = conn.execute(
+                    "SELECT gtin, code, sn, assigned_point, import_batch, "
+                    "       created_at "
+                    "FROM pool_codes "
+                    "WHERE assigned_point = ? AND created_at > ? "
+                    "ORDER BY created_at",
+                    (point_id, since)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT gtin, code, sn, assigned_point, import_batch, "
+                    "       created_at "
+                    "FROM pool_codes "
+                    "WHERE assigned_point = ? "
+                    "ORDER BY created_at",
+                    (point_id,)
+                ).fetchall()
+        return [dict(r) for r in rows]
+
+    def apply_incoming_codes(self, point_id: str, codes: list) -> int:
+        """Точка принимает коды от мастера. Идемпотентно по `code`."""
+        if not codes:
+            return 0
+        node_id = db.get_node_id()
+        added = 0
+        with db.get_conn() as conn:
+            for c in codes:
+                code = (c.get("code") or "").strip()
+                if not code:
+                    continue
+                exists = conn.execute(
+                    "SELECT 1 FROM pool_codes WHERE code = ? LIMIT 1",
+                    (code,)
+                ).fetchone()
+                if exists:
+                    continue
+
+                conn.execute(
+                    "INSERT INTO pool_codes "
+                    "(gtin, code, sn, assigned_point, assigned_node_id, "
+                    " import_batch, used, printed, synced_at, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 0, 0, "
+                    "        datetime('now','localtime'), "
+                    "        datetime('now','localtime'))",
+                    (c.get("gtin"), code, c.get("sn"),
+                     point_id, node_id,
+                     c.get("import_batch") or "")
+                )
+                added += 1
+        return added
+
+    def get_printed_for_master(self, point_id: str,
+                               since: str = None) -> list:
+        """Напечатанные на точке коды — для отчёта мастеру."""
+        with db.get_conn() as conn:
+            if since:
+                rows = conn.execute(
+                    "SELECT gtin, code, sn, used_point, printed_at "
+                    "FROM pool_codes "
+                    "WHERE used_point = ? AND printed = 1 "
+                    "  AND printed_at IS NOT NULL AND printed_at > ? "
+                    "ORDER BY printed_at",
+                    (point_id, since)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT gtin, code, sn, used_point, printed_at "
+                    "FROM pool_codes "
+                    "WHERE used_point = ? AND printed = 1 "
+                    "  AND printed_at IS NOT NULL "
+                    "ORDER BY printed_at",
+                    (point_id,)
+                ).fetchall()
+        return [dict(r) for r in rows]
+
+    def apply_incoming_printed(self, point_id: str,
+                               records: list) -> int:
+        """Мастер принимает отчёт от точки. Идемпотентно по `code`."""
+        if not records:
+            return 0
+        updated = 0
+        with db.get_conn() as conn:
+            for r in records:
+                code = (r.get("code") or "").strip()
+                if not code:
+                    continue
+                cur = conn.execute(
+                    "UPDATE pool_codes SET printed = 1, "
+                    "  printed_at = COALESCE(?, datetime('now','localtime')) "
+                    "WHERE code = ? AND (printed = 0 OR printed IS NULL)",
+                    (r.get("printed_at"), code)
+                )
+                if cur.rowcount > 0:
+                    updated += 1
+        return updated
+
+    def sync_status(self) -> list:
+        """Сводка: для каждой точки — когда выгружали/принимали."""
+        rows = []
+        for p in self.points:
+            pid = p["id"]
+            rows.append({
+                "point": pid,
+                "name": p.get("name", ""),
+                "last_export": self.get_setting(f"last_export_{pid}") or "—",
+                "last_report": self.get_setting(f"last_report_{pid}") or "—",
+                "last_import": self.get_setting(f"last_import_{pid}") or "—",
+            })
+        return rows
 
     # ==========================================================
     # Очистка старых данных

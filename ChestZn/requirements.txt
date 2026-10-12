@@ -5,3 +5,5 @@ pyinstaller==6.10.0
 pywin32==312
 sqlcipher3
 openpyxl>=3.0.0
+pyodbc>=4.0.39
+pyserial>=3.5
