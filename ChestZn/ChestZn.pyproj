@@ -35,6 +35,7 @@
     <Compile Include="db.py" />
     <Compile Include="db_view.py" />
     <Compile Include="device_dialogs.py" />
+    <Compile Include="device_discovery.py" />
     <Compile Include="docs_helper.py" />
     <Compile Include="edit_point_window.py" />
     <Compile Include="error_handler.py" />
@@ -45,6 +46,7 @@
     <Compile Include="logger.py" />
     <Compile Include="login_window.py" />
     <Compile Include="main.py" />
+    <Compile Include="master_devices_window.py" />
     <Compile Include="mssql.py" />
     <Compile Include="mssql_ui.py" />
     <Compile Include="operator_window.py" />

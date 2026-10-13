@@ -11,6 +11,8 @@ from PySide6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QPlainTextEdit
 )
 
+from master_devices_window import MasterDevicesWidget
+
 from edit_point_window import EditPointDialog
 from device_dialogs import (
     EditComputerDialog, EditPrinterDialog, EditScannerDialog
@@ -4478,201 +4480,12 @@ class AdminWindow(QWidget):
     # DEVICES (компьютеры / принтеры / сканеры)
     # ==================================================================
     def _page_devices(self) -> QWidget:
-        w = QWidget()
-        v = QVBoxLayout(w)
-        v.setContentsMargins(24, 20, 24, 20)
-        v.setSpacing(14)
-
-        head = QHBoxLayout()
-        tt = QLabel("Устройства: ПК, принтеры, сканеры")
-        tt.setStyleSheet("font-size:18px; font-weight:600;")
-        head.addWidget(tt)
-        head.addStretch(1)
-
-        btn_expand = QPushButton("▾ Развернуть всё")
-        btn_expand.clicked.connect(lambda: self.devices_tree.expandAll())
-        head.addWidget(btn_expand)
-
-        btn_collapse = QPushButton("▸ Свернуть всё")
-        btn_collapse.clicked.connect(lambda: self.devices_tree.collapseAll())
-        head.addWidget(btn_collapse)
-
-        btn_refresh = QPushButton("🔄 Обновить")
-        btn_refresh.clicked.connect(self._refresh_devices)
-        head.addWidget(btn_refresh)
-
-        v.addLayout(head)
-
-        sub = QLabel(
-            "Иерархия: точка → компьютер → (принтеры + сканеры). "
-            "Двойной клик по узлу — редактирование."
-        )
-        sub.setStyleSheet("color:#8b97a6; font-size:12px;")
-        v.addWidget(sub)
-
-        self.devices_tree = QTreeWidget()
-        self.devices_tree.setHeaderLabels([
-            "Объект", "Роль / Подключение", "Статус",
-            "IP / Порт", "Дополнительно"
-        ])
-        self.devices_tree.setColumnWidth(0, 320)
-        self.devices_tree.setColumnWidth(1, 240)
-        self.devices_tree.setColumnWidth(2, 110)
-        self.devices_tree.setColumnWidth(3, 160)
-        self.devices_tree.setColumnWidth(4, 220)
-        self.devices_tree.setAlternatingRowColors(False)
-        self.devices_tree.setRootIsDecorated(True)
-        self.devices_tree.setStyleSheet("""
-            QTreeWidget {
-                background: #161c24;
-                border: 1px solid #2a3542;
-                border-radius: 10px;
-                color: #e6edf3;
-                outline: none;
-            }
-            QTreeWidget::item {
-                padding: 9px 6px;
-                border-bottom: 1px solid #2a3542;
-                min-height: 26px;
-            }
-            QTreeWidget::item:selected {
-                background: rgba(59,130,246,.22);
-                color: #ffffff;
-            }
-            QTreeWidget::item:hover:!selected {
-                background: rgba(255,255,255,.03);
-            }
-            QTreeWidget::branch { background: transparent; }
-            QHeaderView::section {
-                background: #161c24;
-                color: #8b97a6;
-                padding: 10px 10px;
-                border: none;
-                border-bottom: 1px solid #2a3542;
-                font-size: 11px;
-                font-weight: 600;
-                letter-spacing: .5px;
-            }
-        """)
-
-        self.devices_tree.itemDoubleClicked.connect(
-            lambda item, col: self._devices_edit_item(item)
-        )
-        self.devices_tree.itemSelectionChanged.connect(
-            self._devices_on_selection
-        )
-
-        v.addWidget(self.devices_tree, stretch=1)
-
-        actions = QHBoxLayout()
-        actions.setSpacing(8)
-
-        btn_add_pc = QPushButton("➕ Добавить ПК")
-        btn_add_pc.setProperty("primary", True)
-        btn_add_pc.clicked.connect(self._devices_add_computer)
-        actions.addWidget(btn_add_pc)
-
-        btn_add_printer = QPushButton("🖨 Добавить принтер")
-        btn_add_printer.clicked.connect(self._devices_add_printer)
-        actions.addWidget(btn_add_printer)
-
-        btn_add_scanner = QPushButton("📡 Добавить сканер")
-        btn_add_scanner.clicked.connect(self._devices_add_scanner)
-        actions.addWidget(btn_add_scanner)
-
-        actions.addStretch(1)
-        v.addLayout(actions)
-
-        return w
+        self.master_devices_page = MasterDevicesWidget(self)
+        return self.master_devices_page
 
     def _refresh_devices(self):
-        self.devices_tree.clear()
-
-        for point in self.store.points:
-            point_item = QTreeWidgetItem(self.devices_tree)
-            point_item.setText(0, f"🏢  {point['id']} — {point['name']}")
-            point_item.setText(1, point.get("address", "—"))
-            point_item.setText(2, "🟢  онлайн" if point.get("online") else "🟡  офлайн")
-            point_item.setText(3, point.get("ip", "—"))
-            point_item.setData(0, Qt.UserRole, ("point", point["id"]))
-
-            f = point_item.font(0)
-            f.setBold(True)
-            f.setPointSize(f.pointSize() + 1)
-            point_item.setFont(0, f)
-
-            computers = self.store.list_computers(point_id=point["id"])
-
-            if not computers:
-                empty = QTreeWidgetItem(point_item)
-                empty.setText(0, "    Нет компьютеров")
-                empty.setForeground(0, QBrush(QColor("#64748b")))
-                continue
-
-            for comp in computers:
-                c_item = QTreeWidgetItem(point_item)
-                c_item.setText(0, f"    💻  {comp['name']}")
-                c_item.setText(1, comp.get("role", "—"))
-
-                c_online = comp.get("online", True)
-                c_item.setText(2, "🟢  онлайн" if c_online else "🟡  офлайн")
-                c_item.setText(3, comp.get("ip") or "—")
-
-                sync_state = "обмен вкл" if comp.get("sync_enabled") else "обмен выкл"
-                c_item.setText(4, f"узел: {comp.get('sync_node', '—')} · {sync_state}")
-
-                c_item.setData(0, Qt.UserRole, ("computer", comp["id"]))
-
-                cf = c_item.font(0)
-                cf.setBold(True)
-                c_item.setFont(0, cf)
-
-                if c_online:
-                    c_item.setForeground(2, QBrush(QColor("#22c55e")))
-                else:
-                    c_item.setForeground(2, QBrush(QColor("#f59e0b")))
-
-                printers = self.store.list_printers_for_computer(comp["id"])
-                for pr in printers:
-                    p_item = QTreeWidgetItem(c_item)
-                    p_item.setText(0, f"        🖨  {pr['name']}")
-                    p_item.setText(1, f"язык: {pr['lang']}")
-                    p_item.setText(2, "🟢  онлайн" if pr.get("online") else "🟡  офлайн")
-                    target = pr.get("ip") or "USB"
-                    if pr.get("port") and pr.get("ip"):
-                        target = f"{pr['ip']}:{pr['port']}"
-                    p_item.setText(3, target)
-                    p_item.setText(4, f"{int(pr['width_mm'])}×{int(pr['height_mm'])} мм · {pr['dpi']} DPI")
-                    p_item.setData(0, Qt.UserRole, ("printer", pr["id"]))
-
-                scanners = self.store.list_scanners_for_computer(comp["id"])
-                for sc in scanners:
-                    s_item = QTreeWidgetItem(c_item)
-                    s_item.setText(0, f"        📡  {sc['name']}")
-                    s_item.setText(1, f"{sc['connect_type']} · {sc.get('operator') or '—'}")
-
-                    s_item.setText(2, "🟢  активен" if sc.get("enabled") else "⚪  отключён")
-
-                    if sc["connect_type"] in ("usb-com", "bt-spp") and sc.get("com_port"):
-                        target = sc["com_port"]
-                    elif sc["connect_type"] == "tcp" and sc.get("ip"):
-                        target = f"{sc['ip']}:{sc['port']}"
-                    else:
-                        target = "USB-HID (клавиатура)"
-
-                    s_item.setText(3, target)
-
-                    if sc.get("printer_id"):
-                        printer_name = "—"
-                        for pr in printers:
-                            if pr["id"] == sc["printer_id"]:
-                                printer_name = pr["name"]
-                                break
-                        s_item.setText(4, f"→ {printer_name}")
-                    else:
-                        s_item.setText(4, "принтер не назначен")
-
-                    s_item.setData(0, Qt.UserRole, ("scanner", sc["id"]))
+        if hasattr(self, "master_devices_page"):
+            self.master_devices_page.refresh_all()
 
     def _devices_on_selection(self):
         items = self.devices_tree.selectedItems()
