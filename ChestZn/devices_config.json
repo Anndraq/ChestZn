@@ -1,0 +1,30 @@
+{
+  "master_node": "MASTER-PC",
+  "active_only_filter": true,
+  "ping_timeout_ms": 600,
+  "bindings": {
+    "USB-HID": "Xerox WorkCentre 3215"
+  },
+  "pairs": [
+    {
+      "pair_id": 1,
+      "name": "Пост #1 (USB-HID ➔ Xerox WorkCentre 3215)",
+      "scanner_type": "usb-hid",
+      "scanner_port": "USB-HID",
+      "printer_name": "Xerox WorkCentre 3215",
+      "printer_lang": "auto",
+      "enabled": true
+    }
+  ],
+  "computers": [
+    {
+      "id": 1,
+      "name": "МАСТЕР-ПК (Этот компьютер)",
+      "ip": "127.0.0.1",
+      "role": "Сервер маркировки",
+      "sync_enabled": true,
+      "online": true,
+      "last_status": "Локальный узел (мастер)"
+    }
+  ]
+}

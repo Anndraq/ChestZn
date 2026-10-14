@@ -16,6 +16,7 @@ log = get_logger("operator")
 from store import Store, parse_foreign_barcode
 from barcode import render_datamatrix
 from toast import Toast
+from workstation_engine import WorkstationEngine, DevicePairConfig
 
 
 def _play_sound(kind: str):
@@ -73,6 +74,19 @@ class OperatorWindow(QWidget):
         self._refresh_counter()
         self._refresh_mini_journal()
         self._show_result("idle")
+
+        self.engine = WorkstationEngine(store_instance=self.store, parent=self)
+        self.engine.load_pairs_from_config("devices_config.json")
+        self.engine.start_all()
+
+        # Запуск параллельных потоков сканеров
+        self.engine.start_all()
+
+    def closeEvent(self, event):
+        """Остановка всех потоков оборудования при закрытии окна"""
+        if hasattr(self, "engine"):
+            self.engine.stop_all()
+        super().closeEvent(event)
 
     # ==================================================================
     # HEADER
@@ -413,6 +427,31 @@ class OperatorWindow(QWidget):
 
         t.resizeRowsToContents()
 
+
+        # ==========================================================
+        # ДВИЖОК РАБОЧИХ ПАР (N сканеров <-> N принтеров)
+        # ==========================================================
+        self.engine = WorkstationEngine(store_instance=self.store, parent=self)
+
+        # Регистрация пар оборудования:
+        self.engine.register_pair(DevicePairConfig(
+            pair_id=1,
+            name="Пост 1",
+            scanner_type="usb-com",
+            scanner_port="COM3",
+            printer_name="TSC TE200"
+        ))
+        self.engine.register_pair(DevicePairConfig(
+            pair_id=2,
+            name="Пост 2",
+            scanner_type="bt-spp",
+            scanner_port="COM4",
+            printer_name="Zebra ZD421"
+        ))
+
+        # Запуск параллельных фоновых слушателей
+        self.engine.start_all()
+
     # ==================================================================
     # ACTIONS
     # ==================================================================
@@ -600,3 +639,4 @@ class OperatorWindow(QWidget):
         self.scan_input.setFocus()
         self.btn_print.setEnabled(False)
         self._show_result("idle")
+

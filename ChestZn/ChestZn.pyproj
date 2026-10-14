@@ -63,6 +63,7 @@
     <Compile Include="toast.py" />
     <Compile Include="printer.py" />
     <Compile Include="security_question_window.py" />
+    <Compile Include="workstation_engine.py" />
   </ItemGroup>
   <ItemGroup>
     <Content Include="build.bat" />
