@@ -30,6 +30,7 @@
     <Compile Include="banner.py" />
     <Compile Include="barcode.py" />
     <Compile Include="change_password_window.py" />
+    <Compile Include="clean_demo_stubs.py" />
     <Compile Include="crypto.py" />
     <Compile Include="cz_import.py" />
     <Compile Include="db.py" />

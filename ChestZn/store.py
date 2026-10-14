@@ -23,12 +23,12 @@ class Store:
         self.points = self._load_points()
 
         self.current_point = "T-01"
-        self.current_operator = "Иванов И.И."
+        self.current_operator = "Оператор"
         self.current_user = None
 
         self.integrations = {
             "gis_mt": {"key": "gis_mt", "name": "ГИС МТ / Честный знак",
-                       "status": "ok", "last": "08:14:23", "calls_today": 1284,
+                       "status": "ok", "last": "08:14:23", "calls_today": 0,
                        "endpoint": "https://ismp.crpt.ru/api/v3/",
                        "contour": "боевой (prod)"},
             "onec": {"key": "onec", "name": "1С / WMS",
@@ -60,35 +60,24 @@ class Store:
         {
             "id": "T-01", "name": "Склад-Восток",
             "address": "Корпус А, 1 этаж",
-            "ip": "10.0.1.15", "printer": "Zebra ZD421",
-            "operator": "Иванов И.И.", "online": 1,
+            "ip": "", "printer": "",
+            "operator": "Оператор", "online": 1,
             "template": "electronics", "sort_order": 10,
-            "computers": [
-                {"name": "ПК-01", "ip": "10.0.1.10",
-                 "role": "Основной оператор", "online": 1,
-                 "operator": "Иванов И.И."},
-                {"name": "ПК-02", "ip": "10.0.1.11",
-                 "role": "Резервный", "online": 0,
-                 "operator": "—"},
-            ],
+            "computers": [],
         },
         {
             "id": "T-02", "name": "Склад-Запад",
             "address": "Корпус Б, 2 этаж",
-            "ip": "10.0.2.15", "printer": "TSC TE200",
-            "operator": "Петрова А.С.", "online": 1,
+            "ip": "", "printer": "",
+            "operator": "Оператор", "online": 1,
             "template": "shoes", "sort_order": 20,
-            "computers": [
-                {"name": "ПК-01", "ip": "10.0.2.10",
-                 "role": "Основной оператор", "online": 1,
-                 "operator": "Петрова А.С."},
-            ],
+            "computers": [],
         },
         {
             "id": "T-03", "name": "Пост-Север",
             "address": "КПП-3",
-            "ip": "10.0.3.15", "printer": "Godex G500",
-            "operator": "Сидоров В.П.", "online": 0,
+            "ip": "", "printer": "",
+            "operator": "Оператор", "online": 0,
             "template": "electronics", "sort_order": 30,
             "computers": [],
         },
@@ -524,43 +513,8 @@ class Store:
     # Seed / загрузка
     # ==========================================================
     def _ensure_seed_data(self):
-        """Наполнить пул кодов и справочник GTIN, если БД пустая."""
-        with db.get_conn() as conn:
-            n = conn.execute("SELECT COUNT(*) AS c FROM pool_codes").fetchone()["c"]
-            if n == 0:
-                for gtin in ["04600123456782", "04600123456775"]:
-                    for i in range(30):
-                        code_data = self._make_cz(gtin, i)
-                        conn.execute(
-                            "INSERT INTO pool_codes "
-                            "(gtin, code, sn, assigned_point, import_batch) "
-                            "VALUES (?, ?, ?, ?, ?)",
-                            (code_data["gtin"], code_data["code"],
-                             code_data["sn"], "T-01", "DEMO-T-01")
-                        )
-                for i in range(30):
-                    code_data = self._make_cz("04600123456768", i)
-                    conn.execute(
-                        "INSERT INTO pool_codes "
-                        "(gtin, code, sn, assigned_point, import_batch) "
-                        "VALUES (?, ?, ?, ?, ?)",
-                        (code_data["gtin"], code_data["code"],
-                         code_data["sn"], "T-02", "DEMO-T-02")
-                    )
-
-            n = conn.execute("SELECT COUNT(*) AS c FROM gtin_map").fetchone()["c"]
-            if n == 0:
-                for fg, cz in [
-                    ("04600123456782", "04600123456782"),
-                    ("04600123456775", "04600123456775"),
-                    ("04600123456768", "04600123456768"),
-                ]:
-                    conn.execute(
-                        "INSERT OR IGNORE INTO gtin_map (foreign_gtin, cz_gtin) "
-                        "VALUES (?, ?)",
-                        (fg, cz)
-                    )
-
+        """Демо-заполнение отключено: база работает только с реальными кодами ЧЗ и привязками."""
+        return
     def _make_cz(self, gtin: str, idx: int) -> dict:
         sn = f"SN{idx:07d}"
         verify = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
@@ -2247,47 +2201,81 @@ class Store:
 # Парсер иностранного ШК (вне класса!)
 # ==========================================================
 def parse_foreign_barcode(raw: str) -> dict:
-    raw = (raw or "").strip()
+    """
+    Боевой разбор отсканированного штрихкода товара (EAN-13, GTIN-14, GS1-128, DataMatrix)
+    без демонстрационных заглушек (без 04600123456782, «Наушников BT-500» и «ООО Ромашка»).
+    """
+    raw_s = (raw or "").strip("\r\n\t ")
+    if len(raw_s) > 3 and raw_s.startswith("]") and raw_s[1:3] in ("d2", "d1", "C1", "E0", "E4", "I1", "Q3"):
+        raw_s = raw_s[3:].strip()
 
-    gtin = "04600123456782"
-    sn = "SN" + ''.join(random.choices(string.digits, k=7))
-    lot = "LOT-2025-04"
-    exp = "12.2026"
+    s = raw_s.replace("_x001D_", "\x1d").lstrip("\x1d")
 
-    if raw:
-        s = raw.replace("_x001D_", "\x1d")
+    gtin = ""
+    sn = "—"
+    lot = "—"
+    exp = "—"
+    btype = "EAN-13"
 
-        m01 = re.search(r"01(\d{14})", s)
-        if m01:
-            gtin = m01.group(1)
+    if s:
+        # 1. Скобочный формат GS1: (01)04607012345678(21)SN...
+        m_br = re.search(r"\(01\)\s*(\d{8,14})(?:\s*\(21\)\s*([^\(\x1d\r\n]+))?", s)
+        if m_br:
+            btype = "GS1-128"
+            g_raw = m_br.group(1)
+            gtin = g_raw.zfill(14) if len(g_raw) == 13 else g_raw
+            if m_br.group(2):
+                sn = m_br.group(2).strip()
 
-        m21 = re.search(r"21([^\x1d]+)", s)
-        if m21:
-            sn = m21.group(1).strip()
+        # 2. Бесскобочный GS1 DataMatrix / GS1-128: 01 + 14 цифр + 21 + SN
+        if not gtin:
+            m01 = re.search(r"(?:^|\x1d)01(\d{14})", s)
+            if m01:
+                btype = "GS1-128"
+                gtin = m01.group(1)
+                after_01 = s[m01.end():]
+                m21 = re.match(r"^21([^\x1d\r\n]{1,30})", after_01)
+                if m21:
+                    sn = m21.group(1).strip()
 
-        m10 = re.search(r"10([^\x1d]+)", s)
+        m10 = re.search(r"(?:\(10\)|\x1d10)([^\(\x1d\r\n]{1,20})", s)
         if m10:
             lot = m10.group(1).strip()
 
-        m17 = re.search(r"17(\d{6})", s)
+        m17 = re.search(r"(?:\(17\)|\x1d17)(\d{6})", s)
         if m17:
             d = m17.group(1)
             yy, mm = d[:2], d[2:4]
             exp = f"{mm}.20{yy}"
 
-        if not m01:
-            digits = ''.join(ch for ch in raw if ch.isdigit())
-            if len(digits) >= 14:
-                gtin = digits[:14]
+        # 3. Линейный штрихкод EAN-13 / GTIN-14 / EAN-8 / внешний артикул
+        if not gtin:
+            if s.isdigit():
+                if len(s) == 13:
+                    btype = "EAN-13"
+                    gtin = "0" + s
+                elif len(s) == 14:
+                    btype = "GTIN-14"
+                    gtin = s
+                elif len(s) in (8, 12):
+                    btype = "EAN-8" if len(s) == 8 else "UPC-A"
+                    gtin = s.zfill(14)
+                else:
+                    gtin = s
+            else:
+                gtin = s
 
     return {
-        "type": "GS1-128" if "01" in raw else "EAN-13",
+        "raw": raw_s,
+        "shk": raw_s,
+        "type": btype,
         "gtin": gtin,
         "serial": sn,
+        "sn": sn,
         "lot": lot,
         "exp": exp,
-        "country": "CN",
-        "name": "Наушники беспроводные BT-500",
-        "model": "BT-500",
-        "importer": "ООО «Ромашка», г. Москва",
+        "country": "—",
+        "name": f"Товар (GTIN {gtin})" if gtin else "Неизвестный ШК",
+        "model": gtin or "—",
+        "importer": "—",
     }
