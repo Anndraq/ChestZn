@@ -1,6 +1,8 @@
 """Точка входа desktop-приложения (PySide6)."""
 import sys
 import os
+import json
+from pathlib import Path
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout,
     QHBoxLayout, QLabel, QFrame, QMessageBox
@@ -16,7 +18,7 @@ from banner import WarningBanner
 from store import Store
 from operator_window import OperatorWindow
 from admin_window import AdminWindow
-from styles import APP_QSS
+from styles import get_qss  # Импортируем функцию получения темы
 from login_window import LoginWindow
 from security_question_window import SecurityQuestionWindow
 
@@ -340,7 +342,19 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
-    app.setStyleSheet(APP_QSS)
+    
+    # ---------- Загрузка темы из настроек ----------
+    cfg_path = Path(os.environ.get("APPDATA", Path.home())) / "ChestZn" / "config.json"
+    theme = "dark"
+    if cfg_path.exists():
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+                theme = cfg.get("app_theme", "dark")
+        except Exception:
+            pass
+            
+    app.setStyleSheet(get_qss(theme))
 
     # ---------- 1. Скопировать руководства ----------
     docs_helper.ensure_docs_copied()

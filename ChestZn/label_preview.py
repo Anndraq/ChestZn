@@ -214,7 +214,6 @@ class LabelPreviewWidget(QWidget):
                                 dm_size_px, dm_size_px)
 
                 if pix and not pix.isNull():
-                    # Масштабируем больший pixmap в нужный rect — быстро
                     painter.drawPixmap(dm_rect, pix)
                 else:
                     painter.fillRect(dm_rect, QColor("#000000"))
@@ -355,24 +354,24 @@ class LabelPreviewWidget(QWidget):
                 return
             f = fields[idx]
 
-            # Левый верхний угол элемента — точка отсчёта
             start_tl = self._dots_to_screen(f.get("x", 0), f.get("y", 0))
 
-            # Размер = расстояние от левого верхнего до курсора
             new_w_px = pos.x() - start_tl.x()
             new_h_px = pos.y() - start_tl.y()
 
-            # Берём максимум (сохраняет пропорцию квадрата)
             new_size_px = max(new_w_px, new_h_px, 20)
-
-            # В точки принтера
             new_size_dots = self._px_to_dots(new_size_px)
 
-            # Ограничения
-            _, h_dots, _ = self._label_size_dots()
-            w_dots, _, _ = self._label_size_dots()
-            max_dots = min(w_dots, h_dots)
-            new_size_dots = max(15, min(max_dots, new_size_dots))
+            w_dots, h_dots, _ = self._label_size_dots()
+
+            # ЗАЩИТА: размер не должен выходить за правый/нижний край этикетки
+            x_dots = f.get("x", 0)
+            y_dots = f.get("y", 0)
+            max_dots_x = w_dots - x_dots
+            max_dots_y = h_dots - y_dots
+            max_allowed = min(max_dots_x, max_dots_y)
+
+            new_size_dots = max(15, min(max_allowed, new_size_dots))
 
             self._live_resize_size = new_size_dots
             self.update()
@@ -385,6 +384,17 @@ class LabelPreviewWidget(QWidget):
                 new_tl.x(), new_tl.y()
             )
             tab_key, idx, name = self._dragging
+
+            # ЗАЩИТА: не даём вылезти за правый/нижний край
+            w_dots, h_dots, _ = self._label_size_dots()
+            el_w, el_h = self._get_element_size_dots(tab_key, idx, name)
+
+            max_x = max(0, w_dots - el_w)
+            max_y = max(0, h_dots - el_h)
+
+            x_dots = max(0, min(max_x, x_dots))
+            y_dots = max(0, min(max_y, y_dots))
+
             self._live_drag_pos = (tab_key, idx, x_dots, y_dots)
             self.update()
             return
@@ -614,8 +624,13 @@ class LabelPreviewWidget(QWidget):
             label = f.get("label", "") or ""
             text = f"{label}: {sample}" if label else sample
             font_size = f.get("font_size", 12) or 11
-            width_dots = int(len(text) * font_size * 0.6)
-            height_dots = int(font_size * 1.5)
+            dpi = int(widgets["dpi"].currentText())
+
+            # Приблизительная ширина/высота в точках принтера
+            # 1 pt ≈ 1.33 px, а dpi/72 — это масштаб
+            font_dots = int(font_size * dpi / 72.0)
+            width_dots = int(len(text) * font_dots * 0.62)
+            height_dots = int(font_dots * 1.4)
             return width_dots, height_dots
 
     def _apply_position(self, tab_key, idx, x, y):

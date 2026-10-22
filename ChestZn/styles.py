@@ -26,6 +26,33 @@ QMainWindow, QDialog {
     font-size: 13px;
 }
 
+/* Поля ввода внутри таблиц — всегда контрастные */
+QTableWidget QLineEdit,
+QTableWidget QSpinBox,
+QTableWidget QDoubleSpinBox,
+QTableWidget QComboBox {
+    background-color: #0f172a;
+    color: #e6edf3;
+    border: 1px solid #334155;
+    border-radius: 4px;
+    padding: 2px 4px;
+}
+QTableWidget QLineEdit:focus,
+QTableWidget QSpinBox:focus,
+QTableWidget QDoubleSpinBox:focus {
+    border: 1px solid #3b82f6;
+    background-color: #111c2e;
+}
+
+/* Вертикальные заголовки в таблицах (номера строк) */
+QTableWidget QHeaderView::section:vertical {
+    background-color: #161c24;
+    color: #64748b;
+    border-right: 1px solid #2a3542;
+    border-bottom: 1px solid #2a3542;
+    font-weight: 600;
+}
+
 
 /* ================================================================
    WARNING BANNER (жёлтая полоса сверху главного окна)
@@ -566,4 +593,62 @@ QDialog#startupWindow QPushButton#restartButton:hover {
     background-color: #1c2530;
     color: #e6edf3;
 }
+
+/* Спинбоксы в темной теме */
+QSpinBox::up-button, QDoubleSpinBox::up-button {
+    subcontrol-origin: border;
+    subcontrol-position: top right;
+    width: 16px;
+    border-left: 1px solid #2a3542;
+    border-top-right-radius: 6px;
+    background-color: #1c2530;
+}
+QSpinBox::down-button, QDoubleSpinBox::down-button {
+    subcontrol-origin: border;
+    subcontrol-position: bottom right;
+    width: 16px;
+    border-left: 1px solid #2a3542;
+    border-bottom-right-radius: 6px;
+    background-color: #1c2530;
+}
+QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {
+    background-color: #2a3542;
+}
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
+    image: url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4IiBoZWlnaHQ9IjgiPjxwYXRoIGQ9Ik00IDBMMCA0aDh6IiBmaWxsPSIjOGI5N2E2Ii8+PC9zdmc+);
+}
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
+    image: url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4IiBoZWlnaHQ9IjgiPjxwYXRoIGQ9Ik00IDhMMCA0aDh6IiBmaWxsPSIjOGI5N2E2Ii8+PC9zdmc+);
+}
 """
+
+LIGHT_QSS = """
+/* Базовая светлая тема */
+QMainWindow, QDialog { background-color: #f1f5f9; color: #0f172a; }
+QLabel { background: transparent; border: none; color: #0f172a; }
+QFrame#header { background-color: #ffffff; border-bottom: 1px solid #cbd5e1; }
+QFrame#sidebar { background-color: #ffffff; border-right: 1px solid #cbd5e1; }
+QPushButton#navBtn { color: #475569; }
+QPushButton#navBtn:hover { background-color: #f1f5f9; color: #0f172a; }
+QPushButton#navBtn:checked { background-color: #3b82f6; color: #ffffff; }
+QFrame#card, QFrame#kpi, QFrame#scanbar { background-color: #ffffff; border: 1px solid #cbd5e1; }
+QTableWidget { background-color: #ffffff; border: 1px solid #cbd5e1; color: #0f172a; }
+QTableWidget::item { border-bottom: 1px solid #f1f5f9; }
+QHeaderView::section { background-color: #f8fafc; color: #475569; border-bottom: 1px solid #cbd5e1; }
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox { background-color: #ffffff; border: 1px solid #cbd5e1; color: #0f172a; }
+QLineEdit:focus, QComboBox:focus { border: 1px solid #3b82f6; }
+QPushButton { background-color: #f8fafc; border: 1px solid #cbd5e1; color: #0f172a; }
+QPushButton:hover { background-color: #e2e8f0; }
+QPushButton[primary="true"] { background-color: #3b82f6; color: #ffffff; border: none; }
+QTabBar::tab { background: #e2e8f0; color: #475569; border: 1px solid #cbd5e1; }
+QTabBar::tab:selected { background: #3b82f6; color: #ffffff; }
+QTableWidget QLineEdit, QTableWidget QSpinBox, QTableWidget QDoubleSpinBox { background-color: #ffffff; border: 1px solid #cbd5e1; color: #0f172a; }
+"""
+
+def get_qss(theme="dark"):
+    if theme == "light":
+        # Берем светлую базу и перезаписываем критичные цвета из темной
+        base = APP_QSS.replace("#161c24", "#ffffff").replace("#1c2530", "#f8fafc").replace("#0f1419", "#f1f5f9").replace("#e6edf3", "#0f172a").replace("#8b97a6", "#475569")
+        return LIGHT_QSS + base
+    return APP_QSS

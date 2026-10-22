@@ -1,17 +1,27 @@
 {
   "master_node": "MASTER-PC",
-  "active_only_filter": true,
+  "active_only_filter": false,
   "ping_timeout_ms": 600,
   "bindings": {
-    "USB-HID": "Xerox WorkCentre 3215"
+    "USB-HID": "Xerox WorkCentre 3215",
+    "COM3": "HP LaserJet Professional M1132 MFP"
   },
   "pairs": [
     {
       "pair_id": 1,
       "name": "Пост #1 (USB-HID ➔ Xerox WorkCentre 3215)",
-      "scanner_type": "usb-hid",
+      "scanner_type": "usb-com",
       "scanner_port": "USB-HID",
       "printer_name": "Xerox WorkCentre 3215",
+      "printer_lang": "auto",
+      "enabled": true
+    },
+    {
+      "pair_id": 2,
+      "name": "Пост #2 (COM3 ➔ HP LaserJet Professional M1132 MFP)",
+      "scanner_type": "usb-com",
+      "scanner_port": "COM3",
+      "printer_name": "HP LaserJet Professional M1132 MFP",
       "printer_lang": "auto",
       "enabled": true
     }

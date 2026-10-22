@@ -8,14 +8,14 @@ from PySide6.QtWidgets import (
     QHeaderView, QGridLayout, QSizePolicy, QAbstractItemView,
     QLineEdit, QComboBox, QMessageBox, QCheckBox, QSpinBox,
     QDoubleSpinBox, QInputDialog, QTabWidget,
-    QTreeWidget, QTreeWidgetItem, QPlainTextEdit, QDialog
+    QTreeWidget, QTreeWidgetItem, QPlainTextEdit, QDialog,
+    QDialogButtonBox
 )
 
 from edit_point_window import EditPointDialog
 from device_dialogs import (
     EditComputerDialog, EditPrinterDialog, EditScannerDialog
 )
-
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QBrush
@@ -37,6 +37,28 @@ from importer import (import_pool_codes, import_gtin_map,
                       download_pool_template, download_gtin_map_template)
 import sync as sync_mod
 from mssql_ui import SQLServerAdminPage
+
+# Человекочитаемые названия для системных полей
+FIELD_LABELS = {
+    "dataMatrix": "Штрихкод ЧЗ (DataMatrix)",
+    "name_ru":    "Наименование товара",
+    "model":      "Модель / Артикул",
+    "importer":   "Импортёр",
+    "exp_date":   "Срок годности",
+    "size_eu":    "Размер (EU)",
+    "material":   "Материал",
+    "composition":"Состав",
+    "country":    "Страна",
+    "manufacturer":"Производитель",
+    "batch":      "Партия",
+    "qty":        "Количество",
+}
+
+FIELD_PRESETS = [
+    "dataMatrix", "name_ru", "model", "importer", "exp_date",
+    "size_eu", "material", "composition", "country",
+    "manufacturer", "batch", "qty",
+]
 
 
 def table(headers: list) -> QTableWidget:
@@ -96,6 +118,35 @@ class AdminWindow(QWidget):
             btn.setProperty("page_id", page_id)
             sb.addWidget(btn)
             return btn
+
+        def _toggle_theme(self):
+            import json, os
+            from pathlib import Path
+            from PySide6.QtWidgets import QMessageBox
+        
+            cfg_path = Path(os.environ.get("APPDATA", Path.home())) / "ChestZn" / "config.json"
+            cfg = {}
+            if cfg_path.exists():
+                try:
+                    with open(cfg_path, "r", encoding="utf-8") as f:
+                        cfg = json.load(f)
+                except Exception:
+                    pass
+                
+            new_theme = "light" if cfg.get("app_theme", "dark") == "dark" else "dark"
+            cfg["app_theme"] = new_theme
+        
+            try:
+                cfg_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(cfg_path, "w", encoding="utf-8") as f:
+                    json.dump(cfg, f, ensure_ascii=False, indent=2)
+            
+                QMessageBox.information(
+                    self, "Тема изменена", 
+                    "Тема применена. Пожалуйста, перезапустите приложение (закройте и откройте снова), чтобы увидеть изменения."
+                )
+            except Exception as e:
+                self.toast.show_message(f"Ошибка сохранения темы: {e}", "err")
 
         section("ОБЗОР")
         self.nav_dashboard = nav("📊  Дашборд", "dashboard")
@@ -1584,6 +1635,13 @@ class AdminWindow(QWidget):
         fields_head.addWidget(lbl_fields)
         fields_head.addStretch(1)
 
+        btn_auto = QPushButton("🎯 Авто-раскладка")
+        btn_auto.setFixedHeight(30)
+        btn_auto.setStyleSheet("color: #93c5fd; font-weight: bold; padding: 0 10px;")
+        btn_auto.setToolTip("Расставить поля по умолчанию (QR слева, текст справа)")
+        btn_auto.clicked.connect(lambda: self._tpl_auto_layout(tab_key))
+        fields_head.addWidget(btn_auto)
+
         btn_add = QPushButton("+")
         btn_add.setFixedSize(40, 30)
         btn_add.setToolTip("Добавить поле")
@@ -1609,7 +1667,7 @@ class AdminWindow(QWidget):
 
         t = QTableWidget(0, 7)
         t.setHorizontalHeaderLabels(
-            ["Поле", "Подпись", "Обяз.", "Шрифт", "Размер", "X, Y", ""]
+            ["Поле", "Отображаемый текст", "Обязат.", "Размер текста", "Размер QR", "X, Y", ""]
         )
         hh = t.horizontalHeader()
         hh.setSectionResizeMode(0, QHeaderView.Interactive)
@@ -1620,19 +1678,32 @@ class AdminWindow(QWidget):
         hh.setSectionResizeMode(5, QHeaderView.Fixed)
         hh.setSectionResizeMode(6, QHeaderView.Fixed)
         t.setColumnWidth(0, 110)
-        t.setColumnWidth(2, 45)
-        t.setColumnWidth(3, 70)
+        t.setColumnWidth(2, 55) # Чуть шире для "Обязат."
+        t.setColumnWidth(3, 110)
         t.setColumnWidth(4, 90)
         t.setColumnWidth(5, 90)
         t.setColumnWidth(6, 38)
+        
         t.verticalHeader().setVisible(True)
         t.verticalHeader().setFixedWidth(26)
         t.verticalHeader().setDefaultSectionSize(32)
+        
         t.setSelectionBehavior(QAbstractItemView.SelectRows)
         t.setSelectionMode(QAbstractItemView.SingleSelection)
         t.setShowGrid(False)
         t.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         t.itemChanged.connect(lambda _: self._tpl_refresh_preview())
+        
+        # Стили для вертикального заголовка (убираем коричневый фон)
+        t.setStyleSheet("""
+            QTableWidget QHeaderView::section:vertical {
+                background-color: #161c24;
+                color: #64748b;
+                border-right: 1px solid #2a3542;
+                border-bottom: 1px solid #2a3542;
+                font-weight: 600;
+            }
+        """)
 
         v.addWidget(t, stretch=1)
 
@@ -1642,7 +1713,6 @@ class AdminWindow(QWidget):
             "w": w_spin, "h": h_spin, "dpi": dpi_combo, "fields": t,
         }
         return tab
-
 
     def _tpl_on_mode_changed(self):
         mode = self.tpl_mode_combo.currentData()
@@ -1735,10 +1805,14 @@ class AdminWindow(QWidget):
                 item_name.setFlags(item_name.flags() & ~Qt.ItemIsEditable)
                 t.setItem(r, 0, item_name)
 
-                t.setItem(r, 1, QTableWidgetItem(f.get("label", "")))
+                label_val = f.get("label", "")
+                if not label_val:
+                    label_val = FIELD_LABELS.get(name, name)
+                t.setItem(r, 1, QTableWidgetItem(label_val))
 
                 chk = QCheckBox()
                 chk.setChecked(bool(f.get("required")))
+                chk.setToolTip("Если стоит галочка, оператор не сможет напечатать этикетку,\nпока это поле не заполнено в базе.")
                 wrap_chk = QWidget()
                 wl = QHBoxLayout(wrap_chk)
                 wl.setContentsMargins(0, 0, 0, 0)
@@ -1750,9 +1824,11 @@ class AdminWindow(QWidget):
                 spin_font.setRange(6, 40)
                 spin_font.setValue(int(f.get("font_size", 12)))
                 spin_font.setAlignment(Qt.AlignCenter)
+                spin_font.setButtonSymbols(QSpinBox.NoButtons)
                 if is_dm:
                     spin_font.setEnabled(False)
                     spin_font.setValue(0)
+                    spin_font.setSpecialValueText("—")
                 spin_font.valueChanged.connect(self._tpl_refresh_preview)
                 t.setCellWidget(r, 3, spin_font)
 
@@ -1762,9 +1838,11 @@ class AdminWindow(QWidget):
                 spin_size.setSuffix(" мм")
                 spin_size.setValue(float(f.get("size", 20)))
                 spin_size.setAlignment(Qt.AlignCenter)
+                spin_size.setButtonSymbols(QDoubleSpinBox.NoButtons)
                 if not is_dm:
                     spin_size.setEnabled(False)
                     spin_size.setValue(0)
+                    spin_size.setSpecialValueText("—")
                 spin_size.valueChanged.connect(self._tpl_refresh_preview)
                 t.setCellWidget(r, 4, spin_size)
 
@@ -1796,7 +1874,6 @@ class AdminWindow(QWidget):
             widgets["w"].blockSignals(False)
             widgets["h"].blockSignals(False)
 
-
     def _current_template(self):
         rows = self.tpl_list.selectionModel().selectedRows()
         if not rows:
@@ -1808,13 +1885,48 @@ class AdminWindow(QWidget):
         return tpls[idx]
 
     def _tpl_add_field(self, tab_key: str):
-        name, ok = QInputDialog.getText(
-            self, "Новое поле",
-            "Системное имя (например, country, manufacturer, batch):"
-        )
-        if not ok or not name.strip():
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Добавить поле на этикетку")
+        dlg.setMinimumWidth(320)
+        layout = QVBoxLayout(dlg)
+        layout.setSpacing(10)
+
+        layout.addWidget(QLabel("Выберите, что вывести на этикетку:"))
+
+        combo = QComboBox()
+        for code in FIELD_PRESETS:
+            label = FIELD_LABELS.get(code, code)
+            combo.addItem(label, code)
+
+        combo.addItem("— Другое (ввести вручную) —", "__custom__")
+        layout.addWidget(combo)
+
+        custom_edit = QLineEdit()
+        custom_edit.setPlaceholderText("Системное имя (например, lot_number)")
+        custom_edit.setVisible(False)
+        layout.addWidget(custom_edit)
+
+        def _on_combo_change(idx):
+            data = combo.itemData(idx)
+            custom_edit.setVisible(data == "__custom__")
+
+        combo.currentIndexChanged.connect(_on_combo_change)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+
+        if dlg.exec() != QDialog.Accepted:
             return
-        name = name.strip().lower().replace(" ", "_")
+
+        chosen = combo.currentData()
+        if chosen == "__custom__":
+            name = custom_edit.text().strip().lower().replace(" ", "_")
+            if not name:
+                return
+        else:
+            name = chosen
 
         widgets = self._tpl_tab_widgets.get(tab_key)
         if not widgets:
@@ -1829,9 +1941,12 @@ class AdminWindow(QWidget):
         item_name = QTableWidgetItem(name)
         item_name.setFlags(item_name.flags() & ~Qt.ItemIsEditable)
         t.setItem(r, 0, item_name)
-        t.setItem(r, 1, QTableWidgetItem(name))
+
+        human = FIELD_LABELS.get(name, name)
+        t.setItem(r, 1, QTableWidgetItem(human))
 
         chk = QCheckBox()
+        chk.setToolTip("Если стоит галочка, оператор не сможет напечатать этикетку,\nпока это поле не заполнено в базе.")
         wrap_chk = QWidget()
         wl = QHBoxLayout(wrap_chk)
         wl.setContentsMargins(0, 0, 0, 0)
@@ -1843,9 +1958,11 @@ class AdminWindow(QWidget):
         spin_font.setRange(6, 40)
         spin_font.setValue(12)
         spin_font.setAlignment(Qt.AlignCenter)
+        spin_font.setButtonSymbols(QSpinBox.NoButtons)
         if is_dm:
             spin_font.setEnabled(False)
             spin_font.setValue(0)
+            spin_font.setSpecialValueText("—")
         spin_font.valueChanged.connect(self._tpl_refresh_preview)
         t.setCellWidget(r, 3, spin_font)
 
@@ -1855,8 +1972,10 @@ class AdminWindow(QWidget):
         spin_size.setSuffix(" мм")
         spin_size.setValue(20 if is_dm else 0)
         spin_size.setAlignment(Qt.AlignCenter)
+        spin_size.setButtonSymbols(QDoubleSpinBox.NoButtons)
         if not is_dm:
             spin_size.setEnabled(False)
+            spin_size.setSpecialValueText("—")
         spin_size.valueChanged.connect(self._tpl_refresh_preview)
         t.setCellWidget(r, 4, spin_size)
 
@@ -1950,9 +2069,14 @@ class AdminWindow(QWidget):
             item_name = QTableWidgetItem(f["name"])
             item_name.setFlags(item_name.flags() & ~Qt.ItemIsEditable)
             t.setItem(r, 0, item_name)
-            t.setItem(r, 1, QTableWidgetItem(f["label"]))
+
+            label_val = f["label"]
+            if not label_val:
+                label_val = FIELD_LABELS.get(f["name"], f["name"])
+            t.setItem(r, 1, QTableWidgetItem(label_val))
 
             chk = QCheckBox(); chk.setChecked(f["required"])
+            chk.setToolTip("Если стоит галочка, оператор не сможет напечатать этикетку,\nпока это поле не заполнено в базе.")
             wrap_chk = QWidget()
             wl = QHBoxLayout(wrap_chk)
             wl.setContentsMargins(0, 0, 0, 0)
@@ -1964,9 +2088,11 @@ class AdminWindow(QWidget):
             spin_font.setRange(6, 40)
             spin_font.setValue(f["font_size"] if f["font_size"] else 12)
             spin_font.setAlignment(Qt.AlignCenter)
+            spin_font.setButtonSymbols(QSpinBox.NoButtons)
             if is_dm:
                 spin_font.setEnabled(False)
                 spin_font.setValue(0)
+                spin_font.setSpecialValueText("—")
             spin_font.valueChanged.connect(self._tpl_refresh_preview)
             t.setCellWidget(r, 3, spin_font)
 
@@ -1976,8 +2102,10 @@ class AdminWindow(QWidget):
             spin_size.setSuffix(" мм")
             spin_size.setValue(f["size"] if f["size"] else (20 if is_dm else 0))
             spin_size.setAlignment(Qt.AlignCenter)
+            spin_size.setButtonSymbols(QDoubleSpinBox.NoButtons)
             if not is_dm:
                 spin_size.setEnabled(False)
+                spin_size.setSpecialValueText("—")
             spin_size.valueChanged.connect(self._tpl_refresh_preview)
             t.setCellWidget(r, 4, spin_size)
 
@@ -2006,6 +2134,61 @@ class AdminWindow(QWidget):
         t.selectRow(new_idx)
         self._tpl_refresh_preview()
 
+    def _tpl_auto_layout(self, tab_key: str):
+        """Автоматически расставляет поля по сетке (QR слева, текст справа)"""
+        widgets = self._tpl_tab_widgets.get(tab_key)
+        if not widgets:
+            return
+        
+        w_mm = widgets["w"].value()
+        h_mm = widgets["h"].value()
+        dpi = int(widgets["dpi"].currentText())
+        
+        # Переводим мм в точки принтера
+        w_dots = int(round(w_mm / 25.4 * dpi))
+        h_dots = int(round(h_mm / 25.4 * dpi))
+        
+        t = widgets["fields"]
+        t.blockSignals(True)
+        
+        qr_size_mm = min(w_mm, h_mm) * 0.5
+        qr_size_dots = int(round(qr_size_mm / 25.4 * dpi))
+        
+        qr_x = 5
+        qr_y = int((h_dots - qr_size_dots) / 2) # Центрируем по вертикали
+        if qr_y < 0: qr_y = 0
+        
+        text_x = qr_x + qr_size_dots + 20 # Отступ от QR
+        text_y = 10
+        line_height = 30 # Шаг между строками текста
+        
+        # Проходим по всем строкам таблицы
+        for r in range(t.rowCount()):
+            name = t.item(r, 0).text() if t.item(r, 0) else ""
+            
+            item_xy = t.item(r, 5)
+            if not item_xy:
+                item_xy = QTableWidgetItem()
+                t.setItem(r, 5, item_xy)
+                
+            if name == "dataMatrix":
+                # QR-код ставим слева
+                item_xy.setText(f"X:{qr_x} Y:{qr_y}")
+                # Обновляем его размер в спинбоксе
+                spin = t.cellWidget(r, 4)
+                if spin:
+                    spin.blockSignals(True)
+                    spin.setValue(round(qr_size_mm, 0))
+                    spin.blockSignals(False)
+            else:
+                # Текст ставим справа друг под другом
+                item_xy.setText(f"X:{text_x} Y:{text_y}")
+                text_y += line_height
+                
+        t.blockSignals(False)
+        self._tpl_refresh_preview()
+        self.toast.show_message("Поля расставлены автоматически", "ok")
+
 
     def _collect_fields_from_table(self, tab_key: str) -> list:
         widgets = self._tpl_tab_widgets.get(tab_key)
@@ -2017,6 +2200,13 @@ class AdminWindow(QWidget):
         for r in range(t.rowCount()):
             name = t.item(r, 0).text() if t.item(r, 0) else ""
             label = t.item(r, 1).text() if t.item(r, 1) else ""
+
+            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: если подпись совпадает с человеческим названием,
+            # значит пользователь не менял её вручную — сохраняем пустую подпись, чтобы 
+            # при печати не было дублирования вроде "Наименование товара: Наушники"
+            human = FIELD_LABELS.get(name)
+            if human and label == human:
+                label = ""
 
             wrap = t.cellWidget(r, 2)
             chk = wrap.findChild(QCheckBox) if wrap else None
@@ -2170,56 +2360,190 @@ class AdminWindow(QWidget):
             self.toast.show_message(f"Ошибка: {result['info']}", "err")
 
     def _tpl_create(self):
-        code, ok = QInputDialog.getText(
-            self, "Новый шаблон",
-            "Код (латиница, без пробелов, уникальный):"
-        )
-        if not ok or not code.strip():
-            return
-        code = code.strip().lower().replace(" ", "_")
+        """Создать шаблон из готового пресета."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Новый шаблон этикетки")
+        dlg.setMinimumWidth(400)
+        layout = QVBoxLayout(dlg)
+        layout.setSpacing(12)
 
-        name, ok = QInputDialog.getText(self, "Новый шаблон", "Название:")
-        if not ok or not name.strip():
-            return
-        name = name.strip()
+        layout.addWidget(QLabel("Выберите готовый шаблон:"))
 
-        config = {
-            "print_mode": "combined",
-            "combined": {
-                "w": 58, "h": 40, "dpi": 203,
-                "fields": [
-                    {"name": "dataMatrix", "label": "", "required": True,
-                     "font_size": 0, "x": 5, "y": 5},
-                    {"name": "name_ru", "label": "", "required": True,
-                     "font_size": 13, "x": 100, "y": 5},
-                    {"name": "importer", "label": "Импортёр",
-                     "required": True, "font_size": 10, "x": 100, "y": 40},
-                ],
+        combo = QComboBox()
+        combo.addItem("Электроника (58×40 мм)", "electronics")
+        combo.addItem("Обувь (58×40 мм)", "shoes")
+        combo.addItem("Одежда (58×40 мм)", "clothing")
+        combo.addItem("Только DataMatrix (30×30 мм)", "only_dm")
+        combo.addItem("Пустой шаблон", "empty")
+        layout.addWidget(combo)
+
+        name_edit = QLineEdit()
+        name_edit.setPlaceholderText("Название шаблона (например, «Электроника 2»)")
+        layout.addWidget(name_edit)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        preset_key = combo.currentData()
+        name = name_edit.text().strip()
+        if not name:
+            name = combo.currentText()
+
+        # Генерируем уникальный код для шаблона
+        base_code = preset_key
+        code = base_code
+        i = 2
+        while self.store.get_template(code):
+            code = f"{base_code}_{i}"
+            i += 1
+
+        # Готовые конфигурации пресетов
+        presets = {
+            "electronics": {
+                "print_mode": "combined",
+                "combined": {
+                    "w": 58, "h": 40, "dpi": 203,
+                    "fields": [
+                        {"name": "dataMatrix", "label": "", "required": True,
+                         "font_size": 0, "x": 5, "y": 5},
+                        {"name": "name_ru", "label": "", "required": True,
+                         "font_size": 13, "x": 100, "y": 5},
+                        {"name": "model", "label": "Модель", "required": False,
+                         "font_size": 11, "x": 100, "y": 25},
+                        {"name": "importer", "label": "Импортёр", "required": True,
+                         "font_size": 10, "x": 100, "y": 40},
+                    ],
+                },
+                "cz": {
+                    "w": 30, "h": 30, "dpi": 203,
+                    "fields": [
+                        {"name": "dataMatrix", "label": "", "required": True,
+                         "font_size": 0, "x": 5, "y": 5},
+                    ],
+                },
+                "label": {
+                    "w": 58, "h": 40, "dpi": 203,
+                    "fields": [
+                        {"name": "name_ru", "label": "", "required": True,
+                         "font_size": 13, "x": 5, "y": 5},
+                        {"name": "model", "label": "Модель", "required": False,
+                         "font_size": 11, "x": 5, "y": 25},
+                        {"name": "importer", "label": "Импортёр", "required": True,
+                         "font_size": 10, "x": 5, "y": 40},
+                    ],
+                },
             },
-            "cz": {
-                "w": 30, "h": 30, "dpi": 203,
-                "fields": [
-                    {"name": "dataMatrix", "label": "", "required": True,
-                     "font_size": 0, "x": 5, "y": 5},
-                ],
+            "shoes": {
+                "print_mode": "separate",
+                "combined": {
+                    "w": 58, "h": 40, "dpi": 203,
+                    "fields": [
+                        {"name": "dataMatrix", "label": "", "required": True,
+                         "font_size": 0, "x": 5, "y": 5},
+                        {"name": "name_ru", "label": "", "required": True,
+                         "font_size": 13, "x": 100, "y": 5},
+                    ],
+                },
+                "cz": {
+                    "w": 30, "h": 30, "dpi": 203,
+                    "fields": [
+                        {"name": "dataMatrix", "label": "", "required": True,
+                         "font_size": 0, "x": 5, "y": 5},
+                    ],
+                },
+                "label": {
+                    "w": 58, "h": 40, "dpi": 203,
+                    "fields": [
+                        {"name": "name_ru", "label": "", "required": True,
+                         "font_size": 13, "x": 5, "y": 5},
+                        {"name": "material", "label": "Материал", "required": True,
+                         "font_size": 11, "x": 5, "y": 25},
+                        {"name": "size_eu", "label": "Размер EU", "required": True,
+                         "font_size": 11, "x": 5, "y": 40},
+                        {"name": "importer", "label": "Импортёр", "required": True,
+                         "font_size": 10, "x": 5, "y": 55},
+                    ],
+                },
             },
-            "label": {
-                "w": 58, "h": 40, "dpi": 203,
-                "fields": [
-                    {"name": "name_ru", "label": "", "required": True,
-                     "font_size": 13, "x": 5, "y": 5},
-                    {"name": "importer", "label": "Импортёр",
-                     "required": True, "font_size": 10, "x": 5, "y": 25},
-                ],
+            "clothing": {
+                "print_mode": "separate",
+                "combined": {
+                    "w": 58, "h": 40, "dpi": 203,
+                    "fields": [
+                        {"name": "dataMatrix", "label": "", "required": True,
+                         "font_size": 0, "x": 5, "y": 5},
+                        {"name": "name_ru", "label": "", "required": True,
+                         "font_size": 13, "x": 100, "y": 5},
+                    ],
+                },
+                "cz": {
+                    "w": 30, "h": 30, "dpi": 203,
+                    "fields": [
+                        {"name": "dataMatrix", "label": "", "required": True,
+                         "font_size": 0, "x": 5, "y": 5},
+                    ],
+                },
+                "label": {
+                    "w": 58, "h": 40, "dpi": 203,
+                    "fields": [
+                        {"name": "name_ru", "label": "", "required": True,
+                         "font_size": 13, "x": 5, "y": 5},
+                        {"name": "composition", "label": "Состав", "required": True,
+                         "font_size": 11, "x": 5, "y": 25},
+                        {"name": "importer", "label": "Импортёр", "required": True,
+                         "font_size": 10, "x": 5, "y": 40},
+                    ],
+                },
+            },
+            "only_dm": {
+                "print_mode": "combined",
+                "combined": {
+                    "w": 30, "h": 30, "dpi": 203,
+                    "fields": [
+                        {"name": "dataMatrix", "label": "", "required": True,
+                         "font_size": 0, "x": 5, "y": 5},
+                    ],
+                },
+                "cz": {
+                    "w": 30, "h": 30, "dpi": 203,
+                    "fields": [
+                        {"name": "dataMatrix", "label": "", "required": True,
+                         "font_size": 0, "x": 5, "y": 5},
+                    ],
+                },
+                "label": {
+                    "w": 30, "h": 30, "dpi": 203,
+                    "fields": [],
+                },
+            },
+            "empty": {
+                "print_mode": "combined",
+                "combined": {"w": 58, "h": 40, "dpi": 203, "fields": []},
+                "cz": {"w": 30, "h": 30, "dpi": 203, "fields": []},
+                "label": {"w": 58, "h": 40, "dpi": 203, "fields": []},
             },
         }
 
+        config = presets.get(preset_key, presets["electronics"])
+
+        is_default = (len(self.store.list_templates()) == 0)
+
         result = self.store.create_template(
-            code=code, name=name, config=config,
+            code=code, name=name, config=config, is_default=is_default
         )
         if result["ok"]:
             self.toast.show_message(result["info"], "ok")
             self._refresh_templates()
+            # Выбираем только что созданный шаблон
+            for i, tpl in enumerate(self.store.list_templates()):
+                if tpl["code"] == code:
+                    self.tpl_list.selectRow(i)
+                    break
         else:
             self.toast.show_message(f"Ошибка: {result['info']}", "err")
 
@@ -3946,7 +4270,78 @@ class AdminWindow(QWidget):
         cvc.addWidget(self.cleanup_status)
 
         v.addWidget(card_cleanup)
+
+        # === БЛОК ТЕМЫ ===
+        card_theme = QFrame(); card_theme.setObjectName("card")
+        cvt = QVBoxLayout(card_theme)
+        cvt.setContentsMargins(18, 14, 18, 14)
+        
+        ttl_theme = QLabel("ОФОРМЛЕНИЕ ПРИЛОЖЕНИЯ")
+        ttl_theme.setStyleSheet("color:#8b97a6; font-size:11px; font-weight:600; letter-spacing:1.5px;")
+        cvt.addWidget(ttl_theme)
+        
+        row_theme = QHBoxLayout()
+        row_theme.addWidget(QLabel("Текущая тема:"))
+        
+        current_theme = "Тёмная"
+        try:
+            import json, os
+            from pathlib import Path
+            cfg_path = Path(os.environ.get("APPDATA", Path.home())) / "ChestZn" / "config.json"
+            if cfg_path.exists():
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    current_theme = "Светлая" if json.load(f).get("app_theme") == "light" else "Тёмная"
+        except Exception:
+            pass
+            
+        lbl_theme = QLabel(current_theme)
+        lbl_theme.setStyleSheet("font-weight:bold; color:#3b82f6;")
+        row_theme.addWidget(lbl_theme)
+        
+        btn_theme = QPushButton("🔄 Сменить тему (День/Ночь)")
+        btn_theme.setProperty("primary", True)
+        btn_theme.clicked.connect(self._toggle_theme)
+        row_theme.addWidget(btn_theme)
+        
+        row_theme.addStretch(1)
+        cvt.addLayout(row_theme)
+        
+        hint_theme = QLabel("После смены темы потребуется перезапуск приложения.")
+        hint_theme.setStyleSheet("color:#64748b; font-size:11px;")
+        cvt.addWidget(hint_theme)
+
+        v.addWidget(card_theme)
+        
         return w
+
+    def _toggle_theme(self):
+        import json, os
+        from pathlib import Path
+        from PySide6.QtWidgets import QMessageBox
+        
+        cfg_path = Path(os.environ.get("APPDATA", Path.home())) / "ChestZn" / "config.json"
+        cfg = {}
+        if cfg_path.exists():
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+            except Exception:
+                pass
+                
+        new_theme = "light" if cfg.get("app_theme", "dark") == "dark" else "dark"
+        cfg["app_theme"] = new_theme
+        
+        try:
+            cfg_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, ensure_ascii=False, indent=2)
+            
+            QMessageBox.information(
+                self, "Тема изменена", 
+                "Тема применена. Пожалуйста, перезапустите приложение (закройте и откройте снова), чтобы увидеть изменения."
+            )
+        except Exception as e:
+            self.toast.show_message(f"Ошибка сохранения темы: {e}", "err")
 
     def _refresh_backup(self):
         files = list_backups()
@@ -4631,7 +5026,6 @@ class AdminWindow(QWidget):
         if result == SecurityQuestionWindow.Accepted:
             self.toast.show_message("Секретный вопрос обновлён", "ok")
             self._refresh_security()
-
 
     # ==================================================================
     # SQL SERVER (АСИНХРОННАЯ ИНТЕГРАЦИЯ БЕЗ ЗАВИСАНИЯ UI)
