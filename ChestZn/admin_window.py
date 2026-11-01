@@ -8,14 +8,14 @@ from PySide6.QtWidgets import (
     QHeaderView, QGridLayout, QSizePolicy, QAbstractItemView,
     QLineEdit, QComboBox, QMessageBox, QCheckBox, QSpinBox,
     QDoubleSpinBox, QInputDialog, QTabWidget,
-    QTreeWidget, QTreeWidgetItem, QPlainTextEdit, QDialog,
-    QDialogButtonBox
+    QTreeWidget, QTreeWidgetItem, QPlainTextEdit, QDialog
 )
 
 from edit_point_window import EditPointDialog
 from device_dialogs import (
     EditComputerDialog, EditPrinterDialog, EditScannerDialog
 )
+
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QBrush
@@ -31,34 +31,14 @@ from printer import (list_printers, detect_language, load_config,
 from logger import log_file_path, log_dir_path, get_logger
 log = get_logger("admin")
 from backup import (create_backup, list_backups, restore_backup,
-                    BACKUP_DIR, MAX_BACKUPS)
+                    BACKUP_DIR, MAX_BACKUPS, AUTO_BACKUP_INTERVAL_DAYS,
+                    BACKUP_RETENTION_DAYS, cleanup_old_backups,
+                    auto_backup_if_needed)
 from export import export_pool, export_queue
 from importer import (import_pool_codes, import_gtin_map,
                       download_pool_template, download_gtin_map_template)
 import sync as sync_mod
 from mssql_ui import SQLServerAdminPage
-
-# Человекочитаемые названия для системных полей
-FIELD_LABELS = {
-    "dataMatrix": "Штрихкод ЧЗ (DataMatrix)",
-    "name_ru":    "Наименование товара",
-    "model":      "Модель / Артикул",
-    "importer":   "Импортёр",
-    "exp_date":   "Срок годности",
-    "size_eu":    "Размер (EU)",
-    "material":   "Материал",
-    "composition":"Состав",
-    "country":    "Страна",
-    "manufacturer":"Производитель",
-    "batch":      "Партия",
-    "qty":        "Количество",
-}
-
-FIELD_PRESETS = [
-    "dataMatrix", "name_ru", "model", "importer", "exp_date",
-    "size_eu", "material", "composition", "country",
-    "manufacturer", "batch", "qty",
-]
 
 
 def table(headers: list) -> QTableWidget:
@@ -91,7 +71,7 @@ class AdminWindow(QWidget):
         from PySide6.QtCore import QTimer
         self._tpl_preview_timer = QTimer(self)
         self._tpl_preview_timer.setSingleShot(True)
-        self._tpl_preview_timer.setInterval(500)
+        self._tpl_preview_timer.setInterval(30)
         self._tpl_preview_timer.timeout.connect(self._tpl_refresh_preview_now)
 
         root = QHBoxLayout(self)
@@ -119,48 +99,25 @@ class AdminWindow(QWidget):
             sb.addWidget(btn)
             return btn
 
-        def _toggle_theme(self):
-            import json, os
-            from pathlib import Path
-            from PySide6.QtWidgets import QMessageBox
-        
-            cfg_path = Path(os.environ.get("APPDATA", Path.home())) / "ChestZn" / "config.json"
-            cfg = {}
-            if cfg_path.exists():
-                try:
-                    with open(cfg_path, "r", encoding="utf-8") as f:
-                        cfg = json.load(f)
-                except Exception:
-                    pass
-                
-            new_theme = "light" if cfg.get("app_theme", "dark") == "dark" else "dark"
-            cfg["app_theme"] = new_theme
-        
-            try:
-                cfg_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(cfg_path, "w", encoding="utf-8") as f:
-                    json.dump(cfg, f, ensure_ascii=False, indent=2)
-            
-                QMessageBox.information(
-                    self, "Тема изменена", 
-                    "Тема применена. Пожалуйста, перезапустите приложение (закройте и откройте снова), чтобы увидеть изменения."
-                )
-            except Exception as e:
-                self.toast.show_message(f"Ошибка сохранения темы: {e}", "err")
-
         section("ОБЗОР")
         self.nav_dashboard = nav("📊  Дашборд", "dashboard")
         self.nav_queue     = nav("🔄  Очередь", "queue")
+        self.nav_queue.hide()
 
         section("НАСТРОЙКА")
-        self.nav_points       = nav("🏢  Точки", "points")
+        self.nav_points       = nav("🏢  Точки и ПК", "devices")
         self.nav_devices      = nav("🖧  Устройства", "devices")
+        self.nav_devices.hide()
         self.nav_templates    = nav("🏷️  Шаблоны", "templates")
         self.nav_pool         = nav("🎫  Склад кодов ЧЗ", "pool")
         self.nav_imports      = nav("📥  Импорты", "imports")
+        self.nav_imports.hide()
         self.nav_printer      = nav("🖨  Принтеры по точкам", "printer")
-        section("ИНТЕГРАЦИЯ")
-        self.nav_sql = nav("🗄  SQL Server", "sql")
+        self.nav_printer.hide()
+
+        section("ИНТЕГРАЦИЯ И ОБМЕН")
+        self.nav_sql          = nav("🗄  SQL Server", "sql")
+        self.nav_sync         = nav("🔄  Синхронизация", "sync")
 
         section("КОНТРОЛЬ")
         self.nav_journal       = nav("📜  Журнал", "journal")
@@ -168,9 +125,21 @@ class AdminWindow(QWidget):
         self.nav_security      = nav("🔒  Безопасность", "security")
         self.nav_logs          = nav("📄  Логи", "logs")
         self.nav_backup        = nav("💾  Бэкапы", "backup")
-        self.nav_sync          = nav("🔄  Синхронизация", "sync")
 
         sb.addStretch(1)
+
+        self.lbl_sidebar_role = QLabel("👑 Режим: Мастер-ПК")
+        self.lbl_sidebar_role.setStyleSheet(
+            "background:#1e293b; color:#38bdf8; font-size:11px; font-weight:600; "
+            "padding:6px 10px; border-radius:6px; border:1px solid #334155;"
+        )
+        self.lbl_sidebar_role.setAlignment(Qt.AlignCenter)
+        sb.addWidget(self.lbl_sidebar_role)
+
+        self.btn_theme = QPushButton("🌓  Сменить тему")
+        self.btn_theme.setObjectName("navBtn")
+        self.btn_theme.clicked.connect(self._toggle_theme)
+        sb.addWidget(self.btn_theme)
 
         # ============ STACK ============
         self.stack = QStackedWidget()
@@ -180,7 +149,7 @@ class AdminWindow(QWidget):
         self.stack.addWidget(self._page_devices())        # 3
         self.stack.addWidget(self._page_templates())      # 4
         self.stack.addWidget(self._page_pool())           # 5
-        self.stack.addWidget(self._page_imports())        # 6
+        self.stack.addWidget(QWidget())                   # 6 (перенесено во вкладку Склада кодов ЧЗ)
         self.stack.addWidget(self._page_printer())        # 7
         self.stack.addWidget(self._page_journal())        # 8
         self.stack.addWidget(self._page_logs())           # 9
@@ -199,6 +168,8 @@ class AdminWindow(QWidget):
         self._journal_page = 0
         self._journal_total = 0
 
+        self._apply_pc_role_ui()
+        QTimer.singleShot(2000, self._run_auto_backup_on_startup)
         self.switch("dashboard")
 
     # ------------------------------------------------------------------
@@ -240,8 +211,46 @@ class AdminWindow(QWidget):
     # ==================================================================
     # DASHBOARD (KPI + Управление сменой + Сводка по точкам и сканерам)
     # ==================================================================
+    def _apply_pc_role_ui(self):
+        """Применяет режим работы: Мастер-ПК (сервер смены + MS SQL) или Обычный ПК (рабочий пост упаковки)."""
+        try:
+            role = sync_mod.get_pc_role(self.store)
+            pc_name = sync_mod.get_pc_node_name(self.store)
+        except Exception:
+            role = "master"
+            pc_name = "PC-MAIN"
+
+        is_master = (role == "master")
+        if hasattr(self, "nav_sql"):
+            self.nav_sql.setVisible(is_master)
+        if hasattr(self, "lbl_sidebar_role"):
+            if is_master:
+                self.lbl_sidebar_role.setText(f"👑 Мастер-ПК · {pc_name}")
+                self.lbl_sidebar_role.setStyleSheet(
+                    "background:#0f291e; color:#34d399; font-size:11px; font-weight:600; "
+                    "padding:6px 10px; border-radius:6px; border:1px solid #059669;"
+                )
+            else:
+                self.lbl_sidebar_role.setText(f"💻 Обычный ПК · {pc_name}")
+                self.lbl_sidebar_role.setStyleSheet(
+                    "background:#172554; color:#60a5fa; font-size:11px; font-weight:600; "
+                    "padding:6px 10px; border-radius:6px; border:1px solid #2563eb;"
+                )
+
+    def _run_auto_backup_on_startup(self):
+        """Фоновая проверка автобэкапа (раз в 14 дней) и автоочистки бэкапов старше 6 месяцев (180 дней)."""
+        try:
+            res = auto_backup_if_needed()
+            if res and res.get("ok"):
+                self.toast.show_message(res.get("info", "Создан плановый автобэкап БД"), "ok")
+        except Exception as e:
+            log.error("auto_backup_if_needed: %s", e)
+
     def _clean_legacy_demo_points_in_db(self):
-        """Очищает старые демо-принтеры (TSC TE200, Godex G500, Zebra ZD421) и демо-операторов из БД."""
+        """Очищает старые демо-принтеры (TSC TE200, Godex G500, Zebra ZD421) и демо-операторов из БД (1 раз за сессию)."""
+        if getattr(self, "_legacy_cleaned", False):
+            return
+        self._legacy_cleaned = True
         try:
             import db
             with db.get_conn() as conn:
@@ -433,16 +442,10 @@ class AdminWindow(QWidget):
         try:
             import db
             with db.get_conn() as conn:
-                conn.execute("UPDATE counters SET limit_val = ? WHERE id = 1", (new_limit,))
+                conn.execute("UPDATE counters SET [limit] = ? WHERE id = 1", (new_limit,))
                 conn.commit()
         except Exception:
-            try:
-                import db
-                with db.get_conn() as conn:
-                    conn.execute("UPDATE counters SET [limit] = ? WHERE id = 1", (new_limit,))
-                    conn.commit()
-            except Exception:
-                pass
+            pass
 
         # Синхронизируем шапку и счётчики с открытым OperatorWindow
         try:
@@ -1010,7 +1013,7 @@ class AdminWindow(QWidget):
         v.setSpacing(14)
 
         head = QHBoxLayout()
-        tt = QLabel("Устройства: ПК, принтеры, сканеры")
+        tt = QLabel("Точки, компьютеры и оборудование (Сканер ↔ Принтер)")
         tt.setStyleSheet("font-size:18px; font-weight:600;")
         head.addWidget(tt)
         head.addStretch(1)
@@ -1635,13 +1638,6 @@ class AdminWindow(QWidget):
         fields_head.addWidget(lbl_fields)
         fields_head.addStretch(1)
 
-        btn_auto = QPushButton("🎯 Авто-раскладка")
-        btn_auto.setFixedHeight(30)
-        btn_auto.setStyleSheet("color: #93c5fd; font-weight: bold; padding: 0 10px;")
-        btn_auto.setToolTip("Расставить поля по умолчанию (QR слева, текст справа)")
-        btn_auto.clicked.connect(lambda: self._tpl_auto_layout(tab_key))
-        fields_head.addWidget(btn_auto)
-
         btn_add = QPushButton("+")
         btn_add.setFixedSize(40, 30)
         btn_add.setToolTip("Добавить поле")
@@ -1667,7 +1663,7 @@ class AdminWindow(QWidget):
 
         t = QTableWidget(0, 7)
         t.setHorizontalHeaderLabels(
-            ["Поле", "Отображаемый текст", "Обязат.", "Размер текста", "Размер QR", "X, Y", ""]
+            ["Поле", "Подпись", "Обяз.", "Шрифт", "Размер", "X, Y", ""]
         )
         hh = t.horizontalHeader()
         hh.setSectionResizeMode(0, QHeaderView.Interactive)
@@ -1678,32 +1674,19 @@ class AdminWindow(QWidget):
         hh.setSectionResizeMode(5, QHeaderView.Fixed)
         hh.setSectionResizeMode(6, QHeaderView.Fixed)
         t.setColumnWidth(0, 110)
-        t.setColumnWidth(2, 55) # Чуть шире для "Обязат."
-        t.setColumnWidth(3, 110)
+        t.setColumnWidth(2, 45)
+        t.setColumnWidth(3, 70)
         t.setColumnWidth(4, 90)
         t.setColumnWidth(5, 90)
         t.setColumnWidth(6, 38)
-        
         t.verticalHeader().setVisible(True)
         t.verticalHeader().setFixedWidth(26)
         t.verticalHeader().setDefaultSectionSize(32)
-        
         t.setSelectionBehavior(QAbstractItemView.SelectRows)
         t.setSelectionMode(QAbstractItemView.SingleSelection)
         t.setShowGrid(False)
         t.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         t.itemChanged.connect(lambda _: self._tpl_refresh_preview())
-        
-        # Стили для вертикального заголовка (убираем коричневый фон)
-        t.setStyleSheet("""
-            QTableWidget QHeaderView::section:vertical {
-                background-color: #161c24;
-                color: #64748b;
-                border-right: 1px solid #2a3542;
-                border-bottom: 1px solid #2a3542;
-                font-weight: 600;
-            }
-        """)
 
         v.addWidget(t, stretch=1)
 
@@ -1713,6 +1696,7 @@ class AdminWindow(QWidget):
             "w": w_spin, "h": h_spin, "dpi": dpi_combo, "fields": t,
         }
         return tab
+
 
     def _tpl_on_mode_changed(self):
         mode = self.tpl_mode_combo.currentData()
@@ -1741,6 +1725,7 @@ class AdminWindow(QWidget):
             self.tpl_list.selectRow(0)
 
         self._refresh_bindings()
+        self._tpl_populate_shk_combo()
 
     def _on_template_select(self):
         rows = self.tpl_list.selectionModel().selectedRows()
@@ -1805,14 +1790,10 @@ class AdminWindow(QWidget):
                 item_name.setFlags(item_name.flags() & ~Qt.ItemIsEditable)
                 t.setItem(r, 0, item_name)
 
-                label_val = f.get("label", "")
-                if not label_val:
-                    label_val = FIELD_LABELS.get(name, name)
-                t.setItem(r, 1, QTableWidgetItem(label_val))
+                t.setItem(r, 1, QTableWidgetItem(f.get("label", "")))
 
                 chk = QCheckBox()
                 chk.setChecked(bool(f.get("required")))
-                chk.setToolTip("Если стоит галочка, оператор не сможет напечатать этикетку,\nпока это поле не заполнено в базе.")
                 wrap_chk = QWidget()
                 wl = QHBoxLayout(wrap_chk)
                 wl.setContentsMargins(0, 0, 0, 0)
@@ -1824,11 +1805,9 @@ class AdminWindow(QWidget):
                 spin_font.setRange(6, 40)
                 spin_font.setValue(int(f.get("font_size", 12)))
                 spin_font.setAlignment(Qt.AlignCenter)
-                spin_font.setButtonSymbols(QSpinBox.NoButtons)
                 if is_dm:
                     spin_font.setEnabled(False)
                     spin_font.setValue(0)
-                    spin_font.setSpecialValueText("—")
                 spin_font.valueChanged.connect(self._tpl_refresh_preview)
                 t.setCellWidget(r, 3, spin_font)
 
@@ -1838,11 +1817,9 @@ class AdminWindow(QWidget):
                 spin_size.setSuffix(" мм")
                 spin_size.setValue(float(f.get("size", 20)))
                 spin_size.setAlignment(Qt.AlignCenter)
-                spin_size.setButtonSymbols(QDoubleSpinBox.NoButtons)
                 if not is_dm:
                     spin_size.setEnabled(False)
                     spin_size.setValue(0)
-                    spin_size.setSpecialValueText("—")
                 spin_size.valueChanged.connect(self._tpl_refresh_preview)
                 t.setCellWidget(r, 4, spin_size)
 
@@ -1874,6 +1851,7 @@ class AdminWindow(QWidget):
             widgets["w"].blockSignals(False)
             widgets["h"].blockSignals(False)
 
+
     def _current_template(self):
         rows = self.tpl_list.selectionModel().selectedRows()
         if not rows:
@@ -1885,48 +1863,13 @@ class AdminWindow(QWidget):
         return tpls[idx]
 
     def _tpl_add_field(self, tab_key: str):
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Добавить поле на этикетку")
-        dlg.setMinimumWidth(320)
-        layout = QVBoxLayout(dlg)
-        layout.setSpacing(10)
-
-        layout.addWidget(QLabel("Выберите, что вывести на этикетку:"))
-
-        combo = QComboBox()
-        for code in FIELD_PRESETS:
-            label = FIELD_LABELS.get(code, code)
-            combo.addItem(label, code)
-
-        combo.addItem("— Другое (ввести вручную) —", "__custom__")
-        layout.addWidget(combo)
-
-        custom_edit = QLineEdit()
-        custom_edit.setPlaceholderText("Системное имя (например, lot_number)")
-        custom_edit.setVisible(False)
-        layout.addWidget(custom_edit)
-
-        def _on_combo_change(idx):
-            data = combo.itemData(idx)
-            custom_edit.setVisible(data == "__custom__")
-
-        combo.currentIndexChanged.connect(_on_combo_change)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(dlg.accept)
-        buttons.rejected.connect(dlg.reject)
-        layout.addWidget(buttons)
-
-        if dlg.exec() != QDialog.Accepted:
+        name, ok = QInputDialog.getText(
+            self, "Новое поле",
+            "Системное имя (например, country, manufacturer, batch):"
+        )
+        if not ok or not name.strip():
             return
-
-        chosen = combo.currentData()
-        if chosen == "__custom__":
-            name = custom_edit.text().strip().lower().replace(" ", "_")
-            if not name:
-                return
-        else:
-            name = chosen
+        name = name.strip().lower().replace(" ", "_")
 
         widgets = self._tpl_tab_widgets.get(tab_key)
         if not widgets:
@@ -1941,12 +1884,9 @@ class AdminWindow(QWidget):
         item_name = QTableWidgetItem(name)
         item_name.setFlags(item_name.flags() & ~Qt.ItemIsEditable)
         t.setItem(r, 0, item_name)
-
-        human = FIELD_LABELS.get(name, name)
-        t.setItem(r, 1, QTableWidgetItem(human))
+        t.setItem(r, 1, QTableWidgetItem(name))
 
         chk = QCheckBox()
-        chk.setToolTip("Если стоит галочка, оператор не сможет напечатать этикетку,\nпока это поле не заполнено в базе.")
         wrap_chk = QWidget()
         wl = QHBoxLayout(wrap_chk)
         wl.setContentsMargins(0, 0, 0, 0)
@@ -1958,11 +1898,9 @@ class AdminWindow(QWidget):
         spin_font.setRange(6, 40)
         spin_font.setValue(12)
         spin_font.setAlignment(Qt.AlignCenter)
-        spin_font.setButtonSymbols(QSpinBox.NoButtons)
         if is_dm:
             spin_font.setEnabled(False)
             spin_font.setValue(0)
-            spin_font.setSpecialValueText("—")
         spin_font.valueChanged.connect(self._tpl_refresh_preview)
         t.setCellWidget(r, 3, spin_font)
 
@@ -1972,10 +1910,8 @@ class AdminWindow(QWidget):
         spin_size.setSuffix(" мм")
         spin_size.setValue(20 if is_dm else 0)
         spin_size.setAlignment(Qt.AlignCenter)
-        spin_size.setButtonSymbols(QDoubleSpinBox.NoButtons)
         if not is_dm:
             spin_size.setEnabled(False)
-            spin_size.setSpecialValueText("—")
         spin_size.valueChanged.connect(self._tpl_refresh_preview)
         t.setCellWidget(r, 4, spin_size)
 
@@ -2069,14 +2005,9 @@ class AdminWindow(QWidget):
             item_name = QTableWidgetItem(f["name"])
             item_name.setFlags(item_name.flags() & ~Qt.ItemIsEditable)
             t.setItem(r, 0, item_name)
-
-            label_val = f["label"]
-            if not label_val:
-                label_val = FIELD_LABELS.get(f["name"], f["name"])
-            t.setItem(r, 1, QTableWidgetItem(label_val))
+            t.setItem(r, 1, QTableWidgetItem(f["label"]))
 
             chk = QCheckBox(); chk.setChecked(f["required"])
-            chk.setToolTip("Если стоит галочка, оператор не сможет напечатать этикетку,\nпока это поле не заполнено в базе.")
             wrap_chk = QWidget()
             wl = QHBoxLayout(wrap_chk)
             wl.setContentsMargins(0, 0, 0, 0)
@@ -2088,11 +2019,9 @@ class AdminWindow(QWidget):
             spin_font.setRange(6, 40)
             spin_font.setValue(f["font_size"] if f["font_size"] else 12)
             spin_font.setAlignment(Qt.AlignCenter)
-            spin_font.setButtonSymbols(QSpinBox.NoButtons)
             if is_dm:
                 spin_font.setEnabled(False)
                 spin_font.setValue(0)
-                spin_font.setSpecialValueText("—")
             spin_font.valueChanged.connect(self._tpl_refresh_preview)
             t.setCellWidget(r, 3, spin_font)
 
@@ -2102,10 +2031,8 @@ class AdminWindow(QWidget):
             spin_size.setSuffix(" мм")
             spin_size.setValue(f["size"] if f["size"] else (20 if is_dm else 0))
             spin_size.setAlignment(Qt.AlignCenter)
-            spin_size.setButtonSymbols(QDoubleSpinBox.NoButtons)
             if not is_dm:
                 spin_size.setEnabled(False)
-                spin_size.setSpecialValueText("—")
             spin_size.valueChanged.connect(self._tpl_refresh_preview)
             t.setCellWidget(r, 4, spin_size)
 
@@ -2134,61 +2061,6 @@ class AdminWindow(QWidget):
         t.selectRow(new_idx)
         self._tpl_refresh_preview()
 
-    def _tpl_auto_layout(self, tab_key: str):
-        """Автоматически расставляет поля по сетке (QR слева, текст справа)"""
-        widgets = self._tpl_tab_widgets.get(tab_key)
-        if not widgets:
-            return
-        
-        w_mm = widgets["w"].value()
-        h_mm = widgets["h"].value()
-        dpi = int(widgets["dpi"].currentText())
-        
-        # Переводим мм в точки принтера
-        w_dots = int(round(w_mm / 25.4 * dpi))
-        h_dots = int(round(h_mm / 25.4 * dpi))
-        
-        t = widgets["fields"]
-        t.blockSignals(True)
-        
-        qr_size_mm = min(w_mm, h_mm) * 0.5
-        qr_size_dots = int(round(qr_size_mm / 25.4 * dpi))
-        
-        qr_x = 5
-        qr_y = int((h_dots - qr_size_dots) / 2) # Центрируем по вертикали
-        if qr_y < 0: qr_y = 0
-        
-        text_x = qr_x + qr_size_dots + 20 # Отступ от QR
-        text_y = 10
-        line_height = 30 # Шаг между строками текста
-        
-        # Проходим по всем строкам таблицы
-        for r in range(t.rowCount()):
-            name = t.item(r, 0).text() if t.item(r, 0) else ""
-            
-            item_xy = t.item(r, 5)
-            if not item_xy:
-                item_xy = QTableWidgetItem()
-                t.setItem(r, 5, item_xy)
-                
-            if name == "dataMatrix":
-                # QR-код ставим слева
-                item_xy.setText(f"X:{qr_x} Y:{qr_y}")
-                # Обновляем его размер в спинбоксе
-                spin = t.cellWidget(r, 4)
-                if spin:
-                    spin.blockSignals(True)
-                    spin.setValue(round(qr_size_mm, 0))
-                    spin.blockSignals(False)
-            else:
-                # Текст ставим справа друг под другом
-                item_xy.setText(f"X:{text_x} Y:{text_y}")
-                text_y += line_height
-                
-        t.blockSignals(False)
-        self._tpl_refresh_preview()
-        self.toast.show_message("Поля расставлены автоматически", "ok")
-
 
     def _collect_fields_from_table(self, tab_key: str) -> list:
         widgets = self._tpl_tab_widgets.get(tab_key)
@@ -2200,13 +2072,6 @@ class AdminWindow(QWidget):
         for r in range(t.rowCount()):
             name = t.item(r, 0).text() if t.item(r, 0) else ""
             label = t.item(r, 1).text() if t.item(r, 1) else ""
-
-            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: если подпись совпадает с человеческим названием,
-            # значит пользователь не менял её вручную — сохраняем пустую подпись, чтобы 
-            # при печати не было дублирования вроде "Наименование товара: Наушники"
-            human = FIELD_LABELS.get(name)
-            if human and label == human:
-                label = ""
 
             wrap = t.cellWidget(r, 2)
             chk = wrap.findChild(QCheckBox) if wrap else None
@@ -2360,190 +2225,56 @@ class AdminWindow(QWidget):
             self.toast.show_message(f"Ошибка: {result['info']}", "err")
 
     def _tpl_create(self):
-        """Создать шаблон из готового пресета."""
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Новый шаблон этикетки")
-        dlg.setMinimumWidth(400)
-        layout = QVBoxLayout(dlg)
-        layout.setSpacing(12)
-
-        layout.addWidget(QLabel("Выберите готовый шаблон:"))
-
-        combo = QComboBox()
-        combo.addItem("Электроника (58×40 мм)", "electronics")
-        combo.addItem("Обувь (58×40 мм)", "shoes")
-        combo.addItem("Одежда (58×40 мм)", "clothing")
-        combo.addItem("Только DataMatrix (30×30 мм)", "only_dm")
-        combo.addItem("Пустой шаблон", "empty")
-        layout.addWidget(combo)
-
-        name_edit = QLineEdit()
-        name_edit.setPlaceholderText("Название шаблона (например, «Электроника 2»)")
-        layout.addWidget(name_edit)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(dlg.accept)
-        buttons.rejected.connect(dlg.reject)
-        layout.addWidget(buttons)
-
-        if dlg.exec() != QDialog.Accepted:
+        code, ok = QInputDialog.getText(
+            self, "Новый шаблон",
+            "Код (латиница, без пробелов, уникальный):"
+        )
+        if not ok or not code.strip():
             return
+        code = code.strip().lower().replace(" ", "_")
 
-        preset_key = combo.currentData()
-        name = name_edit.text().strip()
-        if not name:
-            name = combo.currentText()
+        name, ok = QInputDialog.getText(self, "Новый шаблон", "Название:")
+        if not ok or not name.strip():
+            return
+        name = name.strip()
 
-        # Генерируем уникальный код для шаблона
-        base_code = preset_key
-        code = base_code
-        i = 2
-        while self.store.get_template(code):
-            code = f"{base_code}_{i}"
-            i += 1
-
-        # Готовые конфигурации пресетов
-        presets = {
-            "electronics": {
-                "print_mode": "combined",
-                "combined": {
-                    "w": 58, "h": 40, "dpi": 203,
-                    "fields": [
-                        {"name": "dataMatrix", "label": "", "required": True,
-                         "font_size": 0, "x": 5, "y": 5},
-                        {"name": "name_ru", "label": "", "required": True,
-                         "font_size": 13, "x": 100, "y": 5},
-                        {"name": "model", "label": "Модель", "required": False,
-                         "font_size": 11, "x": 100, "y": 25},
-                        {"name": "importer", "label": "Импортёр", "required": True,
-                         "font_size": 10, "x": 100, "y": 40},
-                    ],
-                },
-                "cz": {
-                    "w": 30, "h": 30, "dpi": 203,
-                    "fields": [
-                        {"name": "dataMatrix", "label": "", "required": True,
-                         "font_size": 0, "x": 5, "y": 5},
-                    ],
-                },
-                "label": {
-                    "w": 58, "h": 40, "dpi": 203,
-                    "fields": [
-                        {"name": "name_ru", "label": "", "required": True,
-                         "font_size": 13, "x": 5, "y": 5},
-                        {"name": "model", "label": "Модель", "required": False,
-                         "font_size": 11, "x": 5, "y": 25},
-                        {"name": "importer", "label": "Импортёр", "required": True,
-                         "font_size": 10, "x": 5, "y": 40},
-                    ],
-                },
+        config = {
+            "print_mode": "combined",
+            "combined": {
+                "w": 58, "h": 40, "dpi": 203,
+                "fields": [
+                    {"name": "dataMatrix", "label": "", "required": True,
+                     "font_size": 0, "x": 5, "y": 5},
+                    {"name": "name_ru", "label": "", "required": True,
+                     "font_size": 13, "x": 100, "y": 5},
+                    {"name": "importer", "label": "Импортёр",
+                     "required": True, "font_size": 10, "x": 100, "y": 40},
+                ],
             },
-            "shoes": {
-                "print_mode": "separate",
-                "combined": {
-                    "w": 58, "h": 40, "dpi": 203,
-                    "fields": [
-                        {"name": "dataMatrix", "label": "", "required": True,
-                         "font_size": 0, "x": 5, "y": 5},
-                        {"name": "name_ru", "label": "", "required": True,
-                         "font_size": 13, "x": 100, "y": 5},
-                    ],
-                },
-                "cz": {
-                    "w": 30, "h": 30, "dpi": 203,
-                    "fields": [
-                        {"name": "dataMatrix", "label": "", "required": True,
-                         "font_size": 0, "x": 5, "y": 5},
-                    ],
-                },
-                "label": {
-                    "w": 58, "h": 40, "dpi": 203,
-                    "fields": [
-                        {"name": "name_ru", "label": "", "required": True,
-                         "font_size": 13, "x": 5, "y": 5},
-                        {"name": "material", "label": "Материал", "required": True,
-                         "font_size": 11, "x": 5, "y": 25},
-                        {"name": "size_eu", "label": "Размер EU", "required": True,
-                         "font_size": 11, "x": 5, "y": 40},
-                        {"name": "importer", "label": "Импортёр", "required": True,
-                         "font_size": 10, "x": 5, "y": 55},
-                    ],
-                },
+            "cz": {
+                "w": 30, "h": 30, "dpi": 203,
+                "fields": [
+                    {"name": "dataMatrix", "label": "", "required": True,
+                     "font_size": 0, "x": 5, "y": 5},
+                ],
             },
-            "clothing": {
-                "print_mode": "separate",
-                "combined": {
-                    "w": 58, "h": 40, "dpi": 203,
-                    "fields": [
-                        {"name": "dataMatrix", "label": "", "required": True,
-                         "font_size": 0, "x": 5, "y": 5},
-                        {"name": "name_ru", "label": "", "required": True,
-                         "font_size": 13, "x": 100, "y": 5},
-                    ],
-                },
-                "cz": {
-                    "w": 30, "h": 30, "dpi": 203,
-                    "fields": [
-                        {"name": "dataMatrix", "label": "", "required": True,
-                         "font_size": 0, "x": 5, "y": 5},
-                    ],
-                },
-                "label": {
-                    "w": 58, "h": 40, "dpi": 203,
-                    "fields": [
-                        {"name": "name_ru", "label": "", "required": True,
-                         "font_size": 13, "x": 5, "y": 5},
-                        {"name": "composition", "label": "Состав", "required": True,
-                         "font_size": 11, "x": 5, "y": 25},
-                        {"name": "importer", "label": "Импортёр", "required": True,
-                         "font_size": 10, "x": 5, "y": 40},
-                    ],
-                },
-            },
-            "only_dm": {
-                "print_mode": "combined",
-                "combined": {
-                    "w": 30, "h": 30, "dpi": 203,
-                    "fields": [
-                        {"name": "dataMatrix", "label": "", "required": True,
-                         "font_size": 0, "x": 5, "y": 5},
-                    ],
-                },
-                "cz": {
-                    "w": 30, "h": 30, "dpi": 203,
-                    "fields": [
-                        {"name": "dataMatrix", "label": "", "required": True,
-                         "font_size": 0, "x": 5, "y": 5},
-                    ],
-                },
-                "label": {
-                    "w": 30, "h": 30, "dpi": 203,
-                    "fields": [],
-                },
-            },
-            "empty": {
-                "print_mode": "combined",
-                "combined": {"w": 58, "h": 40, "dpi": 203, "fields": []},
-                "cz": {"w": 30, "h": 30, "dpi": 203, "fields": []},
-                "label": {"w": 58, "h": 40, "dpi": 203, "fields": []},
+            "label": {
+                "w": 58, "h": 40, "dpi": 203,
+                "fields": [
+                    {"name": "name_ru", "label": "", "required": True,
+                     "font_size": 13, "x": 5, "y": 5},
+                    {"name": "importer", "label": "Импортёр",
+                     "required": True, "font_size": 10, "x": 5, "y": 25},
+                ],
             },
         }
 
-        config = presets.get(preset_key, presets["electronics"])
-
-        is_default = (len(self.store.list_templates()) == 0)
-
         result = self.store.create_template(
-            code=code, name=name, config=config, is_default=is_default
+            code=code, name=name, config=config,
         )
         if result["ok"]:
             self.toast.show_message(result["info"], "ok")
             self._refresh_templates()
-            # Выбираем только что созданный шаблон
-            for i, tpl in enumerate(self.store.list_templates()):
-                if tpl["code"] == code:
-                    self.tpl_list.selectRow(i)
-                    break
         else:
             self.toast.show_message(f"Ошибка: {result['info']}", "err")
 
@@ -2633,20 +2364,50 @@ class AdminWindow(QWidget):
 
         card = QFrame()
         card.setObjectName("card")
-        card.setFixedWidth(360)
+        card.setFixedWidth(375)
 
         v = QVBoxLayout(card)
         v.setContentsMargins(14, 14, 14, 14)
-        v.setSpacing(10)
+        v.setSpacing(8)
 
-        title = QLabel("ПРЕДПРОСМОТР ЭТИКЕТКИ")
+        title = QLabel("ПРЕДПРОСМОТР ЭТИКЕТКИ (РЕАЛЬНЫЙ ДМ ПО ШК)")
         title.setStyleSheet(
-            "color:#8b97a6; font-size:11px; font-weight:600; letter-spacing:1.5px;"
+            "color:#8b97a6; font-size:11px; font-weight:600; letter-spacing:1.2px;"
         )
         v.addWidget(title)
 
+        shk_lbl = QLabel("ШК товара (выберите или отсканируйте для подстановки ДМ):")
+        shk_lbl.setStyleSheet("color:#94a3b8; font-size:11px;")
+        v.addWidget(shk_lbl)
+
+        shk_row = QHBoxLayout()
+        shk_row.setSpacing(6)
+        self.tpl_shk_combo = QComboBox()
+        self.tpl_shk_combo.setEditable(True)
+        self.tpl_shk_combo.setInsertPolicy(QComboBox.NoInsert)
+        if self.tpl_shk_combo.lineEdit():
+            self.tpl_shk_combo.lineEdit().setPlaceholderText("Скан ШК (EAN-13) или GTIN...")
+            self.tpl_shk_combo.lineEdit().returnPressed.connect(self._tpl_on_shk_selected)
+        self.tpl_shk_combo.activated.connect(lambda _: self._tpl_on_shk_selected())
+        shk_row.addWidget(self.tpl_shk_combo, stretch=1)
+
+        btn_apply_shk = QPushButton("🔍 ДМ")
+        btn_apply_shk.setToolTip("Подтянуть настоящий DataMatrix из базы для указанного ШК")
+        btn_apply_shk.setFixedWidth(64)
+        btn_apply_shk.clicked.connect(self._tpl_on_shk_selected)
+        shk_row.addWidget(btn_apply_shk)
+        v.addLayout(shk_row)
+
+        self.tpl_linked_dm_label = QLabel("ДМ: автовыбор из загруженной базы кодов")
+        self.tpl_linked_dm_label.setWordWrap(True)
+        self.tpl_linked_dm_label.setStyleSheet(
+            "color:#34d399; font-family:Consolas,monospace; font-size:10px; "
+            "background:#0d1117; border:1px solid #1e293b; border-radius:6px; padding:5px;"
+        )
+        v.addWidget(self.tpl_linked_dm_label)
+
         self.label_preview = LabelPreviewWidget(self)
-        self.label_preview.setMinimumHeight(340)
+        self.label_preview.setMinimumHeight(320)
         v.addWidget(self.label_preview, stretch=1)
 
         self.tpl_preview_size = QLabel("")
@@ -2658,6 +2419,86 @@ class AdminWindow(QWidget):
 
         v.addStretch(1)
         return card
+
+    def _tpl_populate_shk_combo(self):
+        """Заполняет выпадающий список ШК/GTIN в конструкторе шаблонов реальными связками ШК -> ДМ из БД."""
+        if not hasattr(self, "tpl_shk_combo"):
+            return
+        current_val = self.tpl_shk_combo.currentData() or self.tpl_shk_combo.currentText().strip()
+        self.tpl_shk_combo.blockSignals(True)
+        try:
+            self.tpl_shk_combo.clear()
+            self.tpl_shk_combo.addItem("⚡ Авто (первый доступный ДМ из базы)", "")
+            import db
+            with db.get_conn() as conn:
+                rows = conn.execute(
+                    "SELECT gm.foreign_gtin, gm.cz_gtin, "
+                    "       (SELECT COUNT(*) FROM pool_codes pc WHERE pc.gtin = gm.cz_gtin AND pc.used = 0) AS free_cnt, "
+                    "       (SELECT MAX(pc.import_batch) FROM pool_codes pc WHERE pc.gtin = gm.cz_gtin) AS batch_name "
+                    "FROM gtin_map gm ORDER BY gm.foreign_gtin LIMIT 200"
+                ).fetchall()
+                seen_gtins = set()
+                for r in rows:
+                    shk = (r["foreign_gtin"] or "").strip()
+                    cz_gtin = (r["cz_gtin"] or "").strip()
+                    pname = (r["batch_name"] or "").strip()
+                    cnt = r["free_cnt"] or 0
+                    seen_gtins.add(cz_gtin)
+                    label = f"ШК {shk} → GTIN {cz_gtin}"
+                    if pname:
+                        label += f" ({pname})"
+                    label += f" [{cnt} ДМ]"
+                    self.tpl_shk_combo.addItem(label, shk)
+
+                pool_gtins = conn.execute(
+                    "SELECT gtin, COUNT(*) AS cnt FROM pool_codes "
+                    "WHERE gtin IS NOT NULL AND gtin != '' "
+                    "GROUP BY gtin ORDER BY cnt DESC LIMIT 100"
+                ).fetchall()
+                for pr in pool_gtins:
+                    g = (pr["gtin"] or "").strip()
+                    if g and g not in seen_gtins:
+                        self.tpl_shk_combo.addItem(f"GTIN {g} [{pr['cnt']} ДМ в пуле]", g)
+        except Exception as e:
+            log.error("_tpl_populate_shk_combo: %s", e)
+        finally:
+            self.tpl_shk_combo.blockSignals(False)
+
+        if current_val:
+            idx = self.tpl_shk_combo.findData(current_val)
+            if idx >= 0:
+                self.tpl_shk_combo.setCurrentIndex(idx)
+        self._tpl_update_linked_dm_status()
+
+    def _tpl_on_shk_selected(self):
+        if not hasattr(self, "tpl_shk_combo") or not hasattr(self, "label_preview"):
+            return
+        shk = self.tpl_shk_combo.currentData()
+        if shk is None or shk == "":
+            raw_txt = self.tpl_shk_combo.currentText().strip()
+            if raw_txt and not raw_txt.startswith("⚡"):
+                # Извлекаем цифры ШК, если пользователь ввёл/отсканировал вручную
+                import re
+                m = re.search(r"(\d{8,14})", raw_txt)
+                shk = m.group(1) if m else raw_txt
+            else:
+                shk = ""
+        self.label_preview.set_shk_for_preview(shk)
+        self._tpl_update_linked_dm_status()
+
+    def _tpl_update_linked_dm_status(self):
+        if not hasattr(self, "tpl_linked_dm_label") or not hasattr(self, "label_preview"):
+            return
+        try:
+            dm_code, sn_val, gtin_val, matched_shk = self.label_preview._resolve_sample_dm()
+            short_dm = dm_code[:38] + "..." if len(dm_code) > 38 else dm_code
+            self.tpl_linked_dm_label.setText(
+                f"ШК/GTIN: {matched_shk or gtin_val}\n"
+                f"SN: {sn_val}\n"
+                f"ДМ ({len(dm_code)} симв.): {short_dm}"
+            )
+        except Exception:
+            pass
 
 
     def _tpl_refresh_preview(self):
@@ -2845,6 +2686,11 @@ class AdminWindow(QWidget):
         ])
         vg.addWidget(self.gmap_table, stretch=1)
         self.pool_tabs.addTab(tab_gmap, "🔗 Привязка ШК товара ↔ GTIN ЧЗ (gtin_map)")
+
+        # ---------------- ВКЛАДКА 3: ИСТОРИЯ ИМПОРТОВ ----------------
+        tab_imp = self._page_imports()
+        self.pool_tabs.addTab(tab_imp, "📥 История импортов")
+        self.pool_tabs.currentChanged.connect(lambda idx: self._refresh_imports() if idx == 2 else None)
 
         v.addWidget(self.pool_tabs, stretch=1)
         return w
@@ -3307,16 +3153,16 @@ class AdminWindow(QWidget):
 
 
     # ==================================================================
-    # SYNC (обмен с точками)
+    # SYNC (MS SQL Server <-> Мастер-ПК [связующее звено] <-> Обычный ПК)
     # ==================================================================
     def _page_sync(self) -> QWidget:
         w = QWidget()
         v = QVBoxLayout(w)
         v.setContentsMargins(24, 20, 24, 20)
-        v.setSpacing(14)
+        v.setSpacing(12)
 
         head = QHBoxLayout()
-        tt = QLabel("Синхронизация с точками")
+        tt = QLabel("Синхронизация: MS SQL Сервер ↔ Мастер-ПК (шлюз) ↔ Рабочие ПК")
         tt.setStyleSheet("font-size:18px; font-weight:600;")
         head.addWidget(tt)
         head.addStretch(1)
@@ -3324,28 +3170,58 @@ class AdminWindow(QWidget):
         btn_refresh = QPushButton("🔄 Обновить")
         btn_refresh.clicked.connect(self._refresh_sync)
         head.addWidget(btn_refresh)
-
         v.addLayout(head)
 
         sub = QLabel(
-            "Обмен через общую папку. Мастер выгружает коды в "
-            "master/outbox/to_<точка>.json, забирает отчёты из "
-            "master/inbox/from_<точка>.json."
+            "Все коды (ШК и ДМ) хранятся на MS SQL сервере. Мастер-ПК выступает связующим звеном (шлюзом) "
+            "между сервером и обычными ПК: обычный ПК нажимает кнопку запроса, выбирает нужный именованный "
+            "JSON-файл партии, и этот файл вытягивается с сервера через Мастер-ПК на обычный ПК."
         )
         sub.setStyleSheet("color:#8b97a6; font-size:12px;")
         sub.setWordWrap(True)
         v.addWidget(sub)
 
-        # --- Папка обмена ---
+        # --- Карточка 1: Роль этого компьютера (Мастер-ПК или Обычный ПК) ---
+        role_card = QFrame(); role_card.setObjectName("card")
+        rc = QHBoxLayout(role_card)
+        rc.setContentsMargins(16, 12, 16, 12)
+        rc.setSpacing(10)
+
+        rc.addWidget(QLabel("Роль этого ПК:"))
+        self.sync_role_combo = QComboBox()
+        self.sync_role_combo.addItem("👑 Мастер-ПК (Связующее звено между MS SQL сервером и обычными ПК)", "master")
+        self.sync_role_combo.addItem("💻 Обычный ПК (Рабочий пост · вытягивает коды с сервера через Мастер-ПК)", "worker")
+        self.sync_role_combo.setMinimumWidth(420)
+        rc.addWidget(self.sync_role_combo)
+
+        rc.addWidget(QLabel("Имя ПК:"))
+        self.sync_pc_name_edit = QLineEdit()
+        self.sync_pc_name_edit.setPlaceholderText("Например: POST-01 или MASTER-PC")
+        self.sync_pc_name_edit.setFixedWidth(150)
+        rc.addWidget(self.sync_pc_name_edit)
+
+        rc.addWidget(QLabel("Целевая точка:"))
+        self.sync_target_point_combo = QComboBox()
+        self.sync_target_point_combo.setMinimumWidth(140)
+        rc.addWidget(self.sync_target_point_combo)
+
+        btn_save_role = QPushButton("💾 Применить роль")
+        btn_save_role.setProperty("primary", True)
+        btn_save_role.clicked.connect(self._sync_save_pc_role)
+        rc.addWidget(btn_save_role)
+        rc.addStretch(1)
+        v.addWidget(role_card)
+
+        # --- Карточка 2: Транзитный канал связи через Мастер-ПК ---
         folder_card = QFrame(); folder_card.setObjectName("card")
         fc = QHBoxLayout(folder_card)
-        fc.setContentsMargins(18, 12, 18, 12)
+        fc.setContentsMargins(16, 10, 16, 10)
         fc.setSpacing(8)
 
-        fc.addWidget(QLabel("Папка обмена:"))
+        fc.addWidget(QLabel("Транзитный канал Мастер-ПК (мост к серверу):"))
         self.sync_folder_edit = QLineEdit()
         self.sync_folder_edit.setPlaceholderText(
-            r"например, \\server\share\ChestZn или C:\ChestZn\sync"
+            r"например, \MASTER-PC\ChestZnSync или локальный путь транзита"
         )
         fc.addWidget(self.sync_folder_edit, stretch=1)
 
@@ -3354,47 +3230,78 @@ class AdminWindow(QWidget):
         fc.addWidget(btn_browse)
 
         btn_save_folder = QPushButton("💾 Сохранить")
-        btn_save_folder.setProperty("primary", True)
         btn_save_folder.clicked.connect(self._sync_save_folder)
         fc.addWidget(btn_save_folder)
 
         btn_open_folder = QPushButton("↗ Открыть")
         btn_open_folder.clicked.connect(self._sync_open_folder)
         fc.addWidget(btn_open_folder)
-
         v.addWidget(folder_card)
 
-        # --- Кнопки операций ---
-        ops = QHBoxLayout()
-        ops.setSpacing(8)
+        # --- Карточка 3: Операции Обычного ПК и шлюза Мастер-ПК ---
+        ops_card = QFrame(); ops_card.setObjectName("card")
+        ops_layout = QVBoxLayout(ops_card)
+        ops_layout.setContentsMargins(16, 12, 16, 12)
+        ops_layout.setSpacing(10)
 
-        btn_export_all = QPushButton("⬆ Выгрузить коды всем точкам")
-        btn_export_all.setProperty("primary", True)
-        btn_export_all.clicked.connect(self._sync_export_all)
-        ops.addWidget(btn_export_all)
+        # Главная кнопка для Обычного ПК (и старшего смены)
+        worker_row = QHBoxLayout()
+        worker_row.setSpacing(10)
 
-        btn_import_results = QPushButton("⬇ Забрать отчёты от всех точек")
-        btn_import_results.setProperty("primary", True)
+        self.btn_open_json_picker = QPushButton(
+            "📥 Запросить коды с сервера (выбрать JSON-файл через Мастер-ПК)..."
+        )
+        self.btn_open_json_picker.setProperty("primary", True)
+        self.btn_open_json_picker.setMinimumHeight(38)
+        self.btn_open_json_picker.setStyleSheet(
+            "QPushButton { background:#2563eb; color:#ffffff; font-weight:700; font-size:13px; "
+            "padding:8px 18px; border-radius:8px; } "
+            "QPushButton:hover { background:#1d4ed8; }"
+        )
+        self.btn_open_json_picker.clicked.connect(self._sync_open_json_package_dialog)
+        worker_row.addWidget(self.btn_open_json_picker, stretch=2)
+
+        self.btn_worker_send_report = QPushButton(
+            "📤 Отправить напечатанные коды на сервер (через Мастер-ПК)"
+        )
+        self.btn_worker_send_report.setMinimumHeight(38)
+        self.btn_worker_send_report.clicked.connect(self._sync_worker_send_report)
+        worker_row.addWidget(self.btn_worker_send_report, stretch=1)
+        ops_layout.addLayout(worker_row)
+
+        # Панель шлюза Мастер-ПК
+        self.master_ops_widget = QWidget()
+        master_row = QHBoxLayout(self.master_ops_widget)
+        master_row.setContentsMargins(0, 0, 0, 0)
+        master_row.setSpacing(8)
+
+        btn_pull_sql_pkgs = QPushButton("🗄 Запросить с MS SQL сервера список партий (обновить шлюз Мастер-ПК)")
+        btn_pull_sql_pkgs.setProperty("primary", True)
+        btn_pull_sql_pkgs.clicked.connect(self._sync_master_pull_sql_packages)
+        master_row.addWidget(btn_pull_sql_pkgs)
+
+        btn_import_results = QPushButton("⬆ Переслать отчёты точек через Мастер-ПК на MS SQL сервер")
         btn_import_results.clicked.connect(self._sync_import_results)
-        ops.addWidget(btn_import_results)
+        master_row.addWidget(btn_import_results)
 
-        btn_full = QPushButton("🔁 Полный цикл")
+        btn_full = QPushButton("🔁 Полный цикл транзита (Сервер ↔ Мастер-ПК ↔ Точки)")
         btn_full.clicked.connect(self._sync_full_cycle)
-        ops.addWidget(btn_full)
+        master_row.addWidget(btn_full)
+        master_row.addStretch(1)
 
-        ops.addStretch(1)
-        v.addLayout(ops)
+        ops_layout.addWidget(self.master_ops_widget)
+        v.addWidget(ops_card)
 
         # --- Таблица точек ---
         self.sync_table = table([
-            "Точка", "Название", "Последняя выгрузка",
-            "Последний отчёт от точки", "Последний приём"
+            "Точка", "Название", "Последний запрос с сервера",
+            "Последний отчёт от точки", "Переслано на сервер"
         ])
-        self.sync_table.setMinimumHeight(220)
+        self.sync_table.setMinimumHeight(180)
         v.addWidget(self.sync_table, stretch=1)
 
         # --- Лог ---
-        log_lbl = QLabel("ЖУРНАЛ ОБМЕНА")
+        log_lbl = QLabel("ЖУРНАЛ ТРАНЗИТА (MS SQL СЕРВЕР ↔ МАСТЕР-ПК ↔ ОБЫЧНЫЙ ПК)")
         log_lbl.setStyleSheet(
             "color:#8b97a6; font-size:11px; font-weight:600; "
             "letter-spacing:1.5px;"
@@ -3403,7 +3310,7 @@ class AdminWindow(QWidget):
 
         self.sync_log = QPlainTextEdit()
         self.sync_log.setReadOnly(True)
-        self.sync_log.setMinimumHeight(160)
+        self.sync_log.setMinimumHeight(130)
         self.sync_log.setStyleSheet(
             "background:#0d1117; color:#c9d1d9; "
             "font-family:Consolas,monospace; font-size:12px; "
@@ -3418,12 +3325,59 @@ class AdminWindow(QWidget):
         stamp = datetime.now().strftime("%H:%M:%S")
         self.sync_log.appendPlainText(f"[{stamp}] {text}")
 
+    def _sync_save_pc_role(self):
+        role = self.sync_role_combo.currentData() or "master"
+        pc_name = self.sync_pc_name_edit.text().strip()
+        target_pt = self.sync_target_point_combo.currentData() or "T-01"
+        sync_mod.set_pc_role(self.store, role, pc_name)
+        try:
+            self.store.set_setting("worker_point_id", target_pt)
+        except Exception:
+            pass
+        self._apply_pc_role_ui()
+        self._refresh_sync()
+        role_title = "👑 Мастер-ПК (шлюз к серверу)" if role == "master" else "💻 Обычный ПК (Рабочий пост)"
+        self._sync_log_write(f"Установлена роль: {role_title} ({sync_mod.get_pc_node_name(self.store)}), точка: {target_pt}")
+        self.toast.show_message(f"Режим сохранён: {role_title}", "ok")
+
     def _refresh_sync(self):
         try:
             folder = sync_mod.get_sync_folder(self.store)
         except Exception:
             folder = sync_mod._default_folder()
         self.sync_folder_edit.setText(str(folder))
+
+        role = sync_mod.get_pc_role(self.store)
+        pc_name = sync_mod.get_pc_node_name(self.store)
+        if hasattr(self, "sync_role_combo"):
+            idx = self.sync_role_combo.findData(role)
+            if idx >= 0:
+                self.sync_role_combo.setCurrentIndex(idx)
+        if hasattr(self, "sync_pc_name_edit"):
+            self.sync_pc_name_edit.setText(pc_name)
+        if hasattr(self, "master_ops_widget"):
+            self.master_ops_widget.setVisible(role == "master")
+
+        if hasattr(self, "sync_target_point_combo"):
+            saved_pt = ""
+            try:
+                saved_pt = self.store.get_setting("worker_point_id") or ""
+            except Exception:
+                pass
+            self.sync_target_point_combo.blockSignals(True)
+            self.sync_target_point_combo.clear()
+            pts = getattr(self.store, "points", []) or []
+            for p in pts:
+                pid = p.get("id", "T-01")
+                pname = p.get("name", pid)
+                self.sync_target_point_combo.addItem(f"{pid} — {pname}", pid)
+            if self.sync_target_point_combo.count() == 0:
+                self.sync_target_point_combo.addItem("T-01 — Основной пост", "T-01")
+            if saved_pt:
+                pidx = self.sync_target_point_combo.findData(saved_pt)
+                if pidx >= 0:
+                    self.sync_target_point_combo.setCurrentIndex(pidx)
+            self.sync_target_point_combo.blockSignals(False)
 
         t = self.sync_table
         t.setRowCount(0)
@@ -3447,7 +3401,7 @@ class AdminWindow(QWidget):
             sync_mod._default_folder()
         )
         path = QFileDialog.getExistingDirectory(
-            self, "Выберите папку обмена", current
+            self, "Выберите транзитную папку шлюза Мастер-ПК", current
         )
         if path:
             self.sync_folder_edit.setText(path)
@@ -3455,27 +3409,28 @@ class AdminWindow(QWidget):
     def _sync_save_folder(self):
         path = self.sync_folder_edit.text().strip()
         if not path:
-            self.toast.show_message("Укажите путь к папке", "warn")
+            self.toast.show_message("Укажите путь к транзитной папке", "warn")
             return
         try:
-            from pathlib import Path
-            folder = Path(path)
+            from pathlib import Path as _Path
+            folder = _Path(path)
             sync_mod.ensure_layout(folder)
         except Exception as e:
             self.toast.show_message(f"Не удалось создать папки: {e}", "err")
             return
         self.store.set_setting("sync_folder", path)
-        self.toast.show_message("Папка обмена сохранена", "ok")
-        self._sync_log_write(f"Папка обмена: {path}")
+        self.toast.show_message("Транзитный канал Мастер-ПК сохранён", "ok")
+        self._sync_log_write(f"Транзитный канал Мастер-ПК: {path}")
         self._refresh_sync()
 
     def _sync_open_folder(self):
         import os
-        from pathlib import Path
-        folder = Path(self.sync_folder_edit.text().strip()
-                      or sync_mod._default_folder())
+        from pathlib import Path as _Path
+        folder = _Path(
+            self.sync_folder_edit.text().strip() or sync_mod._default_folder()
+        )
         try:
-            folder.mkdir(parents=True, exist_ok=True)
+            sync_mod.ensure_layout(folder)
             os.startfile(str(folder))
         except Exception as e:
             self.toast.show_message(f"Не удалось открыть: {e}", "err")
@@ -3505,11 +3460,262 @@ class AdminWindow(QWidget):
         self._refresh_sync()
 
     def _sync_full_cycle(self):
-        self._sync_log_write("── Полный цикл ──")
+        self._sync_log_write("── Полный цикл транзита (MS SQL Сервер ↔ Мастер-ПК ↔ Обычные ПК) ──")
         self._sync_export_all()
         self._sync_import_results()
         self._refresh_sync()
 
+    def _sync_master_pull_sql_packages(self):
+        """Шлюз Мастер-ПК: запросить актуальные партии с MS SQL Server и подготовить транзитные JSON-файлы (без сохранения в БД Мастер-ПК)."""
+        try:
+            res = sync_mod.pull_packages_from_mssql_via_master(
+                self.store,
+                save_to_master_db=False,
+            )
+        except Exception as e:
+            self._sync_log_write(f"ОШИБКА связи с MS SQL: {e}")
+            self.toast.show_message(f"Ошибка связи с сервером: {e}", "err")
+            return
+
+        self._sync_log_write(res.get("info", ""))
+        if res.get("ok"):
+            self.toast.show_message(
+                f"На сервере доступно JSON-пакетов: {len(res.get('packages', []))} ({res.get('total_codes', 0)} кодов)",
+                "ok"
+            )
+            self._refresh_sync()
+        else:
+            self.toast.show_message(res.get("info", "Не удалось получить список пакетов с сервера"), "warn")
+
+    def _sync_master_create_named_package(self):
+        """Совместимость: обновляет витрину пакетов с MS SQL сервера через Мастер-ПК."""
+        self._sync_master_pull_sql_packages()
+
+    def _sync_worker_send_report(self):
+        """Обычный ПК: отправить отчёт о напечатанных кодах через Мастер-ПК на MS SQL сервер."""
+        point_id = "T-01"
+        if hasattr(self, "sync_target_point_combo") and self.sync_target_point_combo.currentData():
+            point_id = self.sync_target_point_combo.currentData()
+        try:
+            res = sync_mod.export_results_from_point(self.store, point_id)
+            self._sync_log_write(res.get("info", ""))
+            self.toast.show_message(res.get("info", "Отчёт отправлен на сервер"), "ok" if res.get("ok") else "warn")
+            self._refresh_sync()
+        except Exception as e:
+            self._sync_log_write(f"ОШИБКА отправки отчёта на сервер: {e}")
+            self.toast.show_message(f"Ошибка: {e}", "err")
+
+    def _sync_open_json_package_dialog(self):
+        """
+        Открывает окно выбора JSON-файла с кодами, хранящимися на MS SQL сервере.
+        При открытии окна автоматически идёт запрос к MS SQL серверу через Мастер-ПК,
+        раскрывается список понятных старшему смены JSON-файлов, и выбранный файл
+        вытягивается с сервера через Мастер-ПК на обычный ПК.
+        """
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Запрос кодов с MS SQL сервера (через связующее звено Мастер-ПК)")
+        dlg.resize(980, 600)
+
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(18, 16, 18, 16)
+        lay.setSpacing(10)
+
+        hdr = QLabel("Выберите JSON-файл с кодами на сервере для отправки через Мастер-ПК на этот компьютер")
+        hdr.setStyleSheet("font-size:16px; font-weight:700;")
+        lay.addWidget(hdr)
+
+        sub = QLabel(
+            "Все коды хранятся на MS SQL сервере. В списке ниже показаны доступные на сервере JSON-файлы "
+            "с понятными для старшего смены названиями (Заказ / Товар / ШК / Количество ДМ). "
+            "Выберите нужный файл — он будет вытянут с сервера и отправлен через Мастер-ПК на этот ПК."
+        )
+        sub.setWordWrap(True)
+        sub.setStyleSheet("color:#8b97a6; font-size:12px;")
+        lay.addWidget(sub)
+
+        top_bar = QHBoxLayout()
+        top_bar.setSpacing(8)
+
+        top_bar.addWidget(QLabel("Поиск по заказу / ШК:"))
+        search_edit = QLineEdit()
+        search_edit.setPlaceholderText("Введите название заказа, товар или ШК (например: 4607001234567)...")
+        top_bar.addWidget(search_edit, stretch=1)
+
+        btn_refresh_list = QPushButton("🔄 Обновить список с сервера (через Мастер-ПК)")
+        top_bar.addWidget(btn_refresh_list)
+        lay.addLayout(top_bar)
+
+        pkg_table = table([
+            "Имя JSON-файла на сервере",
+            "Партия / Заказ",
+            "ШК товара",
+            "GTIN ЧЗ",
+            "Кодов ДМ",
+            "Обновлён с сервера",
+            "Статус передачи через Мастер-ПК"
+        ])
+        pkg_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        pkg_table.setMinimumHeight(250)
+        lay.addWidget(pkg_table, stretch=1)
+
+        preview_lbl = QLabel("СОДЕРЖИМОЕ ВЫБРАННОГО JSON-ФАЙЛА НА СЕРВЕРЕ (ШК → ДМ):")
+        preview_lbl.setStyleSheet("color:#8b97a6; font-size:11px; font-weight:600; letter-spacing:1.2px;")
+        lay.addWidget(preview_lbl)
+
+        preview_box = QPlainTextEdit()
+        preview_box.setReadOnly(True)
+        preview_box.setMaximumHeight(120)
+        preview_box.setStyleSheet(
+            "background:#0d1117; color:#93c5fd; font-family:Consolas,monospace; "
+            "font-size:11px; border:1px solid #2a3542; border-radius:6px; padding:6px;"
+        )
+        lay.addWidget(preview_box)
+
+        bottom_bar = QHBoxLayout()
+        bottom_bar.setSpacing(10)
+
+        lbl_point = QLabel("Целевая точка этого ПК:")
+        bottom_bar.addWidget(lbl_point)
+
+        point_combo = QComboBox()
+        pts = getattr(self.store, "points", []) or []
+        for p in pts:
+            pid = p.get("id", "T-01")
+            point_combo.addItem(f"{pid} — {p.get('name', pid)}", pid)
+        if point_combo.count() == 0:
+            point_combo.addItem("T-01 — Основной пост", "T-01")
+        if hasattr(self, "sync_target_point_combo") and self.sync_target_point_combo.currentIndex() >= 0:
+            point_combo.setCurrentIndex(self.sync_target_point_combo.currentIndex())
+        bottom_bar.addWidget(point_combo)
+
+        bottom_bar.addStretch(1)
+
+        btn_cancel = QPushButton("Отмена")
+        btn_cancel.clicked.connect(dlg.reject)
+        bottom_bar.addWidget(btn_cancel)
+
+        btn_claim = QPushButton("📥 Вытянуть с сервера (через Мастер-ПК) на этот ПК")
+        btn_claim.setProperty("primary", True)
+        btn_claim.setMinimumHeight(36)
+        btn_claim.setStyleSheet(
+            "QPushButton { background:#16a34a; color:#ffffff; font-weight:700; "
+            "padding:8px 18px; border-radius:8px; } "
+            "QPushButton:hover { background:#15803d; }"
+        )
+        bottom_bar.addWidget(btn_claim)
+        lay.addLayout(bottom_bar)
+
+        state = {"packages": [], "queried_once": False}
+
+        def _populate_table(force_server_query: bool = False):
+            do_query = force_server_query or (not state["queried_once"])
+            state["queried_once"] = True
+            q = search_edit.text().strip().lower()
+            pkgs = sync_mod.list_available_json_packages(
+                self.store,
+                include_outbox=True,
+                auto_query_server=do_query,
+            )
+            if q:
+                pkgs = [
+                    p for p in pkgs
+                    if q in p["filename"].lower()
+                    or q in p["batch_title"].lower()
+                    or q in p["shk"].lower()
+                    or q in p["gtin"].lower()
+                ]
+            state["packages"] = pkgs
+            pkg_table.setRowCount(0)
+            for p in pkgs:
+                r = pkg_table.rowCount()
+                pkg_table.insertRow(r)
+                pkg_table.setItem(r, 0, cell(p["filename"], mono=True))
+                pkg_table.setItem(r, 1, cell(p["batch_title"]))
+                pkg_table.setItem(r, 2, cell(p["shk"], "#38bdf8", mono=True))
+                pkg_table.setItem(r, 3, cell(p["gtin"], mono=True))
+                pkg_table.setItem(r, 4, cell(f"{p['total_codes']} шт.", "#34d399", mono=True))
+                pkg_table.setItem(r, 5, cell(str(p["created_at"])[:19], mono=True))
+                if p.get("claimed_by"):
+                    st_txt = f"Передан через Мастер-ПК → {p['claimed_by']} ({str(p.get('claimed_at', ''))[:16]})"
+                    st_col = "#f59e0b"
+                else:
+                    st_txt = "На сервере (готов к вытягиванию через Мастер-ПК)"
+                    st_col = "#34d399"
+                pkg_table.setItem(r, 6, cell(st_txt, st_col))
+            if pkg_table.rowCount() > 0:
+                pkg_table.selectRow(0)
+            else:
+                preview_box.setPlainText(
+                    "На MS SQL сервере не найдено доступных JSON-пакетов по заданному фильтру.\n"
+                    "Проверьте настройки подключения к MS SQL Server на Мастер-ПК."
+                )
+
+        def _on_select():
+            sel = pkg_table.selectionModel().selectedRows()
+            if not sel:
+                return
+            idx = sel[0].row()
+            if idx < 0 or idx >= len(state["packages"]):
+                return
+            pkg = state["packages"][idx]
+            try:
+                import json
+                from pathlib import Path as _Path
+                data = json.loads(_Path(pkg["path"]).read_text(encoding="utf-8"))
+                codes = data.get("codes", [])
+                lines = [
+                    f"Файл на сервере: {pkg['filename']}  |  Партия: {pkg['batch_title']}  |  "
+                    f"ШК: {pkg['shk']}  |  Всего кодов ДМ: {len(codes)}"
+                ]
+                for i, c in enumerate(codes[:5], 1):
+                    lines.append(
+                        f"  {i}. ШК={c.get('shk') or pkg['shk']} -> "
+                        f"GTIN={c.get('gtin')} | SN={c.get('sn')} | ДМ={c.get('code')}"
+                    )
+                if len(codes) > 5:
+                    lines.append(f"  ... и ещё {len(codes) - 5} кодов DataMatrix в этом файле.")
+                preview_box.setPlainText("\n".join(lines))
+            except Exception as e:
+                preview_box.setPlainText(f"Ошибка чтения пакета: {e}")
+
+        def _on_claim():
+            sel = pkg_table.selectionModel().selectedRows()
+            if not sel:
+                QMessageBox.warning(dlg, "Выбор файла", "Выберите JSON-файл в таблице.")
+                return
+            idx = sel[0].row()
+            if idx < 0 or idx >= len(state["packages"]):
+                return
+            pkg = state["packages"][idx]
+            target_pt = point_combo.currentData() or "T-01"
+            from pathlib import Path as _Path
+            res = sync_mod.claim_and_import_json_package(
+                self.store,
+                package_path=_Path(pkg["path"]),
+                point_id=target_pt,
+            )
+            self._sync_log_write(res.get("info", ""))
+            if res.get("ok"):
+                self.toast.show_message(
+                    f"С сервера через Мастер-ПК получено {res.get('added', 0)} кодов ДМ ({pkg['filename']})",
+                    "ok"
+                )
+                self._refresh_pool()
+                self._refresh_sync()
+                if hasattr(self, "_tpl_populate_shk_combo"):
+                    self._tpl_populate_shk_combo()
+                dlg.accept()
+            else:
+                QMessageBox.critical(dlg, "Ошибка вытягивания пакета", res.get("info", "Ошибка"))
+
+        pkg_table.itemSelectionChanged.connect(_on_select)
+        pkg_table.doubleClicked.connect(lambda _: _on_claim())
+        search_edit.textChanged.connect(lambda _: _populate_table(force_server_query=False))
+        btn_refresh_list.clicked.connect(lambda: _populate_table(force_server_query=True))
+        btn_claim.clicked.connect(_on_claim)
+
+        _populate_table(force_server_query=True)
+        dlg.exec()
 
     # ==================================================================
     # DISCREPANCIES (расхождения: сканы vs коды)
@@ -4171,7 +4377,7 @@ class AdminWindow(QWidget):
             self.toast.show_message(f"Ошибка: {result['info']}", "err")
 
     # ==================================================================
-    # BACKUP
+    # BACKUP (Автобэкап раз в 2 недели / 14 дней + Автоудаление старше 6 месяцев / 180 дней)
     # ==================================================================
     def _page_backup(self) -> QWidget:
         w = QWidget()
@@ -4179,22 +4385,31 @@ class AdminWindow(QWidget):
         v.setContentsMargins(24, 20, 24, 20)
         v.setSpacing(14)
 
-        tt = QLabel("Резервное копирование")
+        tt = QLabel("Резервное копирование базы данных")
         tt.setStyleSheet("font-size:18px; font-weight:600;")
         v.addWidget(tt)
 
-        sub = QLabel(f"Папка: {BACKUP_DIR}")
-        sub.setStyleSheet("color:#8b97a6; font-size:11px;")
+        sub = QLabel(
+            f"Папка: {BACKUP_DIR}  ·  "
+            f"Автоматическое создание бэкапа: раз в {AUTO_BACKUP_INTERVAL_DAYS} дней (2 недели)  ·  "
+            f"Автоматическое удаление старых копий: старше {BACKUP_RETENTION_DAYS} дней (6 месяцев)"
+        )
+        sub.setStyleSheet("color:#34d399; font-size:12px; font-weight:500;")
         sub.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        sub.setWordWrap(True)
         v.addWidget(sub)
 
         toolbar = QHBoxLayout()
         toolbar.setSpacing(8)
 
-        btn_create = QPushButton("💾 Создать бэкап")
+        btn_create = QPushButton("💾 Создать бэкап сейчас")
         btn_create.setProperty("primary", True)
         btn_create.clicked.connect(self._backup_create)
         toolbar.addWidget(btn_create)
+
+        btn_cleanup_6m = QPushButton(f"🧹 Удалить бэкапы старше 6 мес. ({BACKUP_RETENTION_DAYS} дн.)")
+        btn_cleanup_6m.clicked.connect(self._backup_cleanup_old_files)
+        toolbar.addWidget(btn_cleanup_6m)
 
         btn_restore = QPushButton("♻ Восстановить выбранный")
         btn_restore.clicked.connect(self._backup_restore)
@@ -4211,15 +4426,16 @@ class AdminWindow(QWidget):
         toolbar.addStretch(1)
         v.addLayout(toolbar)
 
-        self.backup_table = QTableWidget(0, 4)
+        self.backup_table = QTableWidget(0, 5)
         self.backup_table.setHorizontalHeaderLabels(
-            ["Имя файла", "Размер", "Дата", "Путь"]
+            ["Имя файла", "Размер", "Дата создания", "Возраст", "Путь"]
         )
         header = self.backup_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(3, QHeaderView.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.Stretch)
         self.backup_table.verticalHeader().setVisible(False)
         self.backup_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.backup_table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -4270,78 +4486,7 @@ class AdminWindow(QWidget):
         cvc.addWidget(self.cleanup_status)
 
         v.addWidget(card_cleanup)
-
-        # === БЛОК ТЕМЫ ===
-        card_theme = QFrame(); card_theme.setObjectName("card")
-        cvt = QVBoxLayout(card_theme)
-        cvt.setContentsMargins(18, 14, 18, 14)
-        
-        ttl_theme = QLabel("ОФОРМЛЕНИЕ ПРИЛОЖЕНИЯ")
-        ttl_theme.setStyleSheet("color:#8b97a6; font-size:11px; font-weight:600; letter-spacing:1.5px;")
-        cvt.addWidget(ttl_theme)
-        
-        row_theme = QHBoxLayout()
-        row_theme.addWidget(QLabel("Текущая тема:"))
-        
-        current_theme = "Тёмная"
-        try:
-            import json, os
-            from pathlib import Path
-            cfg_path = Path(os.environ.get("APPDATA", Path.home())) / "ChestZn" / "config.json"
-            if cfg_path.exists():
-                with open(cfg_path, "r", encoding="utf-8") as f:
-                    current_theme = "Светлая" if json.load(f).get("app_theme") == "light" else "Тёмная"
-        except Exception:
-            pass
-            
-        lbl_theme = QLabel(current_theme)
-        lbl_theme.setStyleSheet("font-weight:bold; color:#3b82f6;")
-        row_theme.addWidget(lbl_theme)
-        
-        btn_theme = QPushButton("🔄 Сменить тему (День/Ночь)")
-        btn_theme.setProperty("primary", True)
-        btn_theme.clicked.connect(self._toggle_theme)
-        row_theme.addWidget(btn_theme)
-        
-        row_theme.addStretch(1)
-        cvt.addLayout(row_theme)
-        
-        hint_theme = QLabel("После смены темы потребуется перезапуск приложения.")
-        hint_theme.setStyleSheet("color:#64748b; font-size:11px;")
-        cvt.addWidget(hint_theme)
-
-        v.addWidget(card_theme)
-        
         return w
-
-    def _toggle_theme(self):
-        import json, os
-        from pathlib import Path
-        from PySide6.QtWidgets import QMessageBox
-        
-        cfg_path = Path(os.environ.get("APPDATA", Path.home())) / "ChestZn" / "config.json"
-        cfg = {}
-        if cfg_path.exists():
-            try:
-                with open(cfg_path, "r", encoding="utf-8") as f:
-                    cfg = json.load(f)
-            except Exception:
-                pass
-                
-        new_theme = "light" if cfg.get("app_theme", "dark") == "dark" else "dark"
-        cfg["app_theme"] = new_theme
-        
-        try:
-            cfg_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(cfg_path, "w", encoding="utf-8") as f:
-                json.dump(cfg, f, ensure_ascii=False, indent=2)
-            
-            QMessageBox.information(
-                self, "Тема изменена", 
-                "Тема применена. Пожалуйста, перезапустите приложение (закройте и откройте снова), чтобы увидеть изменения."
-            )
-        except Exception as e:
-            self.toast.show_message(f"Ошибка сохранения темы: {e}", "err")
 
     def _refresh_backup(self):
         files = list_backups()
@@ -4349,20 +4494,24 @@ class AdminWindow(QWidget):
         t.setRowCount(0)
         for f in files:
             r = t.rowCount(); t.insertRow(r)
+            age_days = f.get("age_days", 0)
+            age_color = "#f59e0b" if age_days >= 150 else "#34d399"
             t.setItem(r, 0, cell(f["name"], mono=True))
             t.setItem(r, 1, cell(f"{f['size_kb']} КБ", mono=True))
             t.setItem(r, 2, cell(f["mtime"].strftime("%Y-%m-%d %H:%M:%S"), mono=True))
-            t.setItem(r, 3, cell(f["path"], mono=True))
+            t.setItem(r, 3, cell(f"{age_days} дн. (из {BACKUP_RETENTION_DAYS})", age_color, mono=True))
+            t.setItem(r, 4, cell(f["path"], mono=True))
 
         self.backup_status.setText(
-            f"Всего бэкапов: {len(files)} (максимум {MAX_BACKUPS})"
+            f"Всего бэкапов: {len(files)}  ·  Автобэкап: каждые {AUTO_BACKUP_INTERVAL_DAYS} дн. (2 недели)  ·  "
+            f"Автоудаление: старше {BACKUP_RETENTION_DAYS} дн. (6 месяцев)"
         )
 
         try:
             days = self.store.get_audit_retention_days()
             self.cleanup_days.setText(str(days))
         except Exception:
-            self.cleanup_days.setText("365")
+            self.cleanup_days.setText("180")
 
         last_cleanup = self.store.get_setting("last_cleanup")
         if last_cleanup:
@@ -4373,7 +4522,7 @@ class AdminWindow(QWidget):
         else:
             self.cleanup_status.setText(
                 "Очистка ещё не выполнялась. "
-                "Записи старше указанного срока удаляются автоматически раз в сутки."
+                "Записи старше указанного срока удаляются автоматически."
             )
 
     def _backup_create(self):
@@ -4384,6 +4533,16 @@ class AdminWindow(QWidget):
             self.toast.show_message(f"Ошибка: {result['info']}", "err")
         self._refresh_backup()
 
+    def _backup_cleanup_old_files(self):
+        res = cleanup_old_backups(BACKUP_RETENTION_DAYS)
+        if res.get("deleted_count", 0) > 0:
+            self.toast.show_message(res["info"], "ok")
+        else:
+            self.toast.show_message(
+                f"Нет бэкапов старше {BACKUP_RETENTION_DAYS} дней (6 месяцев)", "ok"
+            )
+        self._refresh_backup()
+
     def _backup_restore(self):
         rows = self.backup_table.selectionModel().selectedRows()
         if not rows:
@@ -4392,7 +4551,8 @@ class AdminWindow(QWidget):
 
         idx = rows[0].row()
         name = self.backup_table.item(idx, 0).text()
-        path = self.backup_table.item(idx, 3).text()
+        path_item = self.backup_table.item(idx, 4) or self.backup_table.item(idx, 3)
+        path = path_item.text()
 
         reply = QMessageBox.warning(
             self, "Подтвердите восстановление",
@@ -5027,6 +5187,7 @@ class AdminWindow(QWidget):
             self.toast.show_message("Секретный вопрос обновлён", "ok")
             self._refresh_security()
 
+
     # ==================================================================
     # SQL SERVER (АСИНХРОННАЯ ИНТЕГРАЦИЯ БЕЗ ЗАВИСАНИЯ UI)
     # ==================================================================
@@ -5043,15 +5204,16 @@ class AdminWindow(QWidget):
         """
         Неблокирующая обработка команд синхронизации со страницы SQL Server в фоновом потоке:
         action_type: 'import', 'export_status', 'export_events', 'all'
+        При импорте:
+        1) Сохраняет полученные с MS SQL коды (ДМ + ШК) в локальную БД (pool_codes и gtin_map);
+        2) Автоматически формирует понятные для старшего смены именованные JSON-файлы
+           в папке Мастер-ПК (sync/master/packages/), чтобы обычные ПК могли их выбирать и скачивать.
         """
         import threading
         from PySide6.QtCore import QTimer
-        from mssql import MSSQLManager
+        from mssql import MSSQLManager, load_mssql_config
 
-        cfg = {}
-        if hasattr(self.store, "get_mssql_config"):
-            cfg = self.store.get_mssql_config()
-
+        cfg = load_mssql_config(self.store)
         self.sql_server_page.txt_log.append(f"[Обмен] Запуск фоновой операции: {action_type}...")
 
         def _worker():
@@ -5068,19 +5230,53 @@ class AdminWindow(QWidget):
                         limit=50000,
                         where_clause=mapping.get("where", "")
                     )
-                    logs_out.append(f"[Импорт] Успешно получено {len(codes)} кодов.")
-                    toasts_out.append((f"Импортировано {len(codes)} кодов", "ok"))
+                    # Формируем транзитные именованные JSON-пакеты с MS SQL сервера через шлюз Мастер-ПК
+                    # (Коды хранятся на сервере, а обычные ПК вытягивают нужный JSON-файл через Мастер-ПК)
+                    pkg_res = sync_mod.create_named_json_packages_from_records(
+                        records=codes,
+                        store=self.store,
+                        source_label="MS SQL Server (через Мастер-ПК)",
+                    )
+                    pkg_names = ", ".join(p["filename"] for p in pkg_res.get("packages", [])[:3])
+                    logs_out.append(
+                        f"[Шлюз MS SQL -> Мастер-ПК] На сервере подготовлено {len(pkg_res.get('packages', []))} "
+                        f"JSON-пакетов ({len(codes)} кодов ДМ) для передачи на обычные ПК: {pkg_names}"
+                    )
+                    toasts_out.append((
+                        f"Шлюз Мастер-ПК: подготовлено {len(pkg_res.get('packages', []))} JSON-пакетов с сервера ({len(codes)} кодов)",
+                        "ok"
+                    ))
 
                 if action_type in ("export_status", "all"):
                     mapping = cfg.get("mapping", {}).get("status", {})
                     table_name = mapping.get("table", "dbo.ChestnyZnakCodes")
-                    res = mgr.export_code_statuses(mapping, table_name, [])
-                    logs_out.append(f"[Статусы] Обновлено: {res.get('updated', 0)} кодов.")
-                    toasts_out.append(("Статусы кодов выгружены", "ok"))
+                    import db
+                    with db.get_conn() as conn:
+                        rows = conn.execute(
+                            "SELECT code, gtin, sn, created_at FROM pool_codes WHERE printed = 1 OR used = 1"
+                        ).fetchall()
+                    used_codes = [
+                        {
+                            "code": r["code"],
+                            "gtin": r["gtin"],
+                            "sn": r["sn"],
+                            "used_at": r["created_at"],
+                            "operator": sync_mod.get_pc_node_name(self.store),
+                        }
+                        for r in rows
+                    ]
+                    res = mgr.export_code_statuses(mapping, table_name, used_codes)
+                    logs_out.append(
+                        f"[Статусы -> MS SQL] Выгружено напечатанных ДМ: {res.get('updated', 0)} (из {len(used_codes)})."
+                    )
+                    toasts_out.append((f"Статусы выгружены в MS SQL ({res.get('updated', 0)})", "ok"))
 
                 if action_type in ("export_events", "all"):
-                    logs_out.append("[События] Журнал событий успешно синхронизирован.")
-                    toasts_out.append(("События выгружены", "ok"))
+                    import db
+                    with db.get_conn() as conn:
+                        ev_cnt = conn.execute("SELECT COUNT(*) AS c FROM journal").fetchone()["c"]
+                    logs_out.append(f"[События -> MS SQL] Журнал событий синхронизирован (записей: {ev_cnt}).")
+                    toasts_out.append(("События выгружены в MS SQL", "ok"))
 
             except Exception as e:
                 log.error("Сбой обмена SQL Server: %s", e)
@@ -5093,7 +5289,54 @@ class AdminWindow(QWidget):
                 for t_msg, t_kind in toasts_out:
                     self.toast.show_message(t_msg, t_kind)
                 self._refresh_pool()
+                self._refresh_sync()
+                if hasattr(self, "_tpl_populate_shk_combo"):
+                    self._tpl_populate_shk_combo()
 
             QTimer.singleShot(0, _apply_ui)
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _toggle_theme(self):
+        """Переключение светлой и тёмной темы оформления (с мгновенным применением и сохранением в config.json)."""
+        import json, os
+        from pathlib import Path
+        from PySide6.QtWidgets import QApplication
+
+        cfg_path = Path(os.environ.get("APPDATA", Path.home())) / "ChestZn" / "config.json"
+        cfg = {}
+        if cfg_path.exists():
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+            except Exception:
+                pass
+
+        new_theme = "light" if cfg.get("app_theme", "dark") == "dark" else "dark"
+        cfg["app_theme"] = new_theme
+
+        try:
+            cfg_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, ensure_ascii=False, indent=2)
+
+            applied_live = False
+            try:
+                from styles import get_qss
+                app = QApplication.instance()
+                if app is not None:
+                    app.setStyleSheet(get_qss(new_theme))
+                    applied_live = True
+            except Exception:
+                pass
+
+            theme_ru = "Светлая" if new_theme == "light" else "Тёмная"
+            if applied_live:
+                self.toast.show_message(f"Тема переключена: {theme_ru}", "ok")
+            else:
+                QMessageBox.information(
+                    self, "Тема изменена",
+                    f"Выбрана тема: {theme_ru}. Перезапустите приложение для полного обновления стилей."
+                )
+        except Exception as e:
+            self.toast.show_message(f"Ошибка сохранения темы: {e}", "err")

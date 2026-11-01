@@ -246,6 +246,26 @@ def extract_gtin_candidates(raw_barcode: str) -> Dict[str, Any]:
     }
 
 
+_SQLITE_INDEXES_CREATED = False
+
+
+def _ensure_fast_sqlite_indexes(conn):
+    """Создаёт индексы SQLite и включает WAL-режим для мгновенного поиска ШК -> ДМ (< 1 мс)."""
+    global _SQLITE_INDEXES_CREATED
+    if _SQLITE_INDEXES_CREATED:
+        return
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA temp_store=MEMORY")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_pool_codes_gtin_used ON pool_codes(gtin, used, assigned_point)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_pool_codes_code ON pool_codes(code)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_gtin_map_fg ON gtin_map(foreign_gtin)")
+        _SQLITE_INDEXES_CREATED = True
+    except Exception:
+        pass
+
+
 def _get_table_columns(conn, table_name: str) -> List[str]:
     """Безопасное получение списка колонок таблицы SQLite через PRAGMA table_info."""
     try:
@@ -448,6 +468,7 @@ def resolve_and_claim_cz_code(
     with _DB_CLAIM_LOCK:
         try:
             with db.get_conn() as conn:
+                _ensure_fast_sqlite_indexes(conn)
                 pool_cols = _get_table_columns(conn, "pool_codes")
                 pool_cols_lower = {c.lower(): c for c in pool_cols}
                 has_id = "id" in pool_cols_lower

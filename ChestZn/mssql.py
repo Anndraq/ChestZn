@@ -1,19 +1,20 @@
-"""
-ChestZn — Модуль интеграции с Microsoft SQL Server (mssql.py)
-Обеспечивает двухсторонний обмен между мастер-ПК и корпоративной БД заказчика:
-1. Импорт кодов маркировки (SELECT из таблицы заказчика -> локальный пул)
-2. Выгрузка событий маркировки/сканирования/ошибок (INSERT в таблицу заказчика)
-3. Выгрузка статусов кодов (UPDATE в таблицу кодов заказчика)
-4. Разбор схемы таблиц/колонок прямо с сервера
-5. Защита паролей через DPAPI (Windows)
-6. Защита от SQL-инъекций (параметризация и строгая валидация идентификаторов)
-7. Встроенный Mock-режим для автономного развертывания и демонстрации без живого сервера
+r"""
+ChestZn — Модуль интеграции с Microsoft SQL Server (mssql.py).
+Обеспечивает двухсторонний обмен между Мастер-ПК и сервером БД MS SQL:
+1. Импорт пар «ШК товара (EAN-13 / GTIN) ↔ ДМ (DataMatrix Честного Знака)» + название партии/заказа
+   с автоматическим разбором GTIN/SN из строки DataMatrix и формированием именованных JSON-пакетов для обычных ПК.
+2. Выгрузка статусов напечатанных ДМ (UPDATE в таблицу MS SQL Server).
+3. Выгрузка журнала событий сканирования и печати (INSERT в таблицу MS SQL Server).
+4. Надёжное сохранение конфигурации подключения в таблице `settings` (SQLite) и `%APPDATA%\ChestZn\mssql_config.json`
+   с защитой пароля через Windows DPAPI.
 """
 
+import os
 import re
 import json
 import logging
 import platform
+from pathlib import Path
 from typing import Dict, Any, List, Tuple, Optional
 
 logger = logging.getLogger("ChestZn.MSSQL")
@@ -26,20 +27,19 @@ except ImportError:
     PYODBC_AVAILABLE = False
 
 
-# Безопасный регекс для имен схем, таблиц и колонок SQL Server
-IDENTIFIER_REGEX = re.compile(r'^[A-Za-z0-9_#$]+$')
+IDENTIFIER_REGEX = re.compile(r'^[A-Za-z0-9_#$А-Яа-яЁё]+$')
 
 
 def quote_identifier(name: str) -> str:
     """
-    Безопасное экранирование идентификаторов SQL Server (например, [dbo].[MarkCodes]).
+    Безопасное экранирование идентификаторов SQL Server (например, [dbo].[ChestnyZnakCodes]).
     Предотвращает SQL-инъекции в именах таблиц и колонок.
     """
     if not name or not isinstance(name, str):
         raise ValueError(f"Некорректный идентификатор: {name}")
 
     parts = name.strip().split(".")
-    if len(parts) > 2:
+    if len(parts) > 3:
         raise ValueError(f"Слишком много уровней вложенности в имени: {name}")
 
     quoted_parts = []
@@ -52,8 +52,94 @@ def quote_identifier(name: str) -> str:
     return ".".join(quoted_parts)
 
 
+def _config_file_path() -> Path:
+    base = Path(os.environ.get("APPDATA", Path.home())) / "ChestZn"
+    base.mkdir(parents=True, exist_ok=True)
+    return base / "mssql_config.json"
+
+
+def load_mssql_config(store: Any = None) -> Dict[str, Any]:
+    """Загружает конфигурацию MS SQL Server из Store (settings['mssql_config']) или файла mssql_config.json."""
+    if store is not None:
+        try:
+            if hasattr(store, "get_mssql_config"):
+                cfg = store.get_mssql_config()
+                if isinstance(cfg, dict) and cfg:
+                    return cfg
+            if hasattr(store, "get_setting"):
+                raw = store.get_setting("mssql_config")
+                if raw:
+                    cfg = json.loads(raw) if isinstance(raw, str) else raw
+                    if isinstance(cfg, dict) and cfg:
+                        return cfg
+        except Exception as e:
+            logger.debug("Ошибка чтения mssql_config из Store: %s", e)
+
+    p = _config_file_path()
+    if p.exists():
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+        except Exception as e:
+            logger.debug("Ошибка чтения %s: %s", p, e)
+
+    return {
+        "mock_mode": True,
+        "driver": "ODBC Driver 17 for SQL Server",
+        "server": "MOCK",
+        "database": "ChestnyZnakDB",
+        "auth_type": "windows",
+        "user": "sa",
+        "password_encrypted": "",
+        "encryption": "no",
+        "timeout": 10,
+        "mapping": {
+            "import": {
+                "table": "dbo.ChestnyZnakCodes",
+                "code_col": "mark_code",
+                "gtin_col": "gtin",
+                "sn_col": "serial_number",
+                "order_col": "order_id",
+                "where": "is_printed = 0",
+            },
+            "status": {
+                "table": "dbo.ChestnyZnakCodes",
+                "code_col": "mark_code",
+                "is_printed_col": "is_printed",
+                "printed_at_col": "printed_at",
+                "status_col": "status_code",
+            },
+        },
+    }
+
+
+def save_mssql_config(store: Any, cfg: Dict[str, Any]) -> None:
+    """Сохраняет конфигурацию MS SQL Server и в таблицу settings (SQLite), и в mssql_config.json."""
+    if not isinstance(cfg, dict):
+        return
+    raw_json = json.dumps(cfg, ensure_ascii=False, indent=2)
+
+    if store is not None:
+        try:
+            if hasattr(store, "save_mssql_config"):
+                store.save_mssql_config(cfg)
+            if hasattr(store, "set_setting"):
+                store.set_setting("mssql_config", raw_json)
+        except Exception as e:
+            logger.debug("Ошибка сохранения mssql_config в Store: %s", e)
+
+    try:
+        _config_file_path().write_text(raw_json, encoding="utf-8")
+    except Exception as e:
+        logger.debug("Ошибка сохранения mssql_config.json: %s", e)
+
+
 class MockCursor:
-    """Виртуальный курсор для автономного тестирования и демо-режима"""
+    """
+    Виртуальный курсор для домашней проверки и автономного тестирования без живого сервера MS SQL.
+    Возвращает реалистичные партии товаров с привязанными парами «ШК (EAN-13) <-> ДМ (GS1 DataMatrix)».
+    """
     def __init__(self, parent_conn):
         self.conn = parent_conn
         self.description = []
@@ -64,17 +150,15 @@ class MockCursor:
         sql_lower = sql.strip().lower()
         params = params or []
 
-        # 1. Запрос таблиц
         if "information_schema.tables" in sql_lower or "sys.tables" in sql_lower:
             self.description = [("table_schema", str), ("table_name", str)]
             self._data = [
                 ("dbo", "ChestnyZnakCodes"),
                 ("dbo", "MarkingEvents"),
-                ("dbo", "ProductionOrders")
+                ("dbo", "ProductionOrders"),
             ]
             self.rowcount = len(self._data)
 
-        # 2. Запрос колонок
         elif "information_schema.columns" in sql_lower or "sys.columns" in sql_lower:
             self.description = [("column_name", str), ("data_type", str)]
             if any("markingevents" in str(p).lower() for p in params) or "markingevents" in sql_lower:
@@ -86,40 +170,51 @@ class MockCursor:
                     ("barcode", "varchar"),
                     ("status", "varchar"),
                     ("order_id", "varchar"),
-                    ("error_details", "nvarchar")
+                    ("error_details", "nvarchar"),
                 ]
             else:
                 self._data = [
                     ("id", "int"),
                     ("mark_code", "varchar"),
                     ("gtin", "varchar"),
+                    ("shk", "varchar"),
                     ("serial_number", "varchar"),
-                    ("order_id", "varchar"),
+                    ("order_id", "nvarchar"),
                     ("is_printed", "bit"),
                     ("printed_at", "datetime"),
-                    ("status_code", "varchar")
+                    ("status_code", "varchar"),
                 ]
             self.rowcount = len(self._data)
 
-        # 3. SELECT (Импорт кодов)
+        elif sql_lower.startswith("select @@version"):
+            self.description = [("version", str)]
+            self._data = [("Microsoft SQL Server 2022 (Mock Mode — локальная проверка)",)]
+            self.rowcount = 1
+
         elif sql_lower.startswith("select"):
-            self.description = [("code", str), ("gtin", str), ("sn", str)]
-            # Генерация тестовых кодов маркировки формата Честный ЗНАК
-            self._data = [
-                (
-                    f"0104600000000000215{str(i).zfill(6)}\u001d910001\u001d92mockcrypto==",
-                    "04600000000000",
-                    f"5{str(i).zfill(6)}"
-                )
-                for i in range(1, 101)
+            self.description = [("code", str), ("gtin", str), ("sn", str), ("order_id", str)]
+            rows = []
+            # 3 понятные партии товаров с разными ШК (EAN-13) и настоящими GS1 DataMatrix (ДМ)
+            batches = [
+                ("Заказ_101_Кроссовки_Черные", "4607001234567", "04607001234567", 40),
+                ("Заказ_102_Ботинки_Зимние",   "4607009876543", "04607009876543", 35),
+                ("Заказ_103_Куртки_Спорт",     "4607112233445", "04607112233445", 25),
             ]
+            for batch_title, shk_ean13, cz_gtin14, cnt in batches:
+                for i in range(1, cnt + 1):
+                    sn_str = f"SN{cz_gtin14[-4:]}{str(i).zfill(5)}"
+                    dm_str = (
+                        f"01{cz_gtin14}21{sn_str}"
+                        f"\x1d91EE06\x1d92dGVzdGNyeXB0b3RhaWx2ZXJ5bG9uZ3N0cmluZ_{i:03d}=="
+                    )
+                    # В колонке gtin возвращаем 13-значный ШК товара, чтобы проверить связывание ШК -> ДМ
+                    rows.append((dm_str, shk_ean13, sn_str, batch_title))
+            self._data = rows
             self.rowcount = len(self._data)
 
-        # 4. INSERT / UPDATE
         elif sql_lower.startswith("insert") or sql_lower.startswith("update"):
             self.rowcount = 1
             self._data = []
-
         else:
             self.description = [("status", str)]
             self._data = [("OK",)]
@@ -138,7 +233,7 @@ class MockCursor:
 
 
 class MockMSSQLConnection:
-    """Виртуальное подключение к MS SQL Server для Mock Mode"""
+    """Виртуальное подключение к MS SQL Server для Mock Mode."""
     def __init__(self):
         self.autocommit = True
 
@@ -158,43 +253,42 @@ class MockMSSQLConnection:
 class MSSQLManager:
     """
     Основной сервис взаимодействия с Microsoft SQL Server.
-    Инкапсулирует подключение, проверку драйверов, маппинг полей и транзакции.
     """
 
     DEFAULT_DRIVERS = [
         "ODBC Driver 17 for SQL Server",
         "ODBC Driver 18 for SQL Server",
-        "SQL Server"
+        "SQL Server",
     ]
 
     def __init__(self, config_dict: Optional[Dict[str, Any]] = None):
-        self.config = config_dict or {}
+        self.config = config_dict or load_mssql_config()
         self._conn = None
 
     @classmethod
     def get_available_drivers(cls) -> List[str]:
-        """Возвращает список установленных в Windows ODBC-драйверов для SQL Server"""
         if not PYODBC_AVAILABLE:
-            return ["Эмуляция (pyodbc не установлен)"]
+            return ["ODBC Driver 17 for SQL Server (Эмуляция — pyodbc не установлен)"]
         try:
-            drivers = pyodbc.drivers()
-            return [d for d in drivers if "SQL Server" in d]
+            drivers = [d for d in pyodbc.drivers() if "SQL Server" in d]
+            return drivers or cls.DEFAULT_DRIVERS
         except Exception as e:
             logger.error("Ошибка получения списка драйверов: %s", e)
-            return []
+            return cls.DEFAULT_DRIVERS
 
     def build_connection_string(self) -> str:
-        """Сборка безопасной строки подключения ODBC"""
         driver = self.config.get("driver") or "ODBC Driver 17 for SQL Server"
+        if "(" in driver:
+            driver = driver.split("(")[0].strip()
         server = self.config.get("server", "").strip()
         database = self.config.get("database", "").strip()
-        auth_type = self.config.get("auth_type", "windows")  # 'windows' или 'sql'
-        encryption_mode = self.config.get("encryption", "no")  # 'no', 'optional', 'strict'
+        auth_type = self.config.get("auth_type", "windows")
+        encryption_mode = self.config.get("encryption", "no")
 
         parts = [
             f"DRIVER={{{driver}}}",
             f"SERVER={server}",
-            f"DATABASE={database}"
+            f"DATABASE={database}",
         ]
 
         if auth_type == "windows":
@@ -205,7 +299,6 @@ class MSSQLManager:
             parts.append(f"UID={user}")
             parts.append(f"PWD={password}")
 
-        # Настройка шифрования (лечит ошибку "Клиент не поддерживает шифрование")
         if encryption_mode == "no":
             parts.append("Encrypt=no")
             parts.append("TrustServerCertificate=yes")
@@ -219,12 +312,10 @@ class MSSQLManager:
         return ";".join(parts)
 
     def is_mock_mode(self) -> bool:
-        """Проверка, включен ли режим заглушки"""
         server = self.config.get("server", "").strip().upper()
         return bool(self.config.get("mock_mode", False) or server in ("MOCK", "DEMO", ""))
 
     def connect(self):
-        """Установка соединения с БД (или возврат MockConnection)"""
         if self.is_mock_mode():
             logger.info("Подключение к SQL Server в режиме Эмуляции (Mock Mode)")
             self._conn = MockMSSQLConnection()
@@ -232,8 +323,8 @@ class MSSQLManager:
 
         if not PYODBC_AVAILABLE:
             raise RuntimeError(
-                "Модуль pyodbc не установлен в виртуальном окружении! "
-                "Выполните: pip install pyodbc"
+                "Модуль pyodbc не установлен в текущем окружении Python! "
+                "Установите его командой: pip install pyodbc (либо включите режим эмуляции Mock Mode)"
             )
 
         conn_str = self.build_connection_string()
@@ -243,20 +334,18 @@ class MSSQLManager:
         return self._conn
 
     def test_connection(self) -> Tuple[bool, str]:
-        """Тестирование подключения с возвратом статуса и версии сервера"""
         try:
             conn = self.connect()
             cursor = conn.cursor()
             cursor.execute("SELECT @@VERSION")
             row = cursor.fetchone()
-            version_str = row[0] if row else "OK"
-            return True, f"Успешное подключение! Версия сервера: {version_str[:80]}"
+            version_str = str(row[0]) if row else "OK"
+            return True, f"Успешное подключение! Сервер: {version_str[:90]}"
         except Exception as e:
             logger.exception("Сбой проверки подключения к SQL Server")
             return False, f"Ошибка подключения: {str(e)}"
 
     def get_tables(self) -> List[Tuple[str, str]]:
-        """Получение списка доступных схем и таблиц"""
         conn = self.connect()
         cursor = conn.cursor()
         query = """
@@ -269,7 +358,6 @@ class MSSQLManager:
         return cursor.fetchall()
 
     def get_columns(self, schema_name: str, table_name: str) -> List[Tuple[str, str]]:
-        """Получение списка колонок и типов данных для выбранной таблицы"""
         conn = self.connect()
         cursor = conn.cursor()
         query = """
@@ -281,31 +369,40 @@ class MSSQLManager:
         cursor.execute(query, [schema_name, table_name])
         return cursor.fetchall()
 
-    # --- Генерация SQL и Предпросмотр (Dry Run) ---
-
-    def build_import_sql(self, mapping: Dict[str, str], table: str, limit: int = 50000, where_clause: str = "") -> Tuple[str, List[str]]:
-        """Генерация безопасного SELECT-запроса для импорта кодов ЧЗ"""
-        quoted_table = quote_identifier(table)
-        code_col = quote_identifier(mapping["code_col"])
+    def build_import_sql(
+        self,
+        mapping: Dict[str, str],
+        table: str,
+        limit: int = 50000,
+        where_clause: str = ""
+    ) -> Tuple[str, List[str]]:
+        """
+        Генерация безопасного SELECT-запроса для выгрузки кодов ДМ и связанных ШК с MS SQL Server.
+        """
+        quoted_table = quote_identifier(table or mapping.get("table") or "dbo.ChestnyZnakCodes")
+        code_col = quote_identifier(mapping.get("code_col") or "mark_code")
         gtin_col = quote_identifier(mapping["gtin_col"]) if mapping.get("gtin_col") else "NULL"
         sn_col = quote_identifier(mapping["sn_col"]) if mapping.get("sn_col") else "NULL"
+        order_col = quote_identifier(mapping["order_col"]) if mapping.get("order_col") else "NULL"
 
         where_part = ""
-        if where_clause.strip():
-            # Базовая очистка WHERE
+        if where_clause and where_clause.strip():
             clean_where = where_clause.strip()
             if not clean_where.lower().startswith("where"):
                 clean_where = f"WHERE {clean_where}"
             where_part = f" {clean_where}"
 
-        sql = f"SELECT TOP {int(limit)} {code_col} AS code, {gtin_col} AS gtin, {sn_col} AS sn FROM {quoted_table}{where_part}"
-        return sql, ["code", "gtin", "sn"]
+        sql = (
+            f"SELECT TOP {int(limit)} "
+            f"{code_col} AS code, {gtin_col} AS gtin, {sn_col} AS sn, {order_col} AS order_id "
+            f"FROM {quoted_table}{where_part}"
+        )
+        return sql, ["code", "gtin", "sn", "order_id"]
 
     def build_status_update_sql(self, mapping: Dict[str, str], table: str) -> str:
-        """Генерация UPDATE-запроса для обратной записи статуса кодов (использован/напечатан)"""
-        quoted_table = quote_identifier(table)
-        code_col = quote_identifier(mapping["code_col"])
-        
+        quoted_table = quote_identifier(table or mapping.get("table") or "dbo.ChestnyZnakCodes")
+        code_col = quote_identifier(mapping.get("code_col") or "mark_code")
+
         set_clauses = []
         if mapping.get("is_printed_col"):
             set_clauses.append(f"{quote_identifier(mapping['is_printed_col'])} = ?")
@@ -318,18 +415,16 @@ class MSSQLManager:
             raise ValueError("Не указаны поля для обновления статуса в сопоставлении")
 
         set_str = ", ".join(set_clauses)
-        sql = f"UPDATE {quoted_table} SET {set_str} WHERE {code_col} = ?"
-        return sql
+        return f"UPDATE {quoted_table} SET {set_str} WHERE {code_col} = ?"
 
     def build_event_insert_sql(self, mapping: Dict[str, str], table: str) -> Tuple[str, List[str]]:
-        """Генерация INSERT-запроса для выгрузки журнала событий сканирования"""
-        quoted_table = quote_identifier(table)
+        quoted_table = quote_identifier(table or "dbo.MarkingEvents")
         cols = []
         placeholders = []
         field_keys = []
 
         for key, target_col in mapping.items():
-            if target_col and key != "event_id_check":
+            if target_col and key not in ("event_id_check", "table"):
                 cols.append(quote_identifier(target_col))
                 placeholders.append("?")
                 field_keys.append(key)
@@ -339,27 +434,70 @@ class MSSQLManager:
         sql = f"INSERT INTO {quoted_table} ({cols_str}) VALUES ({placeholders_str})"
         return sql, field_keys
 
-    # --- Импорт и экспорт данных ---
-
-    def import_codes_from_sql(self, mapping: Dict[str, str], table: str, limit: int = 50000, where_clause: str = "") -> List[Dict[str, Any]]:
-        """Импорт пула кодов из БД заказчика в локальный формат"""
+    def import_codes_from_sql(
+        self,
+        mapping: Dict[str, str],
+        table: str,
+        limit: int = 50000,
+        where_clause: str = ""
+    ) -> List[Dict[str, Any]]:
+        """
+        Вытягивает коды ДМ и привязанные к ним ШК из MS SQL Server.
+        Автоматически разбирает GTIN (14 цифр) и серийный номер (SN) из строки DataMatrix,
+        если в колонке gtin передан 13-значный EAN-13 штрихкод товара (ШК).
+        """
         sql, _ = self.build_import_sql(mapping, table, limit, where_clause)
         conn = self.connect()
         cursor = conn.cursor()
         cursor.execute(sql)
-        
-        records = []
+
+        records: List[Dict[str, Any]] = []
         for row in cursor.fetchall():
+            code_dm = str(row[0]).strip() if row[0] is not None else ""
+            if not code_dm:
+                continue
+            raw_gtin_or_shk = str(row[1]).strip() if len(row) > 1 and row[1] is not None else ""
+            raw_sn = str(row[2]).strip() if len(row) > 2 and row[2] is not None else ""
+            raw_order = str(row[3]).strip() if len(row) > 3 and row[3] is not None else ""
+
+            dm_gtin = ""
+            dm_sn = ""
+            m_dm = re.match(r"^(?:01|\(01\))(\d{14})(?:21|\(21\))([^\x1d\(\r\n]{1,24})", code_dm.lstrip("\x1d"))
+            if m_dm:
+                dm_gtin = m_dm.group(1)
+                dm_sn = m_dm.group(2).strip()
+
+            final_gtin = dm_gtin or (
+                raw_gtin_or_shk.zfill(14)
+                if raw_gtin_or_shk.isdigit() and len(raw_gtin_or_shk) == 13
+                else raw_gtin_or_shk
+            )
+            final_shk = raw_gtin_or_shk or (
+                final_gtin[1:] if len(final_gtin) == 14 and final_gtin.startswith("0") else final_gtin
+            )
+            final_sn = raw_sn or dm_sn or "—"
+
             records.append({
-                "code": str(row[0]) if row[0] is not None else "",
-                "gtin": str(row[1]) if row[1] is not None else "",
-                "sn": str(row[2]) if row[2] is not None else ""
+                "code": code_dm,
+                "gtin": final_gtin,
+                "shk": final_shk,
+                "sn": final_sn,
+                "order_id": raw_order or f"Партия_ШК_{final_shk}",
             })
-        logger.info("Успешно импортировано %d кодов из SQL Server", len(records))
+
+        logger.info("Успешно получено %d кодов (ШК + ДМ) из MS SQL Server", len(records))
         return records
 
-    def export_code_statuses(self, mapping: Dict[str, str], table: str, codes_data: List[Dict[str, Any]]) -> Dict[str, int]:
-        """Идемпотентная выгрузка статусов напечатанных марок"""
+    def export_code_statuses(
+        self,
+        mapping: Dict[str, str],
+        table: str,
+        codes_data: List[Dict[str, Any]]
+    ) -> Dict[str, int]:
+        """Идемпотентная выгрузка статусов напечатанных марок обратно в MS SQL Server."""
+        if not codes_data:
+            return {"updated": 0, "not_found": 0}
+
         sql = self.build_status_update_sql(mapping, table)
         conn = self.connect()
         cursor = conn.cursor()
@@ -370,15 +508,13 @@ class MSSQLManager:
         for item in codes_data:
             params = []
             if mapping.get("is_printed_col"):
-                params.append(1 if item.get("is_printed") else 0)
+                params.append(1 if item.get("is_printed", True) else 0)
             if mapping.get("printed_at_col"):
                 params.append(item.get("printed_at"))
             if mapping.get("status_col"):
                 params.append(item.get("status", "printed"))
-            
-            # WHERE code_col = ?
-            params.append(item.get("code"))
 
+            params.append(item.get("code"))
             cursor.execute(sql, params)
             if cursor.rowcount > 0:
                 updated_count += 1
@@ -388,29 +524,27 @@ class MSSQLManager:
         if not self.is_mock_mode():
             conn.commit()
 
-        logger.info("Выгрузка статусов кодов: обновлено %d, не найдено в БД заказчика %d", updated_count, not_found_count)
+        logger.info("Выгрузка статусов кодов: обновлено %d, не найдено %d", updated_count, not_found_count)
         return {"updated": updated_count, "not_found": not_found_count}
-
-    # --- Шаблоны структуры (Экспорт/Импорт схемы) ---
 
     @staticmethod
     def export_structure_template(filepath: str):
-        """Сохранение JSON-шаблона для администратора базы данных заказчика"""
         template = {
-            "version": "1.0",
-            "description": "Шаблон сопоставления структуры таблиц MS SQL Server для ChestZn",
+            "version": "1.1",
+            "description": "Шаблон сопоставления структуры таблиц MS SQL Server для ChestZn (ШК + ДМ)",
             "import_codes_mapping": {
                 "source_table": "dbo.ChestnyZnakCodes",
                 "code_col": "mark_code",
                 "gtin_col": "gtin",
-                "sn_col": "serial_number"
+                "sn_col": "serial_number",
+                "order_col": "order_id",
             },
             "code_status_mapping": {
                 "target_table": "dbo.ChestnyZnakCodes",
                 "code_col": "mark_code",
                 "is_printed_col": "is_printed",
                 "printed_at_col": "printed_at",
-                "status_col": "status_code"
+                "status_col": "status_code",
             },
             "events_export_mapping": {
                 "target_table": "dbo.MarkingEvents",
@@ -419,24 +553,19 @@ class MSSQLManager:
                 "operator_name": "operator_name",
                 "station_id": "station_id",
                 "barcode": "barcode",
-                "status": "status"
-            }
+                "status": "status",
+            },
         }
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(template, f, ensure_ascii=False, indent=2)
-        logger.info("Шаблон структуры сохранен: %s", filepath)
 
     @staticmethod
     def load_structure_template(filepath: str) -> Dict[str, Any]:
-        """Загрузка заполненного администратором шаблона"""
         with open(filepath, "r", encoding="utf-8") as f:
             return json.load(f)
 
-    # --- DPAPI шифрование паролей ---
-
     @staticmethod
     def _encrypt_password(plain_password: str) -> str:
-        """Шифрование через Windows DPAPI"""
         if not plain_password:
             return ""
         if platform.system() == "Windows":
@@ -451,7 +580,6 @@ class MSSQLManager:
 
     @staticmethod
     def _decrypt_password(enc_password: str) -> str:
-        """Расшифровка через Windows DPAPI"""
         if not enc_password:
             return ""
         if enc_password.startswith("dpapi:") and platform.system() == "Windows":

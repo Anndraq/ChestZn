@@ -1,158 +1,140 @@
-"""
-ChestZn — Диалог и страница настройки подключения к Microsoft SQL Server (mssql_ui.py)
-Компоненты графического интерфейса PySide6 (Qt6):
-1. SQLServerConfigDialog — модальное диалоговое окно настройки реквизитов подключения,
-   выбора ODBC-драйвера, режима шифрования, сопоставления полей (таблицы, колонки, WHERE),
-   проверки связи и предпросмотра сгенерированного SQL (Dry Run).
-2. SQLServerAdminPage — страница раздела "ИНТЕГРАЦИЯ" в AdminWindow:
-   статус подключения, кнопки обмена ("Загрузить коды", "Выгрузить прогресс", "Полный обмен"),
-   счетчики очередей к выгрузке, автообмен по таймеру и кнопка вызова настроек.
+r"""
+ChestZn — Пользовательский интерфейс настройки и управления интеграцией с MS SQL Server (mssql_ui.py).
+Включает:
+1. SQLServerConfigDialog — модальный диалог настройки реквизитов, сопоставления колонок (ДМ, ШК/GTIN, Серия, Заказ/Партия)
+   и предпросмотра запросов (Dry Run).
+2. SQLServerAdminPage — страница 'SQL Server' в админ-панели (выгрузка кодов ШК+ДМ с сервера, формирование
+   именованных JSON-пакетов для обычных ПК и выгрузка отчётов о печати обратно в MS SQL Server).
 """
 
-import json
-import logging
-from typing import Optional, Dict, Any
-
-from PySide6.QtCore import Qt, Signal, QTimer
+from typing import Dict, Any, Optional
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QWidget, QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QFormLayout,
-    QLabel, QLineEdit, QPushButton, QComboBox, QCheckBox, QSpinBox,
-    QTabWidget, QTableWidget, QTableWidgetItem, QTextEdit, QGroupBox,
-    QMessageBox, QFileDialog, QScrollArea, QSplitter
+    QWidget, QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QGridLayout,
+    QLabel, QLineEdit, QPushButton, QComboBox, QCheckBox, QTabWidget,
+    QGroupBox, QTextEdit, QMessageBox, QFileDialog, QSpinBox
 )
 
-from mssql import MSSQLManager, quote_identifier
-
-logger = logging.getLogger("ChestZn.MSSQL_UI")
+from mssql import MSSQLManager, load_mssql_config, save_mssql_config
 
 
 class SQLServerConfigDialog(QDialog):
     """
-    Диалоговое окно расширенной настройки подключения к SQL Server
+    Модальное окно настройки подключения к MS SQL Server и сопоставления таблиц/колонок (ШК ↔ ДМ).
     """
     settings_saved = Signal(dict)
 
     def __init__(self, current_config: Optional[Dict[str, Any]] = None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Настройка интеграции с Microsoft SQL Server")
-        self.setMinimumSize(850, 680)
-        self.config = dict(current_config or {})
-        self.manager = MSSQLManager(self.config)
+        self.setMinimumSize(780, 620)
+        self.config = current_config or load_mssql_config()
         self._cached_tables = []
-        self._cached_columns = {}
 
         self._init_ui()
         self._load_config_to_ui()
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
-        main_layout.setSpacing(12)
 
-        # Табы: Основные реквизиты, Сопоставление полей, Предпросмотр SQL
-        self.tabs = QTabWidget(self)
+        self.tabs = QTabWidget()
         main_layout.addWidget(self.tabs)
 
         self.tab_conn = QWidget()
+        self._setup_connection_tab()
+        self.tabs.addTab(self.tab_conn, "🔌 Реквизиты подключения")
+
         self.tab_mapping = QWidget()
-        self.tab_preview = QWidget()
-
-        self.tabs.addTab(self.tab_conn, "1. Реквизиты сервера")
-        self.tabs.addTab(self.tab_mapping, "2. Сопоставление таблиц и колонок")
-        self.tabs.addTab(self.tab_preview, "3. Предпросмотр SQL (Dry Run)")
-
-        self._setup_conn_tab()
         self._setup_mapping_tab()
+        self.tabs.addTab(self.tab_mapping, "🗂 Сопоставление таблиц и полей (ШК ↔ ДМ)")
+
+        self.tab_preview = QWidget()
         self._setup_preview_tab()
+        self.tabs.addTab(self.tab_preview, "🔍 Предпросмотр SQL (Dry Run)")
 
-        # Нижняя панель действий
-        bottom_layout = QHBoxLayout()
-        
-        self.btn_export_template = QPushButton("💾 Экспорт шаблона JSON")
-        self.btn_export_template.clicked.connect(self._on_export_template)
-        bottom_layout.addWidget(self.btn_export_template)
+        btn_layout = QHBoxLayout()
 
-        self.btn_import_template = QPushButton("📥 Импорт шаблона JSON")
-        self.btn_import_template.clicked.connect(self._on_import_template)
-        bottom_layout.addWidget(self.btn_import_template)
+        self.btn_export_tpl = QPushButton("📄 Скачать шаблон структуры (JSON)")
+        self.btn_export_tpl.clicked.connect(self._on_export_template)
+        btn_layout.addWidget(self.btn_export_tpl)
 
-        bottom_layout.addStretch()
+        self.btn_import_tpl = QPushButton("📂 Загрузить шаблон структуры")
+        self.btn_import_tpl.clicked.connect(self._on_import_template)
+        btn_layout.addWidget(self.btn_import_tpl)
 
-        self.btn_save = QPushButton("Сохранить параметры")
-        self.btn_save.setDefault(True)
+        btn_layout.addStretch()
+
+        self.btn_save = QPushButton("💾 Сохранить настройки")
         self.btn_save.setStyleSheet("background-color: #2e7d32; color: white; font-weight: bold; padding: 6px 16px;")
         self.btn_save.clicked.connect(self._on_save_clicked)
-        bottom_layout.addWidget(self.btn_save)
+        btn_layout.addWidget(self.btn_save)
 
         self.btn_cancel = QPushButton("Отмена")
         self.btn_cancel.clicked.connect(self.reject)
-        bottom_layout.addWidget(self.btn_cancel)
+        btn_layout.addWidget(self.btn_cancel)
 
-        main_layout.addLayout(bottom_layout)
+        main_layout.addLayout(btn_layout)
 
-    def _setup_conn_tab(self):
+    def _setup_connection_tab(self):
         layout = QVBoxLayout(self.tab_conn)
-        layout.setSpacing(14)
 
-        # Группа Mock-режима
-        mock_box = QGroupBox("Режим развертывания (Автономный запуск / Демо)")
+        mock_box = QGroupBox("Режим развертывания (Автономная проверка / Боевой сервер)")
         mock_layout = QVBoxLayout(mock_box)
-        self.chk_mock_mode = QCheckBox("Включить режим эмуляции SQL Server (Mock Mode)")
-        self.chk_mock_mode.setToolTip("Позволяет работать и тестировать функционал без реального подключения к БД заказчика")
+        self.chk_mock_mode = QCheckBox(
+            "Включить тестовый режим эмуляции MS SQL Server (Mock Mode — 3 готовые партии с парами ШК и ДМ)"
+        )
+        self.chk_mock_mode.setToolTip(
+            "Позволяет дома проверить вытягивание кодов с сервера, создание JSON-пакетов и выбор их на обычном ПК без живого MS SQL"
+        )
         self.chk_mock_mode.toggled.connect(self._on_mock_mode_toggled)
         mock_layout.addWidget(self.chk_mock_mode)
         layout.addWidget(mock_box)
 
-        # Группа параметров подключения
-        form_box = QGroupBox("Параметры соединения ODBC")
+        form_box = QGroupBox("Параметры сервера MS SQL")
         form_layout = QFormLayout(form_box)
-        form_layout.setLabelAlignment(Qt.AlignRight)
 
         self.txt_server = QLineEdit()
-        self.txt_server.setPlaceholderText("например: 192.168.1.100 или SRV-SQL\\INSTANCE (или MOCK)")
-        form_layout.addRow("Сервер (IP / Host):", self.txt_server)
+        self.txt_server.setPlaceholderText("например: 192.168.1.100 или SRV-SQL\\SQLEXPRESS")
+        form_layout.addRow("Сервер (Host / Instance):", self.txt_server)
 
         self.txt_database = QLineEdit()
-        self.txt_database.setPlaceholderText("например: ChestnyZnak_Prod")
+        self.txt_database.setPlaceholderText("например: ChestnyZnakDB")
         form_layout.addRow("База данных:", self.txt_database)
 
         self.cmb_driver = QComboBox()
         drivers = MSSQLManager.get_available_drivers()
-        for d in drivers:
-            self.cmb_driver.addItem(d)
-        if not drivers:
-            self.cmb_driver.addItem("ODBC Driver 17 for SQL Server")
-        form_layout.addRow("ODBC Драйвер:", self.cmb_driver)
+        self.cmb_driver.addItems(drivers if drivers else MSSQLManager.DEFAULT_DRIVERS)
+        form_layout.addRow("Драйвер ODBC:", self.cmb_driver)
 
         self.cmb_auth = QComboBox()
-        self.cmb_auth.addItem("Windows-аутентификация (Trusted_Connection)", "windows")
-        self.cmb_auth.addItem("SQL Server Аутентификация (Логин / Пароль)", "sql")
+        self.cmb_auth.addItem("Windows Authentication (Trusted_Connection)", "windows")
+        self.cmb_auth.addItem("SQL Server Authentication (Логин и пароль)", "sql")
         self.cmb_auth.currentIndexChanged.connect(self._on_auth_type_changed)
         form_layout.addRow("Тип аутентификации:", self.cmb_auth)
 
         self.txt_user = QLineEdit()
-        self.txt_user.setPlaceholderText("sa / sql_marking_user")
-        form_layout.addRow("Логин:", self.txt_user)
+        self.txt_user.setPlaceholderText("sa или имя пользователя SQL")
+        form_layout.addRow("Логин SQL:", self.txt_user)
 
         self.txt_password = QLineEdit()
         self.txt_password.setEchoMode(QLineEdit.Password)
-        self.txt_password.setPlaceholderText("••••••••")
-        form_layout.addRow("Пароль:", self.txt_password)
+        self.txt_password.setPlaceholderText("Пароль (шифруется через Windows DPAPI)")
+        form_layout.addRow("Пароль SQL:", self.txt_password)
 
         self.cmb_encrypt = QComboBox()
-        self.cmb_encrypt.addItem("Выключить (лечит ошибку 'Клиент не поддерживает шифрование')", "no")
-        self.cmb_encrypt.addItem("Включено с проверкой сертификата", "strict")
-        self.cmb_encrypt.addItem("Включено без проверки сертификата (TrustServerCertificate)", "optional")
-        form_layout.addRow("Шифрование подключения:", self.cmb_encrypt)
+        self.cmb_encrypt.addItem("Отключено (Encrypt=no, TrustServerCertificate=yes) — рекомендуется в LAN", "no")
+        self.cmb_encrypt.addItem("Опционально (Encrypt=yes, TrustServerCertificate=yes)", "optional")
+        self.cmb_encrypt.addItem("Строгое шифрование (Encrypt=yes, TrustServerCertificate=no)", "strict")
+        form_layout.addRow("Режим шифрования TLS:", self.cmb_encrypt)
 
         self.spn_timeout = QSpinBox()
-        self.spn_timeout.setRange(1, 120)
+        self.spn_timeout.setRange(2, 60)
         self.spn_timeout.setValue(10)
         self.spn_timeout.setSuffix(" сек.")
         form_layout.addRow("Таймаут подключения:", self.spn_timeout)
 
         layout.addWidget(form_box)
 
-        # Тест подключения
         test_box = QHBoxLayout()
         self.btn_test_conn = QPushButton("⚡ Проверить подключение")
         self.btn_test_conn.clicked.connect(self._on_test_connection)
@@ -169,7 +151,6 @@ class SQLServerConfigDialog(QDialog):
     def _setup_mapping_tab(self):
         layout = QVBoxLayout(self.tab_mapping)
 
-        # Кнопка загрузки схемы
         top_schema_layout = QHBoxLayout()
         self.btn_fetch_schema = QPushButton("🔄 Загрузить список таблиц с сервера")
         self.btn_fetch_schema.clicked.connect(self._on_fetch_schema_clicked)
@@ -183,30 +164,34 @@ class SQLServerConfigDialog(QDialog):
         mapping_tabs = QTabWidget()
         layout.addWidget(mapping_tabs)
 
-        # 1. Импорт кодов
+        # 1. Импорт кодов (ДМ + ШК + Партия)
         tab_imp = QWidget()
         layout_imp = QFormLayout(tab_imp)
         self.cmb_imp_table = QComboBox()
         self.cmb_imp_table.setEditable(True)
-        layout_imp.addRow("Таблица источников кодов:", self.cmb_imp_table)
+        layout_imp.addRow("Таблица источников кодов на сервере:", self.cmb_imp_table)
 
         self.cmb_imp_code = QComboBox()
         self.cmb_imp_code.setEditable(True)
-        layout_imp.addRow("Колонка кода маркировки (обязательно):", self.cmb_imp_code)
+        layout_imp.addRow("Колонка DataMatrix / ДМ (обязательно):", self.cmb_imp_code)
 
         self.cmb_imp_gtin = QComboBox()
         self.cmb_imp_gtin.setEditable(True)
-        layout_imp.addRow("Колонка GTIN (01):", self.cmb_imp_gtin)
+        layout_imp.addRow("Колонка ШК товара (EAN-13 / GTIN):", self.cmb_imp_gtin)
 
         self.cmb_imp_sn = QComboBox()
         self.cmb_imp_sn.setEditable(True)
-        layout_imp.addRow("Колонка Серийного номера (21):", self.cmb_imp_sn)
+        layout_imp.addRow("Колонка Серийного номера (SN):", self.cmb_imp_sn)
+
+        self.cmb_imp_order = QComboBox()
+        self.cmb_imp_order.setEditable(True)
+        layout_imp.addRow("Колонка Заказа / Названия партии (для имени JSON):", self.cmb_imp_order)
 
         self.txt_imp_where = QLineEdit()
-        self.txt_imp_where.setPlaceholderText("например: is_printed = 0 AND status = 'active'")
-        layout_imp.addRow("Дополнительное условие WHERE:", self.txt_imp_where)
+        self.txt_imp_where.setPlaceholderText("например: is_printed = 0")
+        layout_imp.addRow("Условие отбора WHERE:", self.txt_imp_where)
 
-        mapping_tabs.addTab(tab_imp, "1. Импорт кодов (SELECT)")
+        mapping_tabs.addTab(tab_imp, "1. Загрузка ШК и ДМ (SELECT)")
 
         # 2. Выгрузка статусов печати
         tab_status = QWidget()
@@ -217,7 +202,7 @@ class SQLServerConfigDialog(QDialog):
 
         self.cmb_stat_code = QComboBox()
         self.cmb_stat_code.setEditable(True)
-        layout_status.addRow("Ключевая колонка кода (WHERE):", self.cmb_stat_code)
+        layout_status.addRow("Ключевая колонка ДМ (WHERE):", self.cmb_stat_code)
 
         self.cmb_stat_printed = QComboBox()
         self.cmb_stat_printed.setEditable(True)
@@ -241,16 +226,16 @@ class SQLServerConfigDialog(QDialog):
         layout_ev.addRow("Таблица журнала событий:", self.cmb_ev_table)
 
         self.txt_ev_id = QLineEdit("event_id")
-        layout_ev.addRow("Колонка ID события (UUID):", self.txt_ev_id)
+        layout_ev.addRow("Колонка ID события:", self.txt_ev_id)
 
         self.txt_ev_time = QLineEdit("scanned_at")
         layout_ev.addRow("Колонка даты/времени:", self.txt_ev_time)
 
         self.txt_ev_op = QLineEdit("operator_name")
-        layout_ev.addRow("Колонка оператора:", self.txt_ev_op)
+        layout_ev.addRow("Колонка поста / сканера:", self.txt_ev_op)
 
         self.txt_ev_station = QLineEdit("station_id")
-        layout_ev.addRow("Колонка рабочего места:", self.txt_ev_station)
+        layout_ev.addRow("Колонка точки:", self.txt_ev_station)
 
         self.txt_ev_barcode = QLineEdit("barcode")
         layout_ev.addRow("Колонка штрихкода:", self.txt_ev_barcode)
@@ -263,13 +248,15 @@ class SQLServerConfigDialog(QDialog):
     def _setup_preview_tab(self):
         layout = QVBoxLayout(self.tab_preview)
 
-        btn_gen = QPushButton("⚡ Сгенерировать запросы на основе текущих настроек")
+        btn_gen = QPushButton("⚡ Сгенерировать SQL-запросы на основе текущих настроек")
         btn_gen.clicked.connect(self._generate_sql_preview)
         layout.addWidget(btn_gen)
 
         self.txt_preview_sql = QTextEdit()
         self.txt_preview_sql.setReadOnly(True)
-        self.txt_preview_sql.setStyleSheet("font-family: Consolas, monospace; font-size: 13px; background-color: #1e1e1e; color: #d4d4d4;")
+        self.txt_preview_sql.setStyleSheet(
+            "font-family: Consolas, monospace; font-size: 13px; background-color: #1e1e1e; color: #d4d4d4;"
+        )
         layout.addWidget(self.txt_preview_sql)
 
     def _on_mock_mode_toggled(self, checked: bool):
@@ -304,21 +291,21 @@ class SQLServerConfigDialog(QDialog):
         cfg["encryption"] = self.cmb_encrypt.currentData()
         cfg["timeout"] = self.spn_timeout.value()
 
-        # Маппинг
         cfg["mapping"] = {
             "import": {
                 "table": self.cmb_imp_table.currentText().strip() or "dbo.ChestnyZnakCodes",
                 "code_col": self.cmb_imp_code.currentText().strip() or "mark_code",
                 "gtin_col": self.cmb_imp_gtin.currentText().strip() or "gtin",
                 "sn_col": self.cmb_imp_sn.currentText().strip() or "serial_number",
-                "where": self.txt_imp_where.text().strip()
+                "order_col": self.cmb_imp_order.currentText().strip() or "order_id",
+                "where": self.txt_imp_where.text().strip(),
             },
             "status": {
                 "table": self.cmb_stat_table.currentText().strip() or "dbo.ChestnyZnakCodes",
                 "code_col": self.cmb_stat_code.currentText().strip() or "mark_code",
                 "is_printed_col": self.cmb_stat_printed.currentText().strip() or "is_printed",
                 "printed_at_col": self.cmb_stat_date.currentText().strip() or "printed_at",
-                "status_col": self.cmb_stat_status.currentText().strip() or "status_code"
+                "status_col": self.cmb_stat_status.currentText().strip() or "status_code",
             },
             "events": {
                 "table": self.cmb_ev_table.currentText().strip() or "dbo.MarkingEvents",
@@ -327,8 +314,8 @@ class SQLServerConfigDialog(QDialog):
                 "operator_name": self.txt_ev_op.text().strip() or "operator_name",
                 "station_id": self.txt_ev_station.text().strip() or "station_id",
                 "barcode": self.txt_ev_barcode.text().strip() or "barcode",
-                "status": self.txt_ev_status.text().strip() or "status"
-            }
+                "status": self.txt_ev_status.text().strip() or "status",
+            },
         }
         return cfg
 
@@ -349,20 +336,20 @@ class SQLServerConfigDialog(QDialog):
             self.cmb_auth.setCurrentIndex(idx_auth)
 
         self.txt_user.setText(cfg.get("user", ""))
-        self.spn_timeout.setValue(cfg.get("timeout", 10))
+        self.spn_timeout.setValue(int(cfg.get("timeout", 10)))
 
         enc_val = cfg.get("encryption", "no")
         idx_enc = self.cmb_encrypt.findData(enc_val)
         if idx_enc >= 0:
             self.cmb_encrypt.setCurrentIndex(idx_enc)
 
-        # Маппинг
         m = cfg.get("mapping", {})
         m_imp = m.get("import", {})
         self.cmb_imp_table.setCurrentText(m_imp.get("table", "dbo.ChestnyZnakCodes"))
         self.cmb_imp_code.setCurrentText(m_imp.get("code_col", "mark_code"))
         self.cmb_imp_gtin.setCurrentText(m_imp.get("gtin_col", "gtin"))
         self.cmb_imp_sn.setCurrentText(m_imp.get("sn_col", "serial_number"))
+        self.cmb_imp_order.setCurrentText(m_imp.get("order_col", "order_id"))
         self.txt_imp_where.setText(m_imp.get("where", "is_printed = 0"))
 
         m_stat = m.get("status", {})
@@ -414,13 +401,15 @@ class SQLServerConfigDialog(QDialog):
         m = cfg["mapping"]
 
         try:
-            sql_imp, _ = mgr.build_import_sql(m["import"], m["import"]["table"], limit=50000, where_clause=m["import"].get("where", ""))
+            sql_imp, _ = mgr.build_import_sql(
+                m["import"], m["import"]["table"], limit=50000, where_clause=m["import"].get("where", "")
+            )
             sql_stat = mgr.build_status_update_sql(m["status"], m["status"]["table"])
             sql_ev, _ = mgr.build_event_insert_sql(m["events"], m["events"]["table"])
 
             lines = [
                 "-- ========================================================",
-                "-- 1. ЗАПРОС ИМПОРТА КОДОВ МАРКИРОВКИ (SELECT)",
+                "-- 1. ЗАПРОС ЗАГРУЗКИ ШК И DATAMATRIX (SELECT)",
                 "-- ========================================================",
                 f"{sql_imp};",
                 "",
@@ -432,14 +421,16 @@ class SQLServerConfigDialog(QDialog):
                 "-- ========================================================",
                 "-- 3. ЗАПРОС ВЫГРУЗКИ ЖУРНАЛА СОБЫТИЙ (INSERT)",
                 "-- ========================================================",
-                f"{sql_ev};"
+                f"{sql_ev};",
             ]
             self.txt_preview_sql.setPlainText("\n".join(lines))
         except Exception as e:
             self.txt_preview_sql.setPlainText(f"-- Ошибка построения запроса: {e}")
 
     def _on_export_template(self):
-        filename, _ = QFileDialog.getSaveFileName(self, "Сохранить шаблон структуры", "mssql_template.json", "JSON (*.json)")
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Сохранить шаблон структуры", "mssql_template.json", "JSON (*.json)"
+        )
         if filename:
             try:
                 MSSQLManager.export_structure_template(filename)
@@ -457,6 +448,7 @@ class SQLServerConfigDialog(QDialog):
                 self.cmb_imp_code.setCurrentText(imp.get("code_col", ""))
                 self.cmb_imp_gtin.setCurrentText(imp.get("gtin_col", ""))
                 self.cmb_imp_sn.setCurrentText(imp.get("sn_col", ""))
+                self.cmb_imp_order.setCurrentText(imp.get("order_col", "order_id"))
 
                 stat = data.get("code_status_mapping", {})
                 self.cmb_stat_table.setCurrentText(stat.get("target_table", ""))
@@ -477,42 +469,44 @@ class SQLServerConfigDialog(QDialog):
 
 class SQLServerAdminPage(QWidget):
     """
-    Страница панели администратора 'SQL Server' (раздел ИНТЕГРАЦИЯ)
+    Страница панели администратора 'SQL Server' (доступна на Мастер-ПК).
     """
-    sync_requested = Signal(str)  # 'import', 'export_status', 'export_events', 'all'
+    sync_requested = Signal(str)  # 'import', 'build_packages', 'export_status', 'export_events', 'all'
 
     def __init__(self, config_store=None, parent=None):
         super().__init__(parent)
         self.store = config_store
         self._init_ui()
+        self._refresh_labels_from_cfg()
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(20)
+        layout.setSpacing(18)
 
-        # Заголовок страницы
         header_layout = QHBoxLayout()
         title_box = QVBoxLayout()
-        lbl_title = QLabel("Интеграция с Microsoft SQL Server")
-        lbl_title.setStyleSheet("font-size: 20px; font-weight: bold; color: #fff;")
-        lbl_subtitle = QLabel("Двухсторонний обмен кодами и производственным прогрессом с сервером заказчика")
-        lbl_subtitle.setStyleSheet("color: #888; font-size: 13px;")
+        lbl_title = QLabel("Интеграция с Microsoft SQL Server (Мастер-ПК)")
+        lbl_title.setStyleSheet("font-size: 20px; font-weight: bold;")
+        lbl_subtitle = QLabel(
+            "Загрузка кодов маркировки (ШК ↔ ДМ) с сервера, формирование JSON-пакетов для обычных ПК и выгрузка отчётов"
+        )
+        lbl_subtitle.setStyleSheet("color: #8b97a6; font-size: 13px;")
         title_box.addWidget(lbl_title)
         title_box.addWidget(lbl_subtitle)
         header_layout.addLayout(title_box)
         header_layout.addStretch()
 
-        self.btn_open_settings = QPushButton("⚙ Параметры подключения")
+        self.btn_open_settings = QPushButton("⚙ Параметры подключения и таблиц")
+        self.btn_open_settings.setProperty("primary", True)
         self.btn_open_settings.setStyleSheet("padding: 8px 16px; font-size: 13px;")
         self.btn_open_settings.clicked.connect(self._open_settings_dialog)
         header_layout.addWidget(self.btn_open_settings)
         layout.addLayout(header_layout)
 
-        # Карточки статуса
-        status_box = QGroupBox("Состояние соединения")
+        status_box = QGroupBox("Состояние соединения с MS SQL Server")
         status_layout = QGridLayout(status_box)
-        
+
         status_layout.addWidget(QLabel("Сервер:"), 0, 0)
         self.lbl_cur_server = QLabel("MOCK (Режим эмуляции)")
         self.lbl_cur_server.setStyleSheet("font-weight: bold;")
@@ -525,44 +519,45 @@ class SQLServerAdminPage(QWidget):
 
         status_layout.addWidget(QLabel("Текущий статус:"), 1, 0)
         self.lbl_conn_status = QLabel("● Готов к обмену")
-        self.lbl_conn_status.setStyleSheet("color: #4caf50; font-weight: bold;")
+        self.lbl_conn_status.setStyleSheet("color: #22c55e; font-weight: bold;")
         status_layout.addWidget(self.lbl_conn_status, 1, 1)
 
-        status_layout.addWidget(QLabel("Очередь к выгрузке:"), 1, 2)
-        self.lbl_queue_count = QLabel("0 событий, 0 кодов")
+        status_layout.addWidget(QLabel("Напечатано / в очереди:"), 1, 2)
+        self.lbl_queue_count = QLabel("0 в очереди")
         status_layout.addWidget(self.lbl_queue_count, 1, 3)
 
         layout.addWidget(status_box)
 
-        # Панель ручного и автоматического обмена
-        actions_box = QGroupBox("Управление синхронизацией")
+        actions_box = QGroupBox("Операции обмена с MS SQL Server")
         actions_layout = QVBoxLayout(actions_box)
         actions_layout.setSpacing(12)
 
         btns_row = QHBoxLayout()
-        self.btn_import_codes = QPushButton("📥 1. Загрузить коды маркировки")
-        self.btn_import_codes.setStyleSheet("padding: 10px; font-size: 13px;")
+        self.btn_import_codes = QPushButton("📥 1. Вытянуть ШК + ДМ с сервера и создать JSON-пакеты")
+        self.btn_import_codes.setProperty("primary", True)
+        self.btn_import_codes.setStyleSheet("padding: 10px; font-size: 13px; font-weight: 600;")
         self.btn_import_codes.clicked.connect(lambda: self.sync_requested.emit("import"))
         btns_row.addWidget(self.btn_import_codes)
 
-        self.btn_export_status = QPushButton("📤 2. Выгрузить статус кодов")
+        self.btn_export_status = QPushButton("📤 2. Выгрузить статусы напечатанных ДМ")
         self.btn_export_status.setStyleSheet("padding: 10px; font-size: 13px;")
         self.btn_export_status.clicked.connect(lambda: self.sync_requested.emit("export_status"))
         btns_row.addWidget(self.btn_export_status)
 
-        self.btn_export_events = QPushButton("📤 3. Выгрузить прогресс сканирования")
+        self.btn_export_events = QPushButton("📤 3. Выгрузить журнал сканирований")
         self.btn_export_events.setStyleSheet("padding: 10px; font-size: 13px;")
         self.btn_export_events.clicked.connect(lambda: self.sync_requested.emit("export_events"))
         btns_row.addWidget(self.btn_export_events)
 
-        self.btn_full_sync = QPushButton("⚡ Полный обмен")
-        self.btn_full_sync.setStyleSheet("background-color: #1976d2; color: white; font-weight: bold; padding: 10px 18px; font-size: 13px;")
+        self.btn_full_sync = QPushButton("⚡ Полный цикл обмена")
+        self.btn_full_sync.setStyleSheet(
+            "background-color: #1976d2; color: white; font-weight: bold; padding: 10px 18px; font-size: 13px;"
+        )
         self.btn_full_sync.clicked.connect(lambda: self.sync_requested.emit("all"))
         btns_row.addWidget(self.btn_full_sync)
 
         actions_layout.addLayout(btns_row)
 
-        # Автообмен
         auto_row = QHBoxLayout()
         self.chk_auto_sync = QCheckBox("Автоматический фоновый обмен каждые:")
         self.spn_auto_interval = QSpinBox()
@@ -576,29 +571,32 @@ class SQLServerAdminPage(QWidget):
 
         layout.addWidget(actions_box)
 
-        # Журнал последних операций
-        log_box = QGroupBox("Лог операций обмена с SQL Server")
+        log_box = QGroupBox("Лог операций обмена с MS SQL Server")
         log_layout = QVBoxLayout(log_box)
         self.txt_log = QTextEdit()
         self.txt_log.setReadOnly(True)
-        self.txt_log.setStyleSheet("background-color: #1a1a1a; font-family: Consolas; font-size: 12px;")
-        self.txt_log.append("[Система] Модуль SQL Server загружен. Режим: Mock эмуляция готов к работе.")
+        self.txt_log.setStyleSheet("background-color: #0d1117; color: #c9d1d9; font-family: Consolas; font-size: 12px;")
+        self.txt_log.append(
+            "[Система] Модуль MS SQL Server готов. Нажмите «1. Вытянуть ШК + ДМ с сервера», "
+            "чтобы загрузить коды в пул Мастер-ПК и сформировать именованные JSON-пакеты для обычных ПК."
+        )
         log_layout.addWidget(self.txt_log)
         layout.addWidget(log_box)
 
+    def _refresh_labels_from_cfg(self):
+        cfg = load_mssql_config(self.store)
+        server_name = "MOCK (Тестовая эмуляция)" if cfg.get("mock_mode") else (cfg.get("server") or "Не указан")
+        self.lbl_cur_server.setText(server_name)
+        self.lbl_cur_db.setText(cfg.get("database", "ChestnyZnakDB"))
+
     def _open_settings_dialog(self):
-        curr_cfg = {}
-        if self.store and hasattr(self.store, "get_mssql_config"):
-            curr_cfg = self.store.get_mssql_config()
+        curr_cfg = load_mssql_config(self.store)
         dlg = SQLServerConfigDialog(curr_cfg, self)
         dlg.settings_saved.connect(self._on_settings_saved)
         dlg.exec()
 
     def _on_settings_saved(self, new_cfg: dict):
-        if self.store and hasattr(self.store, "save_mssql_config"):
-            self.store.save_mssql_config(new_cfg)
-        
-        server_name = "MOCK (Эмуляция)" if new_cfg.get("mock_mode") else new_cfg.get("server", "Не указан")
-        self.lbl_cur_server.setText(server_name)
-        self.lbl_cur_db.setText(new_cfg.get("database", "ChestnyZnakDB"))
-        self.txt_log.append(f"[Настройки] Обновлены параметры сервера: {server_name}/{new_cfg.get('database')}")
+        save_mssql_config(self.store, new_cfg)
+        self._refresh_labels_from_cfg()
+        server_name = "MOCK (Тестовая эмуляция)" if new_cfg.get("mock_mode") else new_cfg.get("server", "Не указан")
+        self.txt_log.append(f"[Настройки] Сохранены параметры сервера: {server_name} / {new_cfg.get('database')}")

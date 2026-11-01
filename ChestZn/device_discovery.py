@@ -21,6 +21,15 @@ import socket
 import logging
 import platform
 import subprocess
+import time
+import threading
+
+_DISCOVERY_LOCK = threading.Lock()
+_PRINTERS_CACHE_TS: float = 0.0
+_PRINTERS_CACHE_DATA: list = []
+_SCANNERS_CACHE_TS: float = 0.0
+_SCANNERS_CACHE_DATA: list = []
+_CACHE_TTL_SEC: float = 10.0
 from typing import List, Dict, Any, Tuple, Optional
 
 logger = logging.getLogger("ChestZn.Discovery")
@@ -146,7 +155,11 @@ def _is_printer_name_matching_pnp(printer_name: str, present_pnp_names: List[str
 # 1. ОБНАРУЖЕНИЕ ТОЛЬКО ФИЗИЧЕСКИ ПОДКЛЮЧЕННЫХ В ДАННЫЙ МОМЕНТ ПРИНТЕРОВ
 # ---------------------------------------------------------------------------
 
-def detect_local_printers(connected_only: bool = True) -> List[Dict[str, Any]]:
+def detect_local_printers(connected_only: bool = True, force_refresh: bool = False) -> List[Dict[str, Any]]:
+    global _PRINTERS_CACHE_TS, _PRINTERS_CACHE_DATA
+    now = time.time()
+    if connected_only and not force_refresh and (now - _PRINTERS_CACHE_TS) < _CACHE_TTL_SEC:
+        return list(_PRINTERS_CACHE_DATA)
     printers: List[Dict[str, Any]] = []
 
     if platform.system() != "Windows":
@@ -249,6 +262,9 @@ def detect_local_printers(connected_only: bool = True) -> List[Dict[str, Any]]:
     except Exception as e:
         logger.error("Ошибка опроса принтеров Windows: %s", e)
 
+    if connected_only:
+        _PRINTERS_CACHE_DATA = list(printers)
+        _PRINTERS_CACHE_TS = time.time()
     return printers
 
 
@@ -256,7 +272,11 @@ def detect_local_printers(connected_only: bool = True) -> List[Dict[str, Any]]:
 # 2. ОБНАРУЖЕНИЕ ТОЛЬКО ФИЗИЧЕСКИ ПОДКЛЮЧЕННЫХ В ДАННЫЙ МОМЕНТ СКАНЕРОВ
 # ---------------------------------------------------------------------------
 
-def detect_local_scanners(connected_only: bool = True) -> List[Dict[str, Any]]:
+def detect_local_scanners(connected_only: bool = True, force_refresh: bool = False) -> List[Dict[str, Any]]:
+    global _SCANNERS_CACHE_TS, _SCANNERS_CACHE_DATA
+    now = time.time()
+    if connected_only and not force_refresh and (now - _SCANNERS_CACHE_TS) < _CACHE_TTL_SEC:
+        return list(_SCANNERS_CACHE_DATA)
     """
     Возвращает список ТОЛЬКО реально подключенных в данный момент сканеров штрихкодов.
     Если ни один сканер не подключен, возвращает пустой список [].
@@ -414,6 +434,9 @@ def detect_local_scanners(connected_only: bool = True) -> List[Dict[str, Any]]:
     except Exception as e:
         logger.debug("Ошибка поиска USB-HID сканеров: %s", e)
 
+    if connected_only:
+        _SCANNERS_CACHE_DATA = list(scanners)
+        _SCANNERS_CACHE_TS = time.time()
     return scanners
 
 
