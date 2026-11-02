@@ -725,6 +725,60 @@ def resolve_and_claim_cz_code(
 # 2. ГАРАНТИРОВАННЫЙ ПОКАЗ УВЕДОМЛЕНИЙ И ОШИБОК ОПЕРАТОРУ (Карточка + Toast + QMessageBox)
 # ---------------------------------------------------------------------------
 
+def update_operator_printer_badge(op_win=None):
+    """
+    Динамически обновляет статусную плашку принтера в окне оператора (OperatorWindow):
+    - Если принтер подключён: 🟢 Принтер поста: [Имя] (зелёная рамка)
+    - Если принтер отключён: 🔴 Принтер поста: Отключён (красная рамка)
+    """
+    if op_win is None:
+        op_win = _find_operator_window()
+    if op_win is None:
+        return
+
+    try:
+        from device_discovery import get_currently_connected_printer
+        live = get_currently_connected_printer(force_refresh=False)
+        is_conn = bool(live and live.get("connected"))
+        pr_name = live["name"] if is_conn else ""
+
+        # Обновляем ТОЛЬКО плашку принтера в шапке (не трогая центральный баннер)
+        lbl_pr = getattr(op_win, "lbl_printer", None) or getattr(op_win, "btn_printer", None)
+        if lbl_pr is not None:
+            if is_conn:
+                lbl_pr.setText(f"🟢 {pr_name}")
+                lbl_pr.setStyleSheet(
+                    "background:#0f291e; color:#4ade80; border:1px solid #16a34a; "
+                    "border-radius:6px; padding:4px 10px; font-weight:700;"
+                )
+            else:
+                lbl_pr.setText("🔴 Принтер отключён")
+                lbl_pr.setStyleSheet(
+                    "background:#2a1215; color:#f87171; border:1px solid #dc2626; "
+                    "border-radius:6px; padding:4px 10px; font-weight:700;"
+                )
+
+        # Центральный баннер: стабильно показываем ТОЛЬКО вариант 2 (без мигания и без дублирующих полос)
+        scan_in = getattr(op_win, "scan_input", None)
+        if hasattr(op_win, "_show_status"):
+            if is_conn:
+                if scan_in is not None and not scan_in.isEnabled():
+                    scan_in.setEnabled(True)
+                    scan_in.setPlaceholderText("Ожидание сканирования / ручного ввода...")
+                    op_win._show_status("ready", "🟢 Ожидание сканирования / ручного ввода", sub="Поднесите штрихкод товара к сканеру или введите цифры вручную")
+            else:
+                if scan_in is not None and scan_in.isEnabled():
+                    scan_in.setEnabled(False)
+                    scan_in.setPlaceholderText("🔴 Сканирование заблокировано: подключите принтер")
+                op_win._show_status(
+                    "error",
+                    "🔴 Принтер не подключён. Подключите принтер к ПК для начала работы",
+                    sub="Включите питание принтера или подключите USB-кабель к компьютеру"
+                )
+    except Exception as e:
+        logger.debug("update_operator_printer_badge: %s", e)
+
+
 def _find_operator_window():
     """
     Находит активный экземпляр OperatorWindow среди всех виджетов приложения.
@@ -889,14 +943,27 @@ def resolve_bound_printer_for_scan(
                         if k_cand and k_cand in bindings and bindings[k_cand]:
                             return bindings[k_cand]
 
+        candidate_pr = ""
         if "USB-HID" in bindings and bindings["USB-HID"]:
-            return bindings["USB-HID"]
+            candidate_pr = bindings["USB-HID"]
+        elif bindings:
+            for s_key, pr_name in bindings.items():
+                if pr_name:
+                    candidate_pr = pr_name
+                    break
 
-        for s_key, pr_name in bindings.items():
-            if pr_name:
-                return pr_name
+        if candidate_pr:
+            try:
+                from device_discovery import get_currently_connected_printer
+                live = get_currently_connected_printer(preferred_name=candidate_pr, force_refresh=False)
+                if live and live.get("connected"):
+                    return live["name"]
+                return None
+            except Exception:
+                pass
 
     # Резервная проверка привязок в базе данных Store (таблицы scanners / printers)
+    resolved_target = None
     store_ref = _ENGINE_INSTANCE.store if _ENGINE_INSTANCE is not None else None
     if store_ref is not None and hasattr(store_ref, "list_computers"):
         try:
@@ -904,9 +971,22 @@ def resolve_bound_printer_for_scan(
                 printers = {pr["id"]: pr["name"] for pr in store_ref.list_printers_for_computer(comp["id"])}
                 for sc in store_ref.list_scanners_for_computer(comp["id"]):
                     if sc.get("enabled", True) and sc.get("printer_id") in printers:
-                        return printers[sc["printer_id"]]
+                        resolved_target = printers[sc["printer_id"]]
+                        break
         except Exception:
             pass
+
+    # ДИНАМИЧЕСКАЯ ПРОВЕРКА РЕАЛЬНОГО ПОДКЛЮЧЕНИЯ:
+    # 1. Не запоминает старый отключённый принтер.
+    # 2. Если привязанный принтер отключён, но подключён другой — подтягивает подключённый!
+    # 3. Если ни один принтер не подключён — возвращает None!
+    try:
+        from device_discovery import get_currently_connected_printer
+        live_pr = get_currently_connected_printer(preferred_name=resolved_target or "", force_refresh=False)
+        if live_pr and live_pr.get("connected"):
+            return live_pr["name"]
+    except Exception:
+        pass
 
     return None
 
@@ -1607,6 +1687,12 @@ class WorkstationEngine(QObject):
         self._attach_store_and_operator_hooks()
         install_global_print_router()
 
+        if PYSIDE_AVAILABLE:
+            self._printer_watcher_timer = QTimer(self)
+            self._printer_watcher_timer.setInterval(5000)
+            self._printer_watcher_timer.timeout.connect(self._check_live_printer_tick)
+            self._printer_watcher_timer.start()
+
     def _attach_store_and_operator_hooks(self):
         """
         Интегрирует связывание ШК->ЧЗ напрямую в методы Store (take_code, process_scan)
@@ -1802,6 +1888,13 @@ class WorkstationEngine(QObject):
         logger.info("Активно %d рабочих пар сканер->принтер", len(self.pairs))
         return len(self.pairs)
 
+    def _check_live_printer_tick(self):
+        """Периодический опрос физического подключения принтера (каждые 2 сек) для авто-разблокировки сканирования."""
+        try:
+            update_operator_printer_badge()
+        except Exception:
+            pass
+
     def start_all(self):
         """
         Запуск изолированных потоков для всех активных сканеров.
@@ -1819,6 +1912,10 @@ class WorkstationEngine(QObject):
             self.threads[pair_id] = th
             th.start()
             logger.info("Запущен поток сканера для пары #%d (%s -> %s)", pair_id, cfg.scanner_port, cfg.printer_name)
+        try:
+            update_operator_printer_badge()
+        except Exception:
+            pass
 
     def stop_all(self):
         """Корректная остановка всех потоков оборудования"""

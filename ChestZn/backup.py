@@ -14,7 +14,38 @@ import db
 from logger import get_logger
 log = get_logger("backup")
 
-APP_DIR = db.APP_DIR
+
+def get_app_dir() -> Path:
+    if hasattr(db, "APP_DIR") and getattr(db, "APP_DIR"):
+        return Path(getattr(db, "APP_DIR"))
+    return Path(os.environ.get("APPDATA", Path.home())) / "ChestZn"
+
+
+def get_db_path() -> Path:
+    """Надёжно определяет путь к активной базе данных ChestZn."""
+    for attr in ("DB_PATH", "DB_FILE", "db_path", "DATABASE_PATH"):
+        if hasattr(db, attr) and getattr(db, attr):
+            p = Path(getattr(db, attr))
+            if p.exists():
+                return p
+
+    # Пробуем узнать точный путь через активное подключение к SQLite
+    try:
+        if hasattr(db, "get_conn"):
+            with db.get_conn() as conn:
+                for row in conn.execute("PRAGMA database_list").fetchall():
+                    # row: (seq, name, file)
+                    db_name = row[1] if isinstance(row, (list, tuple)) else row["name"]
+                    db_file = row[2] if isinstance(row, (list, tuple)) else row["file"]
+                    if db_name == "main" and db_file:
+                        return Path(db_file)
+    except Exception:
+        pass
+
+    return get_app_dir() / "chestzn.db"
+
+
+APP_DIR = get_app_dir()
 BACKUP_DIR = APP_DIR / "backups"
 MAX_BACKUPS = 50
 AUTO_BACKUP_INTERVAL_DAYS = 14
@@ -39,14 +70,15 @@ def create_backup(is_auto: bool = False) -> Dict[str, Any]:
     После создания автоматически проверяет и удаляет бэкапы старше 6 месяцев (180 дней).
     Возвращает {ok, path, name, size_kb, deleted_old, info}.
     """
-    if not db.DB_PATH.exists():
-        log.warning("Бэкап не создан: файл БД не найден (%s)", db.DB_PATH)
-        return {"ok": False, "info": "Файл БД не найден"}
+    db_file = get_db_path()
+    if not db_file.exists():
+        log.warning("Бэкап не создан: файл БД не найден (%s)", db_file)
+        return {"ok": False, "info": f"Файл БД не найден ({db_file.name})"}
 
     prefix = "chestzn_auto" if is_auto else "chestzn"
     target = make_backup_path(prefix=prefix)
     try:
-        src = sqlite3.connect(str(db.DB_PATH), timeout=10.0)
+        src = sqlite3.connect(str(db_file), timeout=10.0)
         dst = sqlite3.connect(str(target))
         with dst:
             src.backup(dst)
@@ -61,12 +93,13 @@ def create_backup(is_auto: bool = False) -> Dict[str, Any]:
         deleted_old = cleanup_res.get("deleted_count", 0)
 
         try:
-            with db.get_conn() as conn:
-                conn.execute(
-                    "INSERT OR REPLACE INTO settings (key, value) VALUES ('last_auto_backup', ?)",
-                    (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),)
-                )
-                conn.commit()
+            if hasattr(db, "get_conn"):
+                with db.get_conn() as conn:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO settings (key, value) VALUES ('last_auto_backup', ?)",
+                        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),)
+                    )
+                    conn.commit()
         except Exception:
             pass
 
@@ -120,7 +153,6 @@ def cleanup_old_backups(max_age_days: int = BACKUP_RETENTION_DAYS) -> Dict[str, 
     cutoff = datetime.now() - timedelta(days=max_age_days)
     deleted_names = []
 
-    # Всегда сохраняем самый свежий бэкап (files[0]), проверяем остальные
     for idx, f in enumerate(files[1:], start=1):
         should_delete_by_age = f["mtime"] <= cutoff
         should_delete_by_count = idx >= MAX_BACKUPS
@@ -134,12 +166,13 @@ def cleanup_old_backups(max_age_days: int = BACKUP_RETENTION_DAYS) -> Dict[str, 
     if deleted_names:
         log.info("Автоудаление старых бэкапов (>%s дн.): удалено %s шт.", max_age_days, len(deleted_names))
         try:
-            with db.get_conn() as conn:
-                conn.execute(
-                    "INSERT OR REPLACE INTO settings (key, value) VALUES ('last_backup_cleanup', ?)",
-                    (f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} (удалено: {len(deleted_names)})",)
-                )
-                conn.commit()
+            if hasattr(db, "get_conn"):
+                with db.get_conn() as conn:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO settings (key, value) VALUES ('last_backup_cleanup', ?)",
+                        (f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} (удалено: {len(deleted_names)})",)
+                    )
+                    conn.commit()
         except Exception:
             pass
 
@@ -184,7 +217,6 @@ def auto_backup_if_needed(
         log.info("Автобэкап: прошло %.1f дн. (порог %d дн.) — создаём новый бэкап", age_days, interval_days)
         return create_backup(is_auto=True)
 
-    log.info("Автобэкап не требуется: с последнего бэкапа прошло %.1f дн. из %d дн.", age_days, interval_days)
     return None
 
 
@@ -198,24 +230,25 @@ def restore_backup(backup_path: str) -> Dict[str, Any]:
         log.error("Восстановление: файл не найден (%s)", backup_path)
         return {"ok": False, "info": "Файл бэкапа не найден"}
 
+    target_db = get_db_path()
     try:
-        if db.DB_PATH.exists():
+        if target_db.exists():
             ensure_backup_dir()
             stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             safety = BACKUP_DIR / f"chestzn_before_restore_{stamp}.db"
-            shutil.copy2(str(db.DB_PATH), str(safety))
+            shutil.copy2(str(target_db), str(safety))
             log.info("Текущая БД сохранена перед восстановлением: %s", safety.name)
 
         for suffix in ("-wal", "-shm"):
-            aux = Path(str(db.DB_PATH) + suffix)
+            aux = Path(str(target_db) + suffix)
             if aux.exists():
                 try:
                     aux.unlink()
                 except Exception as e:
                     log.warning("Не удалось удалить %s: %s", aux.name, e)
 
-        shutil.copy2(str(src_path), str(db.DB_PATH))
-        size_kb = max(1, db.DB_PATH.stat().st_size // 1024)
+        shutil.copy2(str(src_path), str(target_db))
+        size_kb = max(1, target_db.stat().st_size // 1024)
         log.info("БД восстановлена из %s (%s КБ)", src_path.name, size_kb)
         return {
             "ok": True,

@@ -1,3 +1,4 @@
+from datetime import datetime
 r"""
 ChestZn — Модуль интеграции с Microsoft SQL Server (mssql.py).
 Обеспечивает двухсторонний обмен между Мастер-ПК и сервером БД MS SQL:
@@ -504,13 +505,18 @@ class MSSQLManager:
 
         updated_count = 0
         not_found_count = 0
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         for item in codes_data:
             params = []
             if mapping.get("is_printed_col"):
-                params.append(1 if item.get("is_printed", True) else 0)
+                is_pr = item.get("is_printed", True)
+                if item.get("printed") == 0:
+                    is_pr = False
+                params.append(1 if is_pr else 0)
             if mapping.get("printed_at_col"):
-                params.append(item.get("printed_at"))
+                dt_val = item.get("printed_at") or item.get("used_at") or now_str
+                params.append(dt_val)
             if mapping.get("status_col"):
                 params.append(item.get("status", "printed"))
 
@@ -524,8 +530,50 @@ class MSSQLManager:
         if not self.is_mock_mode():
             conn.commit()
 
-        logger.info("Выгрузка статусов кодов: обновлено %d, не найдено %d", updated_count, not_found_count)
+        logger.info("Выгрузка статусов кодов в MS SQL: обновлено %d, не найдено %d", updated_count, not_found_count)
         return {"updated": updated_count, "not_found": not_found_count}
+
+    def export_marking_events(
+        self,
+        mapping: Dict[str, str],
+        table: str,
+        events_data: List[Dict[str, Any]]
+    ) -> Dict[str, int]:
+        """Выгрузка событий сканирования и печати в журнал событий MS SQL Server (INSERT в таблицу событий)."""
+        if not events_data:
+            return {"inserted": 0}
+
+        table_name = table or mapping.get("table") or "dbo.MarkingEvents"
+        sql, field_keys = self.build_event_insert_sql(mapping, table_name)
+        conn = self.connect()
+        cursor = conn.cursor()
+
+        inserted_count = 0
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        for ev in events_data:
+            params = []
+            for k in field_keys:
+                val = ev.get(k)
+                if val is None:
+                    if "time" in k or "date" in k or "at" in k:
+                        val = now_str
+                    elif "status" in k:
+                        val = "OK"
+                    else:
+                        val = ""
+                params.append(val)
+            try:
+                cursor.execute(sql, params)
+                inserted_count += 1
+            except Exception as e:
+                logger.warning("Ошибка вставки события в MS SQL: %s", e)
+
+        if not self.is_mock_mode():
+            conn.commit()
+
+        logger.info("Выгрузка событий в MS SQL: успешно добавлено %d записей", inserted_count)
+        return {"inserted": inserted_count}
 
     @staticmethod
     def export_structure_template(filepath: str):

@@ -2,7 +2,7 @@
 ChestZn — Модуль точного обнаружения реально подключенного оборудования (device_discovery.py)
 Определяет ТОЛЬКО физически подключенные в данный момент принтеры и сканеры:
 1. detect_local_printers(connected_only=True):
-   - Отсекает виртуальные принтеры (PDF, XPS, OneNote, Fax) и пустые порты (LPT, FILE, PORTPROMPT, WSD).
+   - Отсекает виртуальные принтеры (PDF, XPS, OneNote, Fax) и пустые порты (LPT, FILE, PORTPROMуPT, WSD).
    - Для USB-принтеров (USB001, USB002...) проверяет через Windows PnP (Get-PnpDevice -PresentOnly -Status OK),
      действительно ли принтер прямо сейчас физически воткнут в USB и включён. Старые установленные драйверы
      отключённых принтеров (например, офисный Xerox/HP/Canon без кабеля) НЕ выводятся.
@@ -29,7 +29,7 @@ _PRINTERS_CACHE_TS: float = 0.0
 _PRINTERS_CACHE_DATA: list = []
 _SCANNERS_CACHE_TS: float = 0.0
 _SCANNERS_CACHE_DATA: list = []
-_CACHE_TTL_SEC: float = 10.0
+_CACHE_TTL_SEC: float = 30.0
 from typing import List, Dict, Any, Tuple, Optional
 
 logger = logging.getLogger("ChestZn.Discovery")
@@ -80,14 +80,70 @@ def is_virtual_printer(printer_name: str) -> bool:
     return any(k in name_l for k in VIRTUAL_PRINTER_KEYWORDS)
 
 
-def _get_present_usb_printers_windows() -> Tuple[bool, List[str]]:
+_PS_OFFLINE_CACHE_TS: float = 0.0
+_PS_OFFLINE_CACHE_DATA: Dict[str, bool] = {}
+
+def _get_windows_printer_offline_statuses(force: bool = False) -> Dict[str, bool]:
     """
-    Опрашивает Windows PnP (Get-PnpDevice -PresentOnly -Status OK), чтобы узнать,
-    какие физические USB-принтеры прямо сейчас воткнуты в ПК и включены.
-    Возвращает (has_any_usbprint_device, list_of_present_printer_names_lower).
+    Кэшированный (30 сек) опрос Windows Get-Printer.
+    На горячем пути не запускает PowerShell, полностью исключая лаги при переключении вкладок.
     """
+    global _PS_OFFLINE_CACHE_TS, _PS_OFFLINE_CACHE_DATA
+    if platform.system() != "Windows":
+        return {}
+
+    now = time.time()
+    if not force and (now - _PS_OFFLINE_CACHE_TS) < _CACHE_TTL_SEC and _PS_OFFLINE_CACHE_DATA:
+        return dict(_PS_OFFLINE_CACHE_DATA)
+
+    try:
+        ps_cmd = (
+            "Get-Printer -ErrorAction SilentlyContinue | "
+            "Select-Object Name, PortName, PrinterStatus, WorkOffline | "
+            "ConvertTo-Json -Compress"
+        )
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        res = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_cmd],
+            capture_output=True,
+            text=True,
+            timeout=1.5,
+            creationflags=creationflags
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            raw = json.loads(res.stdout.strip())
+            if isinstance(raw, dict):
+                raw = [raw]
+            res_dict = {}
+            for item in raw:
+                p_name = str(item.get("Name") or "").strip().lower()
+                is_off = bool(item.get("WorkOffline", False)) or str(item.get("PrinterStatus", "")).lower() in ("offline", "error", "not available")
+                if p_name:
+                    res_dict[p_name] = is_off
+            _PS_OFFLINE_CACHE_TS = now
+            _PS_OFFLINE_CACHE_DATA = res_dict
+            return res_dict
+    except Exception as e:
+        logger.debug("Ошибка опроса статусов Get-Printer: %s", e)
+    return dict(_PS_OFFLINE_CACHE_DATA)
+
+
+_USB_PNP_CACHE_TS: float = 0.0
+_USB_PNP_CACHE_HAS: bool = False
+_USB_PNP_CACHE_NAMES: List[str] = []
+
+def _get_present_usb_printers_windows(force: bool = False) -> Tuple[bool, List[str]]:
+    """
+    Кэшированный (30 сек) опрос физических USBPRINT-устройств.
+    Исключает запуск тяжелого PowerShell при переключении вкладок.
+    """
+    global _USB_PNP_CACHE_TS, _USB_PNP_CACHE_HAS, _USB_PNP_CACHE_NAMES
     if platform.system() != "Windows":
         return False, []
+
+    now = time.time()
+    if not force and (now - _USB_PNP_CACHE_TS) < _CACHE_TTL_SEC:
+        return _USB_PNP_CACHE_HAS, list(_USB_PNP_CACHE_NAMES)
 
     try:
         ps_script = (
@@ -101,10 +157,13 @@ def _get_present_usb_printers_windows() -> Tuple[bool, List[str]]:
             ["powershell", "-NoProfile", "-Command", ps_script],
             capture_output=True,
             text=True,
-            timeout=2.5,
+            timeout=1.5,
             creationflags=creationflags
         )
         if res.returncode != 0 or not res.stdout.strip():
+            _USB_PNP_CACHE_TS = now
+            _USB_PNP_CACHE_HAS = False
+            _USB_PNP_CACHE_NAMES = []
             return False, []
 
         raw = json.loads(res.stdout.strip())
@@ -131,6 +190,9 @@ def _get_present_usb_printers_windows() -> Tuple[bool, List[str]]:
                 if len(parts) >= 2:
                     names.append(parts[1].lower().replace("_", " "))
 
+        _USB_PNP_CACHE_TS = now
+        _USB_PNP_CACHE_HAS = has_usbprint
+        _USB_PNP_CACHE_NAMES = names
         return has_usbprint, names
     except Exception as e:
         logger.debug("Ошибка проверки физического подключения USB-принтеров: %s", e)
@@ -155,6 +217,75 @@ def _is_printer_name_matching_pnp(printer_name: str, present_pnp_names: List[str
 # 1. ОБНАРУЖЕНИЕ ТОЛЬКО ФИЗИЧЕСКИ ПОДКЛЮЧЕННЫХ В ДАННЫЙ МОМЕНТ ПРИНТЕРОВ
 # ---------------------------------------------------------------------------
 
+def get_currently_connected_printer(
+    preferred_name: str = "",
+    force_refresh: bool = False
+) -> Optional[Dict[str, Any]]:
+    """
+    Динамически определяет РЕАЛЬНО ПОДКЛЮЧЕННЫЙ принтер в данный момент:
+    1. Не запоминает отключённый принтер: если настроенный принтер (например, Xerox)
+       в Windows отключён, функция НЕ считает его подключённым.
+    2. Если к ПК подключён другой принтер (TSC, Godex, Xprinter, Zebra) — автоматически
+       подтягивает его имя и язык управления.
+    3. Если ни одного принтера физически не подключено — возвращает None.
+    """
+    live_printers = detect_local_printers(connected_only=True, force_refresh=force_refresh)
+    if not live_printers:
+        return None
+
+    if preferred_name:
+        pref_low = preferred_name.strip().lower()
+        for p in live_printers:
+            p_name = p.get("name", "").strip().lower()
+            if p_name == pref_low or pref_low in p_name or p_name in pref_low:
+                return p
+
+    # Если предпочтительный принтер отключён, но к ПК подключён другой принтер — подтягиваем его
+    return live_printers[0]
+
+
+def check_printer_status(printer_name: str, force_refresh: bool = False) -> Dict[str, Any]:
+    """
+    Проверяет АКТУАЛЬНОЕ состояние конкретного принтера в данный момент.
+    Возвращает:
+      - 'connected': True, если принтер физически включён и доступен в системе
+      - 'status_text': Понятный статус («🟢 Подключён и готов» или «🔴 Принтер отключён / не найден»)
+      - 'port': Порт (USB001, COM3, 192.168.1.10 и т.д.)
+      - 'lang': Язык управления (zpl, tspl, ezpl, auto)
+    """
+    target = (printer_name or "").strip()
+    if not target:
+        return {
+            "connected": False,
+            "status_text": "Принтер не выбран",
+            "port": "—",
+            "lang": "auto",
+        }
+
+    all_printers = detect_local_printers(connected_only=False, force_refresh=force_refresh)
+    target_lower = target.lower()
+
+    for p in all_printers:
+        p_name = p.get("name", "").strip()
+        if p_name.lower() == target_lower or target_lower in p_name.lower() or p_name.lower() in target_lower:
+            is_online = bool(p.get("online", False))
+            return {
+                "name": p_name,
+                "connected": is_online,
+                "status_text": "🟢 Подключён и готов" if is_online else "🔴 Принтер отключён (выключен или нет кабеля)",
+                "port": p.get("port", "—"),
+                "lang": p.get("lang", "auto"),
+            }
+
+    return {
+        "name": target,
+        "connected": False,
+        "status_text": "🔴 Принтер не найден в системе Windows",
+        "port": "—",
+        "lang": "auto",
+    }
+
+
 def detect_local_printers(connected_only: bool = True, force_refresh: bool = False) -> List[Dict[str, Any]]:
     global _PRINTERS_CACHE_TS, _PRINTERS_CACHE_DATA
     now = time.time()
@@ -174,6 +305,7 @@ def detect_local_printers(connected_only: bool = True, force_refresh: bool = Fal
             pass
 
         has_usbprint, present_pnp_printers = _get_present_usb_printers_windows()
+        offline_statuses = _get_windows_printer_offline_statuses()
 
         flags = win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS
         printer_info_list = win32print.EnumPrinters(flags, None, 2)
@@ -199,6 +331,7 @@ def detect_local_printers(connected_only: bool = True, force_refresh: bool = Fal
             is_offline_flag = bool(status_flags & win32print.PRINTER_STATUS_OFFLINE)
             is_error_flag = bool(status_flags & (win32print.PRINTER_STATUS_ERROR | win32print.PRINTER_STATUS_NOT_AVAILABLE))
             work_offline_attr = bool(attributes & getattr(win32print, "PRINTER_ATTRIBUTE_WORK_OFFLINE", 0))
+            ps_offline = offline_statuses.get(name.lower(), False)
 
             # Проверяем реальное физическое подключение в данный момент
             physically_connected = False
@@ -233,7 +366,7 @@ def detect_local_printers(connected_only: bool = True, force_refresh: bool = Fal
                     except Exception:
                         physically_connected = False
 
-            if is_offline_flag or is_error_flag or work_offline_attr:
+            if is_offline_flag or is_error_flag or work_offline_attr or ps_offline:
                 physically_connected = False
 
             if connected_only and not physically_connected:

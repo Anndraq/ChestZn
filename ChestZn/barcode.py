@@ -10,7 +10,7 @@ ChestZn — Мгновенный автономный генератор нас�
   за ~0.05 мс без размытия граней и без зависаний при перетаскивании/ресайзе в редакторе шаблонов.
 """
 import re
-from typing import List, Tuple, Dict, Optional
+from typing import List, Tuple, Dict, Optional, Any
 from PySide6.QtGui import QPixmap, QImage, QPainter, QColor
 from PySide6.QtCore import Qt
 
@@ -483,3 +483,30 @@ def render_datamatrix(code: str, size: int = 120) -> QPixmap:
     except Exception as e:
         print(f"[barcode] Ошибка генерации DataMatrix: {e}")
         return _placeholder(target_size)
+
+def parse_datamatrix_gs1(code: str) -> Dict[str, Any]:
+    """Разбор строки GS1 DataMatrix на GTIN, серийный номер и криптохвост."""
+    raw = (code or "").strip().lstrip("\x1d")
+    m = re.match(r"^(?:01|\(01\))(\d{14})(?:21|\(21\))([^\x1d\(\r\n]{1,24})(?:(?:\x1d|\(91\)|91)([^\x1d\(\r\n]{1,10}))?(?:(?:\x1d|\(92\)|92)(.+))?", raw)
+    if m:
+        return {
+            "gtin": m.group(1),
+            "sn": m.group(2),
+            "key": m.group(3) or "",
+            "crypto": m.group(4) or "",
+            "raw": code,
+        }
+    return {"gtin": "", "sn": "", "raw": code}
+
+
+def encode_gs1_datamatrix_svg(code: str, size: int = 120) -> str:
+    """Генерация DataMatrix в формате SVG строки."""
+    matrix = encode_gs1_datamatrix_matrix(code)
+    dim = len(matrix)
+    rects = []
+    for r in range(dim):
+        for c in range(dim):
+            if matrix[r][c] == 1:
+                rects.append(f'<rect x="{c}" y="{r}" width="1" height="1" fill="#000000"/>')
+    svg_body = "".join(rects)
+    return f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {dim} {dim}" width="{size}" height="{size}">{svg_body}</svg>'

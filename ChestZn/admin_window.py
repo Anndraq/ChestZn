@@ -320,7 +320,6 @@ class AdminWindow(QWidget):
             ("scans",  "Сканов за смену",   "accent"),
             ("prints", "Напечатано ЧЗ",     "ok"),
             ("errors", "Ошибок / Брак",     "err"),
-            ("limit",  "Лимит смены",       "warn"),
             ("queue",  "В очереди обмена",  "warn"),
         ]:
             kpi_row.addWidget(self._make_kpi(key, label, color))
@@ -348,13 +347,7 @@ class AdminWindow(QWidget):
             self.dash_point_combo.addItem(f"{p['id']} — {p['name']}", p["id"])
         sc_row.addWidget(self.dash_point_combo)
 
-        sc_row.addWidget(QLabel("Лимит (план на смену):"))
-        self.dash_limit_spin = QSpinBox()
-        self.dash_limit_spin.setRange(0, 10_000_000)
-        self.dash_limit_spin.setSingleStep(100)
-        self.dash_limit_spin.setValue(int(self.store.counter.get("limit", 0)))
-        self.dash_limit_spin.setMinimumWidth(130)
-        sc_row.addWidget(self.dash_limit_spin)
+        # Лимит смены убран: размер партии задаётся заказом с сервера
 
         btn_save_shift = QPushButton("💾 Применить")
         btn_save_shift.setProperty("primary", True)
@@ -431,13 +424,10 @@ class AdminWindow(QWidget):
         return box
 
     def _dash_save_shift_settings(self):
-        """Сохраняет активную точку и лимит смены."""
+        """Сохраняет активную точку смены."""
         pt_id = self.dash_point_combo.currentData()
-        new_limit = int(self.dash_limit_spin.value())
-
         if pt_id:
             self.store.current_point = pt_id
-        self.store.counter["limit"] = new_limit
 
         try:
             import db
@@ -461,7 +451,7 @@ class AdminWindow(QWidget):
             pass
 
         self._refresh_dashboard()
-        self.toast.show_message(f"Настройки смены сохранены (точка {pt_id}, лимит {new_limit})", "ok")
+        self.toast.show_message(f"Настройки смены сохранены (точка {pt_id})", "ok")
 
     def _dash_reset_shift_counters(self):
         """Обнуляет счётчики сканов, печатей и ошибок при начале новой смены."""
@@ -573,17 +563,18 @@ class AdminWindow(QWidget):
             sc_dev = sc.get("device") or sc.get("name") or ""
             sc_title = sc.get("name") or sc_dev
             bound_pr = bindings.get(sc_dev) or bindings.get(sc_title) or ""
-            # Принтер показываем только если он реально подключен прямо сейчас
             if bound_pr and bound_pr in live_pr_names:
                 used_printers.add(bound_pr)
-                rows_out.append((sc_title, bound_pr))
+                rows_out.append((sc_title, bound_pr, True))
+            elif bound_pr:
+                rows_out.append((sc_title, f"{bound_pr} (отключён)", False))
             else:
-                rows_out.append((sc_title, ""))
+                rows_out.append((sc_title, "⚠️ Принтер не привязан", False))
 
         # Если есть физически подключенные сейчас принтеры, которые ещё не привязаны к подключенному сканеру
         for pr_name in live_pr_names:
             if pr_name not in used_printers:
-                rows_out.append(("", pr_name))
+                rows_out.append(("", pr_name, True))
 
         return rows_out
 
@@ -605,9 +596,12 @@ class AdminWindow(QWidget):
         if hasattr(self, "dash_limit_spin"):
             self.dash_limit_spin.setValue(int(c.get("limit", 0)))
 
-        # Получаем ТОЛЬКО физически подключенные на данный момент сканеры и принтеры
+        # Опрашиваем АКТУАЛЬНЫЕ данные по подключенным сканерам и принтерам
         live_rows = self._get_live_connected_devices()
-        active_full_pairs = [(sc, pr) for sc, pr in live_rows if sc and pr]
+        active_full_pairs = [
+            (item[0], item[1], item[2] if len(item) > 2 else True)
+            for item in live_rows if item[0] and item[1]
+        ]
 
         try:
             win = self.window()
@@ -621,18 +615,18 @@ class AdminWindow(QWidget):
 
         if hasattr(self, "dash_route_lbl"):
             if active_full_pairs:
-                pairs_txt = "  |  ".join([f"📡 {sc} → 🖨 {pr}" for sc, pr in active_full_pairs])
-                self.dash_route_lbl.setText(f"Активные пары этого ПК: {pairs_txt}")
+                parts = []
+                for sc, pr, is_on in active_full_pairs:
+                    status_icon = "🟢" if is_on else "🔴"
+                    parts.append(f"📡 {sc} → 🖨 {pr} {status_icon}")
+                self.dash_route_lbl.setText("  |  ".join(parts))
             else:
-                # Если ничего не подключено — ничего не выводим
-                self.dash_route_lbl.setText("")
+                self.dash_route_lbl.setText("🔴 Нет активных подключенных устройств")
 
         if hasattr(self, "dash_points_table"):
             t = self.dash_points_table
             t.setRowCount(0)
 
-            # Если в данный момент ни один сканер и ни один принтер не подключены —
-            # таблица остаётся пустой (ничего не выводим!)
             if not live_rows:
                 return
 
@@ -656,7 +650,11 @@ class AdminWindow(QWidget):
             cur_pt_name = cur_pt_obj.get("name", "—")
             st = stats_by_pt.get(cur_pt_id, {"total": 0, "free": 0, "printed": 0})
 
-            for idx_row, (sc_lbl, pr_lbl) in enumerate(live_rows):
+            for idx_row, row_data in enumerate(live_rows):
+                sc_lbl = row_data[0]
+                pr_lbl = row_data[1]
+                is_online = row_data[2] if len(row_data) > 2 else True
+
                 r = t.rowCount()
                 t.insertRow(r)
                 t.setItem(r, 0, cell(cur_pt_id, mono=True))
@@ -665,9 +663,10 @@ class AdminWindow(QWidget):
                     r, 2,
                     cell(f"📡 {sc_lbl}", "#38bdf8", mono=True) if sc_lbl else cell("", mono=True)
                 )
+                pr_color = "#4ade80" if is_online else "#f87171"
                 t.setItem(
                     r, 3,
-                    cell(f"🖨 {pr_lbl}", "#4ade80", mono=True) if pr_lbl else cell("", mono=True)
+                    cell(f"🖨 {pr_lbl}", pr_color, mono=True) if pr_lbl else cell("", mono=True)
                 )
                 t.setItem(r, 4, cell(st.get("total", 0) if idx_row == 0 else "", mono=True))
                 t.setItem(r, 5, cell(st.get("free", 0) if idx_row == 0 else "", "#22c55e", mono=True))
@@ -2225,58 +2224,147 @@ class AdminWindow(QWidget):
             self.toast.show_message(f"Ошибка: {result['info']}", "err")
 
     def _tpl_create(self):
-        code, ok = QInputDialog.getText(
-            self, "Новый шаблон",
-            "Код (латиница, без пробелов, уникальный):"
-        )
-        if not ok or not code.strip():
-            return
-        code = code.strip().lower().replace(" ", "_")
+        """Удобное создание нового шаблона этикетки с выбором пресетов размеров и режима."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Создание нового шаблона этикетки")
+        dlg.resize(460, 320)
 
-        name, ok = QInputDialog.getText(self, "Новый шаблон", "Название:")
-        if not ok or not name.strip():
-            return
-        name = name.strip()
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(18, 16, 18, 16)
+        lay.setSpacing(12)
 
-        config = {
-            "print_mode": "combined",
-            "combined": {
-                "w": 58, "h": 40, "dpi": 203,
-                "fields": [
-                    {"name": "dataMatrix", "label": "", "required": True,
-                     "font_size": 0, "x": 5, "y": 5},
-                    {"name": "name_ru", "label": "", "required": True,
-                     "font_size": 13, "x": 100, "y": 5},
-                    {"name": "importer", "label": "Импортёр",
-                     "required": True, "font_size": 10, "x": 100, "y": 40},
-                ],
-            },
-            "cz": {
-                "w": 30, "h": 30, "dpi": 203,
-                "fields": [
-                    {"name": "dataMatrix", "label": "", "required": True,
-                     "font_size": 0, "x": 5, "y": 5},
-                ],
-            },
-            "label": {
-                "w": 58, "h": 40, "dpi": 203,
-                "fields": [
-                    {"name": "name_ru", "label": "", "required": True,
-                     "font_size": 13, "x": 5, "y": 5},
-                    {"name": "importer", "label": "Импортёр",
-                     "required": True, "font_size": 10, "x": 5, "y": 25},
-                ],
-            },
-        }
+        hdr = QLabel("Параметры нового шаблона")
+        hdr.setStyleSheet("font-size:15px; font-weight:700;")
+        lay.addWidget(hdr)
 
-        result = self.store.create_template(
-            code=code, name=name, config=config,
-        )
-        if result["ok"]:
-            self.toast.show_message(result["info"], "ok")
-            self._refresh_templates()
-        else:
-            self.toast.show_message(f"Ошибка: {result['info']}", "err")
+        grid = QGridLayout()
+        grid.setSpacing(10)
+
+        grid.addWidget(QLabel("Название:"), 0, 0)
+        name_edit = QLineEdit()
+        name_edit.setPlaceholderText("например: Одежда 58х40 или Обувь ЧЗ 30х20")
+        grid.addWidget(name_edit, 0, 1)
+
+        grid.addWidget(QLabel("Размер этикетки:"), 1, 0)
+        size_combo = QComboBox()
+        size_combo.addItem("58 × 40 мм (стандарт термомаркера)", (58, 40))
+        size_combo.addItem("58 × 30 мм (компактный)", (58, 30))
+        size_combo.addItem("43 × 25 мм (малый формат)", (43, 25))
+        size_combo.addItem("30 × 20 мм (только DataMatrix)", (30, 20))
+        size_combo.addItem("Свой размер...", None)
+        grid.addWidget(size_combo, 1, 1)
+
+        custom_box = QWidget()
+        c_lay = QHBoxLayout(custom_box)
+        c_lay.setContentsMargins(0, 0, 0, 0)
+        c_lay.setSpacing(6)
+        spin_w = QDoubleSpinBox(); spin_w.setRange(20, 150); spin_w.setValue(58); spin_w.setSuffix(" мм")
+        spin_h = QDoubleSpinBox(); spin_h.setRange(15, 200); spin_h.setValue(40); spin_h.setSuffix(" мм")
+        c_lay.addWidget(QLabel("Ш:"))
+        c_lay.addWidget(spin_w)
+        c_lay.addWidget(QLabel("В:"))
+        c_lay.addWidget(spin_h)
+        custom_box.setVisible(False)
+        grid.addWidget(custom_box, 2, 1)
+
+        def _on_size_change():
+            data = size_combo.currentData()
+            if data is None:
+                custom_box.setVisible(True)
+            else:
+                custom_box.setVisible(False)
+                spin_w.setValue(data[0])
+                spin_h.setValue(data[1])
+        size_combo.currentIndexChanged.connect(_on_size_change)
+
+        grid.addWidget(QLabel("Режим печати:"), 3, 0)
+        mode_combo = QComboBox()
+        mode_combo.addItem("Совмещённая (ЧЗ DataMatrix + Русификатор)", "combined")
+        mode_combo.addItem("Раздельная (только ЧЗ DataMatrix)", "separate")
+        grid.addWidget(mode_combo, 3, 1)
+
+        grid.addWidget(QLabel("Разрешение (DPI):"), 4, 0)
+        dpi_combo = QComboBox()
+        dpi_combo.addItem("203 DPI (стандарт для большинства принтеров)", 203)
+        dpi_combo.addItem("300 DPI (высокая чёткость)", 300)
+        grid.addWidget(dpi_combo, 4, 1)
+
+        lay.addLayout(grid)
+        lay.addStretch(1)
+
+        btn_box = QHBoxLayout()
+        btn_box.setSpacing(10)
+        btn_cancel = QPushButton("Отмена")
+        btn_cancel.clicked.connect(dlg.reject)
+        btn_box.addWidget(btn_cancel)
+
+        btn_ok = QPushButton("Создать шаблон")
+        btn_ok.setProperty("primary", True)
+        btn_box.addWidget(btn_ok)
+        lay.addLayout(btn_box)
+
+        def _on_ok():
+            title = name_edit.text().strip()
+            if not title:
+                QMessageBox.warning(dlg, "Ввод данных", "Введите название шаблона.")
+                return
+
+            w_val = spin_w.value()
+            h_val = spin_h.value()
+            sel_mode = mode_combo.currentData() or "combined"
+            sel_dpi = dpi_combo.currentData() or 203
+
+            import re, time
+            translit_map = {
+                'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd', 'е': 'e', 'ё': 'yo',
+                'ж': 'zh', 'з': 'z', 'и': 'i', 'й': 'y', 'к': 'k', 'л': 'l', 'м': 'm',
+                'н': 'n', 'о': 'o', 'п': 'p', 'р': 'r', 'с': 's', 'т': 't', 'у': 'u',
+                'ф': 'f', 'х': 'h', 'ц': 'ts', 'ч': 'ch', 'ш': 'sh', 'щ': 'sch', 'ъ': '',
+                'ы': 'y', 'ь': '', 'э': 'e', 'ю': 'yu', 'я': 'ya'
+            }
+            code_base = "".join(translit_map.get(ch, ch) for ch in title.lower())
+            code_base = re.sub(r'[^a-z0-9_]+', '_', code_base).strip('_')
+            code = f"{code_base[:16]}_{int(time.time()) % 10000}"
+
+            config = {
+                "print_mode": sel_mode,
+                "combined": {
+                    "w": w_val, "h": h_val, "dpi": sel_dpi,
+                    "fields": [
+                        {"name": "dataMatrix", "label": "", "required": True,
+                         "font_size": 0, "size": min(w_val, h_val) * 0.5, "x": 5, "y": 5},
+                        {"name": "name_ru", "label": "", "required": True,
+                         "font_size": 12, "x": int(w_val * 0.45), "y": 5},
+                        {"name": "importer", "label": "Импортёр",
+                         "required": False, "font_size": 9, "x": int(w_val * 0.45), "y": int(h_val * 0.6)},
+                    ],
+                },
+                "cz": {
+                    "w": min(w_val, 30), "h": min(h_val, 30), "dpi": sel_dpi,
+                    "fields": [
+                        {"name": "dataMatrix", "label": "", "required": True,
+                         "font_size": 0, "size": min(w_val, h_val) * 0.7, "x": 3, "y": 3},
+                    ],
+                },
+                "label": {
+                    "w": w_val, "h": h_val, "dpi": sel_dpi,
+                    "fields": [
+                        {"name": "name_ru", "label": "", "required": True,
+                         "font_size": 12, "x": 5, "y": 5},
+                    ],
+                },
+            }
+
+            result = self.store.create_template(code=code, name=title, config=config)
+            if result.get("ok"):
+                self.toast.show_message(f"Шаблон «{title}» успешно создан", "ok")
+                self._refresh_templates()
+                dlg.accept()
+            else:
+                QMessageBox.critical(dlg, "Ошибка", result.get("info", "Не удалось создать шаблон"))
+
+        btn_ok.clicked.connect(_on_ok)
+        dlg.exec()
 
     def _tpl_delete(self):
         tpl = self._current_template()
@@ -2431,34 +2519,41 @@ class AdminWindow(QWidget):
             self.tpl_shk_combo.addItem("⚡ Авто (первый доступный ДМ из базы)", "")
             import db
             with db.get_conn() as conn:
-                rows = conn.execute(
-                    "SELECT gm.foreign_gtin, gm.cz_gtin, "
-                    "       (SELECT COUNT(*) FROM pool_codes pc WHERE pc.gtin = gm.cz_gtin AND pc.used = 0) AS free_cnt, "
-                    "       (SELECT MAX(pc.import_batch) FROM pool_codes pc WHERE pc.gtin = gm.cz_gtin) AS batch_name "
-                    "FROM gtin_map gm ORDER BY gm.foreign_gtin LIMIT 200"
-                ).fetchall()
+                pool_stats = {}
+                for pr in conn.execute(
+                    "SELECT gtin, COUNT(*) AS cnt, "
+                    "       SUM(CASE WHEN used = 0 THEN 1 ELSE 0 END) AS free_cnt, "
+                    "       MAX(import_batch) AS batch_name "
+                    "FROM pool_codes WHERE gtin IS NOT NULL AND gtin != '' "
+                    "GROUP BY gtin"
+                ).fetchall():
+                    g_val = str(pr["gtin"] or "").strip()
+                    if g_val:
+                        pool_stats[g_val] = {
+                            "total": pr["cnt"] or 0,
+                            "free": pr["free_cnt"] or 0,
+                            "batch": str(pr["batch_name"] or "").strip(),
+                        }
+
+                rows = conn.execute("SELECT foreign_gtin, cz_gtin FROM gtin_map ORDER BY foreign_gtin LIMIT 200").fetchall()
                 seen_gtins = set()
                 for r in rows:
                     shk = (r["foreign_gtin"] or "").strip()
                     cz_gtin = (r["cz_gtin"] or "").strip()
-                    pname = (r["batch_name"] or "").strip()
-                    cnt = r["free_cnt"] or 0
+                    st = pool_stats.get(cz_gtin, {"free": 0, "batch": ""})
                     seen_gtins.add(cz_gtin)
+                    pname = st.get("batch") or ""
+                    cnt = st.get("free") or 0
                     label = f"ШК {shk} → GTIN {cz_gtin}"
                     if pname:
                         label += f" ({pname})"
                     label += f" [{cnt} ДМ]"
                     self.tpl_shk_combo.addItem(label, shk)
 
-                pool_gtins = conn.execute(
-                    "SELECT gtin, COUNT(*) AS cnt FROM pool_codes "
-                    "WHERE gtin IS NOT NULL AND gtin != '' "
-                    "GROUP BY gtin ORDER BY cnt DESC LIMIT 100"
-                ).fetchall()
-                for pr in pool_gtins:
-                    g = (pr["gtin"] or "").strip()
-                    if g and g not in seen_gtins:
-                        self.tpl_shk_combo.addItem(f"GTIN {g} [{pr['cnt']} ДМ в пуле]", g)
+                for g, st in sorted(pool_stats.items(), key=lambda x: x[1]["free"], reverse=True)[:100]:
+                    if g not in seen_gtins:
+                        batch_str = f" ({st['batch']})" if st.get("batch") else ""
+                        self.tpl_shk_combo.addItem(f"GTIN {g}{batch_str} [{st['free']} ДМ]", g)
         except Exception as e:
             log.error("_tpl_populate_shk_combo: %s", e)
         finally:
@@ -5272,11 +5367,28 @@ class AdminWindow(QWidget):
                     toasts_out.append((f"Статусы выгружены в MS SQL ({res.get('updated', 0)})", "ok"))
 
                 if action_type in ("export_events", "all"):
+                    mapping_ev = cfg.get("mapping", {}).get("events", {})
+                    table_name_ev = mapping_ev.get("table", "dbo.MarkingEvents")
                     import db
+                    events_to_export = []
                     with db.get_conn() as conn:
-                        ev_cnt = conn.execute("SELECT COUNT(*) AS c FROM journal").fetchone()["c"]
-                    logs_out.append(f"[События -> MS SQL] Журнал событий синхронизирован (записей: {ev_cnt}).")
-                    toasts_out.append(("События выгружены в MS SQL", "ok"))
+                        j_rows = conn.execute(
+                            "SELECT id, action, details, point, operator, created_at FROM journal "
+                            "ORDER BY id DESC LIMIT 500"
+                        ).fetchall()
+                    for jr in j_rows:
+                        events_to_export.append({
+                            "event_id": jr["id"],
+                            "scanned_at": jr["created_at"],
+                            "operator_name": jr["operator"] or sync_mod.get_pc_node_name(self.store),
+                            "station_id": jr["point"] or "Т-01",
+                            "barcode": jr["action"] or "",
+                            "status": "SUCCESS",
+                            "details": jr["details"] or "",
+                        })
+                    res_ev = mgr.export_marking_events(mapping_ev, table_name_ev, events_to_export)
+                    logs_out.append(f"[События -> MS SQL] Журнал событий синхронизирован (добавлено в базу: {res_ev.get('inserted', 0)}).")
+                    toasts_out.append((f"События выгружены в MS SQL ({res_ev.get('inserted', 0)})", "ok"))
 
             except Exception as e:
                 log.error("Сбой обмена SQL Server: %s", e)
