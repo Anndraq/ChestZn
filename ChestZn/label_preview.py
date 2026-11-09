@@ -1,15 +1,13 @@
-r"""
+"""
 Интерактивный предпросмотр этикетки (label_preview.py).
-Полностью синхронизирован с AdminWindow и базой загруженных кодов (pool_codes + gtin_map):
-- Подтягивает реальный DataMatrix (ДМ), привязанный к выбранному или отсканированному ШК товара.
-- Мгновенно отрисовывает настоящий GS1 DataMatrix ECC200 (ISO/IEC 16022) без вызова Ghostscript.
-- Точно переводит физический размер DataMatrix (в мм) и координаты (в точках принтера DPI) на холст этикетки.
-- Поддерживает плавное перетаскивание мышью (60 FPS), изменение размера DataMatrix за угловой маркер
-  и двойной клик для точного ввода координат X, Y.
+- Адаптивный фон холста (светлый/тёмный).
+- Строгий клиппинг по холсту (ни один пиксель не выходит за белое поле).
+- Корректная пропорция шрифта и координат относительно DPI принтера.
+- Поддержка перетаскивания (Drag & Drop) и изменения размера DataMatrix.
 """
 import re
 from typing import Optional, Dict, Any, List, Tuple
-from PySide6.QtWidgets import QWidget, QInputDialog
+from PySide6.QtWidgets import QWidget, QInputDialog, QApplication
 from PySide6.QtGui import QPainter, QColor, QFont, QPen, QFontMetrics, QPixmap
 from PySide6.QtCore import Qt, QRect, QPoint
 
@@ -34,19 +32,11 @@ SAMPLE_FIELD_VALUES = {
     "exp": "12.2027",
     "date": "01.11.2026",
     "country": "RU",
-    "importer": "Производитель / Импортёр",
+    "importer": "ООО «Импортёр-Сервис»",
 }
 
 
 class LabelPreviewWidget(QWidget):
-    """
-    Виджет предпросмотра этикетки с привязкой к реальному DataMatrix (ДМ) по ШК товара:
-      - Прямое чтение текущей вкладки шаблона из AdminWindow (combined / cz / label).
-      - Подстановка настоящего ДМ, соответствующего выбранному ШК в базе (pool_codes + gtin_map).
-      - Перетаскивание всех элементов мышью с мгновенным обновлением X, Y в таблице полей.
-      - Ресайз DataMatrix мышью за угловой маркер с пересчётом размера в миллиметры (мм).
-    """
-
     def __init__(self, parent=None):
         super().__init__(parent)
         self.parent_admin = parent
@@ -69,11 +59,7 @@ class LabelPreviewWidget(QWidget):
         self._live_resize_size_dots: Optional[int] = None
 
         self.setMouseTracking(True)
-        self.setMinimumSize(240, 240)
-
-    # ------------------------------------------------------------
-    # Публичные методы и привязка ШК -> ДМ для шаблона
-    # ------------------------------------------------------------
+        self.setMinimumSize(260, 260)
 
     def set_template(self, tpl: Optional[dict], demo_code: str = ""):
         self._tpl = tpl
@@ -87,7 +73,6 @@ class LabelPreviewWidget(QWidget):
             self.update()
 
     def _apply_dm_code(self, dm_code: str, shk: str = "", gtin: str = "", sn: str = ""):
-        """Устанавливает активный код ДМ и разбирает из него GTIN и серийный номер (SN) для полей шаблона."""
         clean_dm = (dm_code or "").strip()
         if clean_dm != self._demo_code:
             self._demo_code = clean_dm
@@ -111,17 +96,11 @@ class LabelPreviewWidget(QWidget):
             )
 
     def set_shk_for_preview(self, shk_or_gtin: str) -> Dict[str, Any]:
-        """
-        По переданному ШК товара (или GTIN) находит в базе данных соответствующий ему
-        настоящий DataMatrix (ДМ) и обновляет предпросмотр шаблона.
-        Возвращает словарь {'ok': bool, 'code': str, 'gtin': str, 'sn': str, 'shk': str}.
-        """
         raw_q = (shk_or_gtin or "").strip()
         try:
             import db
             with db.get_conn() as conn:
                 if raw_q:
-                    # 1. Ищем привязку в gtin_map (foreign_gtin -> cz_gtin)
                     candidates = [raw_q]
                     if raw_q.isdigit() and len(raw_q) == 13:
                         candidates.append("0" + raw_q)
@@ -137,7 +116,6 @@ class LabelPreviewWidget(QWidget):
                         if cz_g and cz_g not in candidates:
                             candidates.append(cz_g)
 
-                    # 2. Ищем код ДМ в pool_codes (приоритет свободным used=0)
                     ph2 = ",".join(["?"] * len(candidates))
                     row = conn.execute(
                         f"SELECT code, gtin, sn FROM pool_codes WHERE gtin IN ({ph2}) ORDER BY used ASC, id ASC LIMIT 1",
@@ -154,16 +132,11 @@ class LabelPreviewWidget(QWidget):
                             "shk": raw_q,
                         }
 
-                # 3. Если конкретный ШК не задан — берём первый доступный ДМ из пула
                 row_any = conn.execute(
                     "SELECT code, gtin, sn FROM pool_codes ORDER BY used ASC, id ASC LIMIT 1"
                 ).fetchone()
                 if row_any and row_any[0]:
-                    self._apply_dm_code(
-                        str(row_any[0]),
-                        gtin=str(row_any[1] or ""),
-                        sn=str(row_any[2] or "")
-                    )
+                    self._apply_dm_code(str(row_any[0]), gtin=str(row_any[1] or ""), sn=str(row_any[2] or ""))
                     self.update()
                     return {
                         "ok": True,
@@ -184,23 +157,14 @@ class LabelPreviewWidget(QWidget):
         }
 
     def _resolve_active_code(self) -> str:
-        """
-        Возвращает реальный код ДМ, подтянутый к выбранному ШК из пула (или первый код из пула).
-        """
         if self._demo_code:
             return self._demo_code
-
         res = self.set_shk_for_preview("")
         if res.get("ok") and self._demo_code:
             return self._demo_code
-
         return DEFAULT_REALISTIC_CZ_CODE
 
     def _get_fast_dm_pixmap(self, target_px: int) -> QPixmap:
-        """
-        Мгновенно возвращает QPixmap настоящего GS1 DataMatrix ECC200:
-        базовая матрица рендерится один раз и масштабируется через Qt.FastTransformation за < 0.05 мс.
-        """
         code = self._resolve_active_code()
         if self._cached_base_pixmap is None or self._cached_base_code != code:
             self._cached_base_code = code
@@ -212,12 +176,12 @@ class LabelPreviewWidget(QWidget):
         sz = max(16, int(target_px))
         return self._cached_base_pixmap.scaled(sz, sz, Qt.KeepAspectRatio, Qt.FastTransformation)
 
-    # ------------------------------------------------------------
-    # Получение параметров активной вкладки шаблона из AdminWindow
-    # ------------------------------------------------------------
-
     def _get_active_tab_context(self) -> Tuple[str, float, float, int, List[Dict[str, Any]]]:
-        if self.parent_admin is not None and hasattr(self.parent_admin, "tpl_tabs") and hasattr(self.parent_admin, "_tpl_tab_widgets"):
+        if (
+            self.parent_admin is not None
+            and hasattr(self.parent_admin, "tpl_tabs")
+            and hasattr(self.parent_admin, "_tpl_tab_widgets")
+        ):
             try:
                 tab_idx = self.parent_admin.tpl_tabs.currentIndex()
                 tab_keys = ["combined", "cz", "label"]
@@ -236,29 +200,8 @@ class LabelPreviewWidget(QWidget):
             w_mm = float(self._tpl.get("width_mm") or self._tpl.get("w") or 58.0)
             h_mm = float(self._tpl.get("height_mm") or self._tpl.get("h") or 40.0)
             dpi = int(self._tpl.get("dpi") or 203)
-            raw_fields = self._tpl.get("fields", [])
-            if isinstance(raw_fields, dict):
-                flat = []
-                for d_it in raw_fields.get("dm", []):
-                    flat.append({
-                        "name": "dataMatrix",
-                        "label": "DataMatrix",
-                        "x": d_it.get("x", 16),
-                        "y": d_it.get("y", 16),
-                        "size": round(float(d_it.get("size_dots", 120)) / dpi * 25.4, 1),
-                        "font_size": 0,
-                    })
-                for t_it in raw_fields.get("fields", []) + raw_fields.get("static_texts", []):
-                    flat.append({
-                        "name": t_it.get("name") or t_it.get("key") or "text",
-                        "label": t_it.get("label") or t_it.get("text") or "Текст",
-                        "x": t_it.get("x", 16),
-                        "y": t_it.get("y", 16),
-                        "font_size": t_it.get("font_size", 10),
-                    })
-                return "combined", w_mm, h_mm, dpi, flat
-            elif isinstance(raw_fields, list):
-                return "combined", w_mm, h_mm, dpi, raw_fields
+            fields = self._tpl.get("fields", [])
+            return "combined", w_mm, h_mm, dpi, fields
 
         return "", 58.0, 40.0, 203, []
 
@@ -270,10 +213,7 @@ class LabelPreviewWidget(QWidget):
 
     def _get_scale_and_offset(self) -> Tuple[float, int, int, int, int]:
         w_dots, h_dots, _ = self._label_size_dots()
-        if w_dots <= 0 or h_dots <= 0:
-            return 1.0, 0, 0, w_dots, h_dots
-
-        margin = 18
+        margin = 16
         avail_w = max(10, self.width() - 2 * margin)
         avail_h = max(10, self.height() - 2 * margin)
 
@@ -301,20 +241,19 @@ class LabelPreviewWidget(QWidget):
             return int(px_val)
         return int(round(px_val / scale))
 
-    # ------------------------------------------------------------
-    # Отрисовка холста этикетки и элементов
-    # ------------------------------------------------------------
-
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing, False)
+        painter.setRenderHint(QPainter.Antialiasing, True)
 
-        painter.fillRect(self.rect(), QColor("#141b23"))
+        app = QApplication.instance()
+        is_light = "CLEAN SLATE" in (app.styleSheet() if app else "")
+        bg_color = QColor("#f1f5f9") if is_light else QColor("#10151c")
+        painter.fillRect(self.rect(), bg_color)
 
         tab_key, w_mm, h_mm, dpi, fields = self._get_active_tab_context()
         if not tab_key and not fields:
-            painter.setPen(QPen(QColor("#8b97a6")))
-            painter.drawText(self.rect(), Qt.AlignCenter, "Выберите шаблон этикетки")
+            painter.setPen(QPen(QColor("#64748b" if is_light else "#8b97a6")))
+            painter.drawText(self.rect(), Qt.AlignCenter, "Выберите шаблон")
             return
 
         scale, off_x, off_y, w_dots, h_dots = self._get_scale_and_offset()
@@ -326,7 +265,8 @@ class LabelPreviewWidget(QWidget):
 
         step_5mm_px = (5.0 / 25.4) * dpi * scale
         if step_5mm_px >= 10:
-            painter.setPen(QPen(QColor("#eef2f6"), 1, Qt.SolidLine))
+            grid_pen = QColor("#e2e8f0" if is_light else "#2a3542")
+            painter.setPen(QPen(grid_pen, 1, Qt.SolidLine))
             gx = off_x + step_5mm_px
             while gx < off_x + disp_w:
                 painter.drawLine(int(gx), off_y, int(gx), off_y + disp_h)
@@ -336,10 +276,10 @@ class LabelPreviewWidget(QWidget):
                 painter.drawLine(off_x, int(gy), off_x + disp_w, int(gy))
                 gy += step_5mm_px
 
-        painter.setPen(QPen(QColor("#0f172a"), 2))
-        painter.drawRect(label_rect)
-
         self._field_rects.clear()
+
+        # Строгий клиппинг по белому холсту
+        painter.setClipRect(label_rect)
 
         for row_idx, f in enumerate(fields):
             if f.get("name") == "dataMatrix":
@@ -349,17 +289,12 @@ class LabelPreviewWidget(QWidget):
             if f.get("name") != "dataMatrix":
                 self._draw_single_text(painter, tab_key, row_idx, f, scale, off_x, off_y, dpi)
 
-    def _draw_single_dm(
-        self,
-        painter: QPainter,
-        tab_key: str,
-        row_idx: int,
-        f: Dict[str, Any],
-        scale: float,
-        off_x: int,
-        off_y: int,
-        dpi: int
-    ):
+        painter.setClipping(False)
+
+        painter.setPen(QPen(QColor("#cbd5e1" if is_light else "#334155"), 2))
+        painter.drawRect(label_rect)
+
+    def _draw_single_dm(self, painter, tab_key, row_idx, f, scale, off_x, off_y, dpi):
         x_dots = int(f.get("x", 16))
         y_dots = int(f.get("y", 16))
         size_mm = float(f.get("size") or 20.0)
@@ -368,9 +303,13 @@ class LabelPreviewWidget(QWidget):
         if self._live_drag_pos and self._live_drag_pos[0] == tab_key and self._live_drag_pos[1] == row_idx:
             x_dots, y_dots = self._live_drag_pos[2], self._live_drag_pos[3]
 
-        if self._live_resize_size_dots is not None and self._resizing and self._resizing[0] == tab_key and self._resizing[1] == row_idx:
+        if (
+            self._live_resize_size_dots is not None
+            and self._resizing
+            and self._resizing[0] == tab_key
+            and self._resizing[1] == row_idx
+        ):
             size_dots = self._live_resize_size_dots
-            size_mm = round(size_dots / dpi * 25.4, 1)
 
         sx = int(round(off_x + x_dots * scale))
         sy = int(round(off_y + y_dots * scale))
@@ -392,14 +331,6 @@ class LabelPreviewWidget(QWidget):
             painter.setPen(QPen(QColor("#2563eb"), 2, Qt.SolidLine))
             painter.drawRect(rect)
 
-            painter.setFont(QFont("Consolas", 8, QFont.Bold))
-            painter.setPen(QPen(QColor("#1d4ed8")))
-            painter.drawText(
-                rect.left(),
-                max(off_y + 11, rect.top() - 4),
-                f"ДМ {int(round(size_mm))}×{int(round(size_mm))} мм (X:{x_dots} Y:{y_dots})"
-            )
-
             handle_size = 10
             hr = QRect(rect.right() - handle_size + 1, rect.bottom() - handle_size + 1, handle_size, handle_size)
             painter.fillRect(hr, QColor("#2563eb"))
@@ -407,17 +338,7 @@ class LabelPreviewWidget(QWidget):
             painter.drawRect(hr)
             self._field_rects.append((hr, tab_key, row_idx, "dataMatrix", "handle"))
 
-    def _draw_single_text(
-        self,
-        painter: QPainter,
-        tab_key: str,
-        row_idx: int,
-        f: Dict[str, Any],
-        scale: float,
-        off_x: int,
-        off_y: int,
-        dpi: int
-    ):
+    def _draw_single_text(self, painter, tab_key, row_idx, f, scale, off_x, off_y, dpi):
         x_dots = int(f.get("x", 16))
         y_dots = int(f.get("y", 16))
 
@@ -428,57 +349,39 @@ class LabelPreviewWidget(QWidget):
         sy = int(round(off_y + y_dots * scale))
 
         font_size_pt = max(6, int(f.get("font_size") or 10))
-        font_px = max(7, int(round(font_size_pt * dpi / 72.0 * scale)))
+        font_px = max(9, int(round(font_size_pt * 1.33 * scale)))
         font = QFont("Arial", font_px)
         font.setBold(bool(f.get("bold", False)))
         painter.setFont(font)
 
         fname = str(f.get("name") or "").strip()
-        fname_l = fname.lower()
         flabel = str(f.get("label") or fname or "Поле").strip()
 
-        # Подставляем реальные GTIN, ШК и SN из активного кода ДМ
-        if fname_l == "gtin" and self._current_gtin:
-            sample_val = self._current_gtin
-        elif fname_l in ("sn", "serial") and self._current_sn:
-            sample_val = self._current_sn
-        elif fname_l == "shk" and self._current_shk:
-            sample_val = self._current_shk
-        else:
-            sample_val = SAMPLE_FIELD_VALUES.get(fname_l, "")
-
-        if flabel and sample_val and fname_l not in ("name", "name_ru"):
+        sample_val = SAMPLE_FIELD_VALUES.get(fname.lower(), flabel)
+        if flabel and sample_val and flabel != sample_val and fname.lower() not in ("name", "name_ru"):
             text_str = f"{flabel}: {sample_val}"
-        elif sample_val:
-            text_str = sample_val
         else:
-            text_str = flabel
+            text_str = sample_val or flabel
 
         fm = QFontMetrics(font)
         tw = fm.horizontalAdvance(text_str)
         th = fm.height()
-        ascent = fm.ascent()
 
-        rect = QRect(sx, sy, tw + 6, th + 2)
+        rect = QRect(sx, sy, tw + 8, th + 4)
         self._field_rects.append((rect, tab_key, row_idx, flabel or fname, "text"))
 
         is_sel = (self._selected == (tab_key, row_idx))
         if is_sel:
-            painter.fillRect(rect, QColor(37, 99, 235, 36))
+            painter.fillRect(rect, QColor(37, 99, 235, 40))
             painter.setPen(QPen(QColor("#2563eb"), 1, Qt.DashLine))
             painter.drawRect(rect)
 
         painter.setPen(QPen(QColor("#0f172a")))
-        painter.drawText(sx + 2, sy + ascent, text_str)
-
-    # ------------------------------------------------------------
-    # Обработка событий мыши (Drag, Resize, Selection, Double Click)
-    # ------------------------------------------------------------
+        painter.drawText(QRect(sx + 2, sy, tw + 6, th + 2), Qt.AlignLeft | Qt.AlignVCenter, text_str)
 
     def mousePressEvent(self, event):
         if event.button() != Qt.LeftButton:
             return
-
         pos = event.position().toPoint()
 
         for rect, tab_key, row_idx, name, kind in reversed(self._field_rects):
@@ -496,12 +399,6 @@ class LabelPreviewWidget(QWidget):
                 self._drag_offset = pos - rect.topLeft()
                 self._selected = (tab_key, row_idx)
                 self._live_drag_pos = None
-                try:
-                    widgets = self.parent_admin._tpl_tab_widgets.get(tab_key)
-                    if widgets and "fields" in widgets:
-                        widgets["fields"].selectRow(row_idx)
-                except Exception:
-                    pass
                 self.setCursor(Qt.ClosedHandCursor)
                 self.update()
                 return
@@ -511,44 +408,37 @@ class LabelPreviewWidget(QWidget):
 
     def mouseMoveEvent(self, event):
         pos = event.position().toPoint()
+        w_dots, h_dots, _ = self._label_size_dots()
 
         if self._resizing:
-            tab_key, row_idx, _name = self._resizing
+            tab_key, row_idx, _ = self._resizing
             _, _, _, dpi, fields = self._get_active_tab_context()
-            if row_idx >= len(fields):
-                return
-            f = fields[row_idx]
-
-            start_tl = self._dots_to_screen(f.get("x", 0), f.get("y", 0))
-            new_w_px = pos.x() - start_tl.x()
-            new_h_px = pos.y() - start_tl.y()
-            new_size_px = max(new_w_px, new_h_px, 20)
-            new_size_dots = self._px_to_dots(new_size_px)
-
-            w_dots, h_dots, _ = self._label_size_dots()
-            max_allowed = min(w_dots - int(f.get("x", 0)), h_dots - int(f.get("y", 0)))
-            self._live_resize_size_dots = max(24, min(max_allowed, new_size_dots))
-            self.update()
+            if row_idx < len(fields):
+                f = fields[row_idx]
+                start_tl = self._dots_to_screen(f.get("x", 0), f.get("y", 0))
+                new_size_px = max(20, max(pos.x() - start_tl.x(), pos.y() - start_tl.y()))
+                new_size_dots = self._px_to_dots(new_size_px)
+                max_allowed = min(w_dots - int(f.get("x", 0)), h_dots - int(f.get("y", 0)))
+                self._live_resize_size_dots = max(24, min(max_allowed, new_size_dots))
+                self.update()
             return
 
         if self._dragging:
             new_tl = pos - self._drag_offset
             x_dots, y_dots = self._screen_to_dots(new_tl.x(), new_tl.y())
-            tab_key, row_idx, _name = self._dragging
+            tab_key, row_idx, _ = self._dragging
 
-            w_dots, h_dots, _ = self._label_size_dots()
-            x_dots = max(0, min(w_dots - 20, x_dots))
-            y_dots = max(0, min(h_dots - 14, y_dots))
+            x_dots = max(0, min(max(0, w_dots - 10), x_dots))
+            y_dots = max(0, min(max(0, h_dots - 10), y_dots))
 
             self._live_drag_pos = (tab_key, row_idx, x_dots, y_dots)
             self.update()
             return
 
-        for rect, _tab_key, _row_idx, _name, kind in reversed(self._field_rects):
+        for rect, _, _, _, kind in reversed(self._field_rects):
             if kind == "handle" and rect.contains(pos):
                 self.setCursor(Qt.SizeFDiagCursor)
                 return
-        for rect, _tab_key, _row_idx, _name, kind in reversed(self._field_rects):
             if kind in ("dm", "text") and rect.contains(pos):
                 self.setCursor(Qt.OpenHandCursor)
                 return
@@ -556,14 +446,14 @@ class LabelPreviewWidget(QWidget):
 
     def mouseReleaseEvent(self, event):
         if self._resizing:
-            tab_key, row_idx, _name = self._resizing
+            tab_key, row_idx, _ = self._resizing
             if self._live_resize_size_dots is not None:
                 _, _, dpi = self._label_size_dots()
                 size_mm = round(self._live_resize_size_dots / dpi * 25.4, 0)
                 try:
-                    self.parent_admin._update_field_size(tab_key, row_idx, max(8.0, size_mm))
-                except Exception as e:
-                    print("save size:", e)
+                    self.parent_admin._update_field_size(tab_key, row_idx, max(10.0, size_mm))
+                except Exception:
+                    pass
             self._live_resize_size_dots = None
             self._resizing = None
 
@@ -572,8 +462,8 @@ class LabelPreviewWidget(QWidget):
                 tab_key, row_idx, x, y = self._live_drag_pos
                 try:
                     self.parent_admin._update_field_position(tab_key, row_idx, x, y)
-                except Exception as e:
-                    print("save pos:", e)
+                except Exception:
+                    pass
             self._live_drag_pos = None
             self._dragging = None
 
@@ -585,24 +475,21 @@ class LabelPreviewWidget(QWidget):
         _, _, _, _, fields = self._get_active_tab_context()
         for rect, tab_key, row_idx, name, kind in reversed(self._field_rects):
             if kind in ("dm", "text") and rect.contains(pos):
-                if row_idx >= len(fields):
-                    return
-                f = fields[row_idx]
-                default = f"{f.get('x', 0)} {f.get('y', 0)}"
-                text, ok = QInputDialog.getText(
-                    self,
-                    f"Координаты поля «{name}»",
-                    "Введите X и Y (в точках принтера):",
-                    text=default
-                )
-                if not ok or not text.strip():
-                    return
-                try:
-                    parts = text.strip().split()
-                    x = max(0, int(parts[0]))
-                    y = max(0, int(parts[1])) if len(parts) > 1 else 0
-                    self.parent_admin._update_field_position(tab_key, row_idx, x, y)
-                    self.update()
-                except Exception:
-                    pass
+                if row_idx < len(fields):
+                    f = fields[row_idx]
+                    text, ok = QInputDialog.getText(
+                        self,
+                        f"Координаты поля «{name}»",
+                        "Введите X и Y через пробел (в точках):",
+                        text=f"{f.get('x', 0)} {f.get('y', 0)}",
+                    )
+                    if ok and text.strip():
+                        try:
+                            parts = text.strip().split()
+                            x = max(0, int(parts[0]))
+                            y = max(0, int(parts[1])) if len(parts) > 1 else 0
+                            self.parent_admin._update_field_position(tab_key, row_idx, x, y)
+                            self.update()
+                        except Exception:
+                            pass
                 return

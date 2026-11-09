@@ -163,30 +163,34 @@ def check_database() -> dict:
 # ПРОВЕРКА 3: Принтер
 # ==================================================================
 def check_printer() -> dict:
-    """Принтер настроен? Предупреждение."""
+    """Строгая проверка: если принтер физически выключен — предупреждаем."""
     try:
+        from device_discovery import detect_local_printers, check_printer_status
         from printer import load_config
-        cfg = load_config()
-        name = cfg.get("printer_name", "").strip()
-        ip   = cfg.get("printer_ip", "").strip()
 
-        if name or ip:
-            target = name if name else f"{ip}:{cfg.get('printer_port', 9100)}"
+        # 1. Сначала ищем реально включённые прямо сейчас принтеры
+        connected = detect_local_printers(connected_only=True, force_refresh=True)
+        if connected:
+            pr_name = connected[0].get("name", "Принтер")
             return {
                 "name": "Принтер",
                 "status": "ok",
                 "severity": None,
-                "message": f"Настроен: {target}",
+                "message": f"Подключён: {pr_name}",
                 "hint": "",
             }
+
+        # 2. Если живых принтеров нет вообще — сразу выдаём предупреждение
+        cfg = load_config()
+        saved_name = cfg.get("printer_name", "").strip()
+        hint_text = f"Принтер отключён от питания или USB." if saved_name else "Подключите USB-кабель и включите питание."
 
         return {
             "name": "Принтер",
             "status": "warning",
             "severity": WARNING,
-            "message": "Не настроен",
-            "hint": "Автопечать работать не будет.\n"
-                    "Откройте: Админ → Принтер → Выбрать → Сохранить.",
+            "message": "Не подключён (все принтеры выключены)",
+            "hint": hint_text,
             "doc": "printer.md",
         }
     except Exception as e:
@@ -194,8 +198,8 @@ def check_printer() -> dict:
             "name": "Принтер",
             "status": "warning",
             "severity": WARNING,
-            "message": f"Ошибка проверки: {type(e).__name__}",
-            "hint": f"{e}",
+            "message": "Не подключён",
+            "hint": str(e),
             "doc": "printer.md",
         }
 

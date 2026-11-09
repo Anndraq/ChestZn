@@ -60,12 +60,14 @@ class MainWindow(QMainWindow):
         if not cfg.get("printer_name") and not cfg.get("printer_ip"):
             # Общий принтер не задан — попробуем автоопределить
             result = autodetect()
-            if result["suggested"]:
+            if result.get("suggested"):
                 s = result["suggested"]
-                cfg["printer_name"] = s["name"]
-                cfg["printer_lang"] = s["lang"]
+                p_name = s["name"] if isinstance(s, dict) else str(s)
+                p_lang = s.get("lang", "auto") if isinstance(s, dict) else result.get("printer_lang", "auto")
+                cfg["printer_name"] = p_name
+                cfg["printer_lang"] = p_lang
                 save_config(cfg)
-                print(f"[ChestZn] Принтер определён: {s['name']} ({s['lang']})")
+                print(f"[ChestZn] Принтер определён: {p_name} ({p_lang})")
             else:
                 print("[ChestZn] Принтеры не найдены — настройте вручную в админке")
         else:

@@ -221,7 +221,11 @@ class ChangePasswordWindow(QDialog):
             return
 
         # 6. Меняем пароль
-        self.store.set_password(self.login, new_pwd)
+        ok, msg = self.store.change_password(self.login, current, new_pwd)
+        if not ok:
+            self.error_label.setText(msg)
+            return
+
         self.store.log("Смена пароля",
                        operator=self.login, result="успех")
 
