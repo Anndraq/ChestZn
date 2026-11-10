@@ -742,21 +742,34 @@ def update_operator_printer_badge(op_win=None):
         is_conn = bool(live and live.get("connected"))
         pr_name = live["name"] if is_conn else ""
 
-        # Обновляем ТОЛЬКО плашку принтера в шапке (не трогая центральный баннер)
+        # Обновляем ТОЛЬКО плашку принтера в шапке (адаптивно под светлую/тёмную тему)
+        is_lt = bool(getattr(op_win, "_is_light", False))
         lbl_pr = getattr(op_win, "lbl_printer", None) or getattr(op_win, "btn_printer", None)
         if lbl_pr is not None:
             if is_conn:
                 lbl_pr.setText(f"🟢 {pr_name}")
-                lbl_pr.setStyleSheet(
-                    "background:#0f291e; color:#4ade80; border:1px solid #16a34a; "
-                    "border-radius:6px; padding:4px 10px; font-weight:700;"
-                )
+                if is_lt:
+                    lbl_pr.setStyleSheet(
+                        "background:#dcfce7; color:#15803d; border:1px solid #16a34a; "
+                        "border-radius:6px; padding:4px 12px; font-weight:700; font-size:13px;"
+                    )
+                else:
+                    lbl_pr.setStyleSheet(
+                        "background:#0f291e; color:#4ade80; border:1px solid #16a34a; "
+                        "border-radius:6px; padding:4px 12px; font-weight:700; font-size:13px;"
+                    )
             else:
                 lbl_pr.setText("🔴 Принтер отключён")
-                lbl_pr.setStyleSheet(
-                    "background:#2a1215; color:#f87171; border:1px solid #dc2626; "
-                    "border-radius:6px; padding:4px 10px; font-weight:700;"
-                )
+                if is_lt:
+                    lbl_pr.setStyleSheet(
+                        "background:#fee2e2; color:#b91c1c; border:1px solid #ef4444; "
+                        "border-radius:6px; padding:4px 12px; font-weight:700; font-size:13px;"
+                    )
+                else:
+                    lbl_pr.setStyleSheet(
+                        "background:#2a1215; color:#f87171; border:1px solid #dc2626; "
+                        "border-radius:6px; padding:4px 12px; font-weight:700; font-size:13px;"
+                    )
 
         # Центральный баннер: стабильно показываем ТОЛЬКО вариант 2 (без мигания и без дублирующих полос)
         scan_in = getattr(op_win, "scan_input", None)

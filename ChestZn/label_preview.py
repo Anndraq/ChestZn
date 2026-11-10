@@ -1,14 +1,33 @@
-"""
+r"""
 Интерактивный предпросмотр этикетки (label_preview.py).
-- Адаптивный фон холста (светлый/тёмный).
-- Строгий клиппинг по холсту (ни один пиксель не выходит за белое поле).
-- Корректная пропорция шрифта и координат относительно DPI принтера.
-- Поддержка перетаскивания (Drag & Drop) и изменения размера DataMatrix.
+Полностью синхронизирован с AdminWindow и базой загруженных кодов (pool_codes + gtin_map):
+- Прилипание к сетке (Snap-to-Grid) с шагом 1 мм / 2 мм при Drag & Drop и ресайзе DataMatrix.
+- Зажатая клавиша Alt временно отключает сетку для свободной пиксельной подгонки.
+- Миллиметровая линейка сверху и слева с рисками (1 мм, 5 мм) и числовыми отметками каждые 10 мм.
+- Пунктирная рамка зоны безопасности (1.5 мм от физического края термоэтикетки).
+- Информационный HUD-бейдж в реальном времени с координатами в мм и точках принтера (dots).
+- Контекстное меню по правому клику для быстрого переключения шага сетки и линеек.
+- Мгновенная отрисовка настоящего GS1 DataMatrix ECC200 (ISO/IEC 16022) без вызова Ghostscript.
+- Точная привязка DataMatrix по отсканированному или выбранному ШК товара из базы.
 """
 import re
+import os
+import json
+from pathlib import Path
+
+def _is_light_theme() -> bool:
+    try:
+        cfg_path = Path(os.environ.get("APPDATA", Path.home())) / "ChestZn" / "config.json"
+        if cfg_path.exists():
+            data = json.loads(cfg_path.read_text(encoding="utf-8"))
+            return data.get("app_theme", "dark") == "light"
+    except Exception:
+        pass
+    return False
+
 from typing import Optional, Dict, Any, List, Tuple
-from PySide6.QtWidgets import QWidget, QInputDialog, QApplication
-from PySide6.QtGui import QPainter, QColor, QFont, QPen, QFontMetrics, QPixmap
+from PySide6.QtWidgets import QWidget, QInputDialog, QMenu
+from PySide6.QtGui import QPainter, QColor, QFont, QPen, QFontMetrics, QPixmap, QAction
 from PySide6.QtCore import Qt, QRect, QPoint
 
 try:
@@ -20,23 +39,48 @@ DEFAULT_REALISTIC_CZ_CODE = (
     "010460700123456721A1B2C3D4E5F6G\x1d91EE06\x1d92dGVzdGNyeXB0b3RhaWx2ZXJ5bG9uZ3N0cmluZ2hlcmU="
 )
 
+# Расширенные образцы данных (включая длинные/короткие наименования для стресс-теста переполнения)
 SAMPLE_FIELD_VALUES = {
     "gtin": "04607001234567",
     "shk": "4607001234567",
     "serial": "SN00012345",
     "sn": "SN00012345",
-    "name": "Наименование товара",
-    "name_ru": "Наименование товара",
-    "model": "Модель / Артикул",
-    "lot": "Партия 01",
-    "exp": "12.2027",
+    "name": "Кроссовки мужские демисезонные кожаные р.42 черные",
+    "name_ru": "Кроссовки мужские демисезонные кожаные р.42 черные",
+    "model": "Арт. CR-9021-BLK",
+    "lot": "Партия 01-2026",
+    "exp": "12.2029",
     "date": "01.11.2026",
     "country": "RU",
-    "importer": "ООО «Импортёр-Сервис»",
+    "importer": "ООО «ЧестЗн Снабжение»",
+    "composition": "Верх: 100% натуральная кожа; Подкладка: текстиль; Подошва: ТЭП",
 }
+
+SAMPLE_PRESETS = [
+    {
+        "title": "Стандартное наименование (среднее)",
+        "name": "Кроссовки мужские демисезонные кожаные р.42 черные",
+    },
+    {
+        "title": "Короткое наименование",
+        "name": "Чай 'Майский' черный байховый 100г",
+    },
+    {
+        "title": "Очень длинное наименование (проверка переноса и переполнения)",
+        "name": "Куртка мужская зимняя утепленная ветрозащитная с отстегивающимся капюшоном мембрана 5000/5000 синяя р.50-52 рост 182",
+    },
+]
 
 
 class LabelPreviewWidget(QWidget):
+    """
+    Виджет визуального предпросмотра и конструктора этикетки:
+      - Прилипание к сетке (Snap-to-Grid) с шагом 1 мм / 2 мм / 5 мм.
+      - Линейка в миллиметрах и пунктирные границы зоны безопасности (1.5 мм).
+      - Подстановка настоящего DataMatrix из базы по выбранному ШК.
+      - Перетаскивание элементов мышью (Drag & Drop) и изменение размера DataMatrix.
+    """
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.parent_admin = parent
@@ -58,8 +102,117 @@ class LabelPreviewWidget(QWidget):
         self._live_drag_pos: Optional[Tuple[str, int, int, int]] = None
         self._live_resize_size_dots: Optional[int] = None
 
+        # --- Настройки сетки, линеек и зоны безопасности ---
+        self.snap_to_grid: bool = True
+        self.grid_step_mm: float = 1.0       # Шаг сетки: 1.0 мм по умолчанию
+        self.show_grid: bool = True          # Отображать сетку линий/точек
+        self.show_safety_margin: bool = True # Пунктир зоны безопасности 1.5 мм
+        self.safety_margin_mm: float = 1.5   # 1.5 мм от физического края
+        self.show_ruler: bool = True         # Миллиметровые линейки сверху и слева
+        self.current_sample_idx: int = 0     # Текущий пресет тестового наименования
+
         self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.StrongFocus)
         self.setMinimumSize(260, 260)
+
+    # ------------------------------------------------------------
+    # Публичные методы и привязка ШК -> ДМ для шаблона
+    # ------------------------------------------------------------
+
+    def change_selected_font_size(self, delta: int) -> bool:
+        """
+        Увеличивает (delta > 0) или уменьшает (delta < 0) размер шрифта
+        выделенного текстового поля на холсте этикетки (от 6 до 48 pt).
+        """
+        if not self._selected:
+            return False
+
+        tab_key, row_idx = self._selected
+        _, _, _, _, fields = self._get_active_tab_context()
+        if row_idx < 0 or row_idx >= len(fields):
+            return False
+
+        f = fields[row_idx]
+        if f.get("name") == "dataMatrix":
+            return False
+
+        # Читаем точный текущий размер шрифта из таблицы или поля
+        cur_font_size = int(f.get("font_size") or 12)
+        if self.parent_admin and hasattr(self.parent_admin, "_tpl_tab_widgets"):
+            w = self.parent_admin._tpl_tab_widgets.get(tab_key)
+            if w and "fields" in w:
+                tbl = w["fields"]
+                if 0 <= row_idx < tbl.rowCount():
+                    spin = tbl.cellWidget(row_idx, 3)
+                    if spin and hasattr(spin, "value") and spin.value() > 0:
+                        cur_font_size = int(spin.value())
+
+        new_font_size = max(6, min(48, cur_font_size + delta))
+        if new_font_size == cur_font_size:
+            return False
+
+        # 1. Обновляем в таблице полей AdminWindow
+        if self.parent_admin and hasattr(self.parent_admin, "_update_field_font"):
+            try:
+                self.parent_admin._update_field_font(tab_key, row_idx, new_font_size)
+            except Exception as e:
+                print("update_field_font error:", e)
+
+        # 2. Обновляем локальный словарь поля для мгновенной перерисовки
+        f["font_size"] = new_font_size
+        self.update()
+
+        # 3. Обновляем информационный бейдж размера шрифта в тулбаре
+        if self.parent_admin and hasattr(self.parent_admin, "_tpl_update_font_badge"):
+            try:
+                self.parent_admin._tpl_update_font_badge(new_font_size)
+            except Exception:
+                pass
+
+        return True
+
+    def set_selected_font_size(self, font_size: int) -> bool:
+        """Устанавливает конкретный размер шрифта в pt для выделенного текстового поля."""
+        if not self._selected:
+            return False
+        tab_key, row_idx = self._selected
+        _, _, _, _, fields = self._get_active_tab_context()
+        if row_idx < 0 or row_idx >= len(fields):
+            return False
+        f = fields[row_idx]
+        if f.get("name") == "dataMatrix":
+            return False
+        cur_font_size = max(6, int(f.get("font_size") or 10))
+        return self.change_selected_font_size(font_size - cur_font_size)
+
+    def set_grid_step(self, step_mm: float):
+        """Устанавливает шаг сетки в мм (0.0 — отключить сетку)."""
+        self.grid_step_mm = float(step_mm)
+        self.snap_to_grid = (self.grid_step_mm > 0.0)
+        self.update()
+
+    def toggle_safety_margin(self):
+        """Включает/выключает отображение зоны безопасности."""
+        self.show_safety_margin = not self.show_safety_margin
+        self.update()
+
+    def toggle_ruler(self):
+        """Включает/выключает миллиметровую линейку."""
+        self.show_ruler = not self.show_ruler
+        self.update()
+
+    def toggle_grid(self):
+        """Включает/выключает визуальную сетку."""
+        self.show_grid = not self.show_grid
+        self.update()
+
+    def set_sample_preset(self, idx: int):
+        """Переключает пресет тестового товара для проверки переполнения текста."""
+        if 0 <= idx < len(SAMPLE_PRESETS):
+            self.current_sample_idx = idx
+            SAMPLE_FIELD_VALUES["name"] = SAMPLE_PRESETS[idx]["name"]
+            SAMPLE_FIELD_VALUES["name_ru"] = SAMPLE_PRESETS[idx]["name"]
+            self.update()
 
     def set_template(self, tpl: Optional[dict], demo_code: str = ""):
         self._tpl = tpl
@@ -73,6 +226,7 @@ class LabelPreviewWidget(QWidget):
             self.update()
 
     def _apply_dm_code(self, dm_code: str, shk: str = "", gtin: str = "", sn: str = ""):
+        """Устанавливает активный код ДМ и разбирает из него GTIN и серийный номер (SN) для полей шаблона."""
         clean_dm = (dm_code or "").strip()
         if clean_dm != self._demo_code:
             self._demo_code = clean_dm
@@ -96,11 +250,17 @@ class LabelPreviewWidget(QWidget):
             )
 
     def set_shk_for_preview(self, shk_or_gtin: str) -> Dict[str, Any]:
+        """
+        По переданному ШК товара (или GTIN) находит в базе данных соответствующий ему
+        настоящий DataMatrix (ДМ) и обновляет предпросмотр шаблона.
+        Возвращает словарь {'ok': bool, 'code': str, 'gtin': str, 'sn': str, 'shk': str}.
+        """
         raw_q = (shk_or_gtin or "").strip()
         try:
             import db
             with db.get_conn() as conn:
                 if raw_q:
+                    # 1. Ищем привязку в gtin_map (foreign_gtin -> cz_gtin)
                     candidates = [raw_q]
                     if raw_q.isdigit() and len(raw_q) == 13:
                         candidates.append("0" + raw_q)
@@ -116,6 +276,7 @@ class LabelPreviewWidget(QWidget):
                         if cz_g and cz_g not in candidates:
                             candidates.append(cz_g)
 
+                    # 2. Ищем код ДМ в pool_codes (приоритет свободным used=0)
                     ph2 = ",".join(["?"] * len(candidates))
                     row = conn.execute(
                         f"SELECT code, gtin, sn FROM pool_codes WHERE gtin IN ({ph2}) ORDER BY used ASC, id ASC LIMIT 1",
@@ -132,11 +293,16 @@ class LabelPreviewWidget(QWidget):
                             "shk": raw_q,
                         }
 
+                # 3. Если конкретный ШК не задан — берём первый доступный ДМ из пула
                 row_any = conn.execute(
                     "SELECT code, gtin, sn FROM pool_codes ORDER BY used ASC, id ASC LIMIT 1"
                 ).fetchone()
                 if row_any and row_any[0]:
-                    self._apply_dm_code(str(row_any[0]), gtin=str(row_any[1] or ""), sn=str(row_any[2] or ""))
+                    self._apply_dm_code(
+                        str(row_any[0]),
+                        gtin=str(row_any[1] or ""),
+                        sn=str(row_any[2] or "")
+                    )
                     self.update()
                     return {
                         "ok": True,
@@ -157,14 +323,21 @@ class LabelPreviewWidget(QWidget):
         }
 
     def _resolve_active_code(self) -> str:
+        """Возвращает реальный код ДМ, подтянутый к выбранному ШК из пула (или дефолтный код)."""
         if self._demo_code:
             return self._demo_code
+
         res = self.set_shk_for_preview("")
         if res.get("ok") and self._demo_code:
             return self._demo_code
+
         return DEFAULT_REALISTIC_CZ_CODE
 
     def _get_fast_dm_pixmap(self, target_px: int) -> QPixmap:
+        """
+        Мгновенно возвращает QPixmap настоящего GS1 DataMatrix ECC200:
+        базовая матрица рендерится один раз и масштабируется через Qt.FastTransformation за < 0.05 мс.
+        """
         code = self._resolve_active_code()
         if self._cached_base_pixmap is None or self._cached_base_code != code:
             self._cached_base_code = code
@@ -176,12 +349,12 @@ class LabelPreviewWidget(QWidget):
         sz = max(16, int(target_px))
         return self._cached_base_pixmap.scaled(sz, sz, Qt.KeepAspectRatio, Qt.FastTransformation)
 
+    # ------------------------------------------------------------
+    # Получение параметров активной вкладки шаблона из AdminWindow
+    # ------------------------------------------------------------
+
     def _get_active_tab_context(self) -> Tuple[str, float, float, int, List[Dict[str, Any]]]:
-        if (
-            self.parent_admin is not None
-            and hasattr(self.parent_admin, "tpl_tabs")
-            and hasattr(self.parent_admin, "_tpl_tab_widgets")
-        ):
+        if self.parent_admin is not None and hasattr(self.parent_admin, "tpl_tabs") and hasattr(self.parent_admin, "_tpl_tab_widgets"):
             try:
                 tab_idx = self.parent_admin.tpl_tabs.currentIndex()
                 tab_keys = ["combined", "cz", "label"]
@@ -200,8 +373,29 @@ class LabelPreviewWidget(QWidget):
             w_mm = float(self._tpl.get("width_mm") or self._tpl.get("w") or 58.0)
             h_mm = float(self._tpl.get("height_mm") or self._tpl.get("h") or 40.0)
             dpi = int(self._tpl.get("dpi") or 203)
-            fields = self._tpl.get("fields", [])
-            return "combined", w_mm, h_mm, dpi, fields
+            raw_fields = self._tpl.get("fields", [])
+            if isinstance(raw_fields, dict):
+                flat = []
+                for d_it in raw_fields.get("dm", []):
+                    flat.append({
+                        "name": "dataMatrix",
+                        "label": "DataMatrix",
+                        "x": d_it.get("x", 16),
+                        "y": d_it.get("y", 16),
+                        "size": round(float(d_it.get("size_dots", 120)) / dpi * 25.4, 1),
+                        "font_size": 0,
+                    })
+                for t_it in raw_fields.get("fields", []) + raw_fields.get("static_texts", []):
+                    flat.append({
+                        "name": t_it.get("name") or t_it.get("key") or "text",
+                        "label": t_it.get("label") or t_it.get("text") or "Текст",
+                        "x": t_it.get("x", 16),
+                        "y": t_it.get("y", 16),
+                        "font_size": t_it.get("font_size", 10),
+                    })
+                return "combined", w_mm, h_mm, dpi, flat
+            elif isinstance(raw_fields, list):
+                return "combined", w_mm, h_mm, dpi, raw_fields
 
         return "", 58.0, 40.0, 203, []
 
@@ -213,16 +407,20 @@ class LabelPreviewWidget(QWidget):
 
     def _get_scale_and_offset(self) -> Tuple[float, int, int, int, int]:
         w_dots, h_dots, _ = self._label_size_dots()
+        if w_dots <= 0 or h_dots <= 0:
+            return 1.0, 0, 0, w_dots, h_dots
+
+        ruler_space = 22 if self.show_ruler else 0
         margin = 16
-        avail_w = max(10, self.width() - 2 * margin)
-        avail_h = max(10, self.height() - 2 * margin)
+        avail_w = max(10, self.width() - 2 * margin - ruler_space)
+        avail_h = max(10, self.height() - 2 * margin - ruler_space)
 
         scale = min(avail_w / w_dots, avail_h / h_dots)
         disp_w = int(w_dots * scale)
         disp_h = int(h_dots * scale)
 
-        offset_x = (self.width() - disp_w) // 2
-        offset_y = (self.height() - disp_h) // 2
+        offset_x = (self.width() + ruler_space - disp_w) // 2
+        offset_y = (self.height() + ruler_space - disp_h) // 2
         return scale, offset_x, offset_y, w_dots, h_dots
 
     def _dots_to_screen(self, x_dots: float, y_dots: float) -> QPoint:
@@ -241,44 +439,87 @@ class LabelPreviewWidget(QWidget):
             return int(px_val)
         return int(round(px_val / scale))
 
+    def _snap_dots(self, val_dots: float, dpi: int) -> int:
+        """Привязывает координаты в точках принтера к выбранному шагу сетки (в мм)."""
+        if not self.snap_to_grid or self.grid_step_mm <= 0:
+            return int(round(val_dots))
+        step_dots = max(1.0, (self.grid_step_mm / 25.4) * dpi)
+        return int(round(round(val_dots / step_dots) * step_dots))
+
+    # ------------------------------------------------------------
+    # Отрисовка холста этикетки, сетки, линеек и элементов
+    # ------------------------------------------------------------
+
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setRenderHint(QPainter.Antialiasing, False)
 
-        app = QApplication.instance()
-        is_light = "CLEAN SLATE" in (app.styleSheet() if app else "")
-        bg_color = QColor("#f1f5f9") if is_light else QColor("#10151c")
-        painter.fillRect(self.rect(), bg_color)
+        # Фон рабочей области (адаптивный под светлую/тёмную тему)
+        is_lt = _is_light_theme()
+        painter.fillRect(self.rect(), QColor("#f1f5f9") if is_lt else QColor("#141b23"))
 
         tab_key, w_mm, h_mm, dpi, fields = self._get_active_tab_context()
         if not tab_key and not fields:
-            painter.setPen(QPen(QColor("#64748b" if is_light else "#8b97a6")))
-            painter.drawText(self.rect(), Qt.AlignCenter, "Выберите шаблон")
+            painter.setPen(QPen(QColor("#8b97a6")))
+            painter.drawText(self.rect(), Qt.AlignCenter, "Выберите шаблон этикетки")
             return
 
         scale, off_x, off_y, w_dots, h_dots = self._get_scale_and_offset()
         disp_w = int(w_dots * scale)
         disp_h = int(h_dots * scale)
 
+        # Холст этикетки (белый)
         label_rect = QRect(off_x, off_y, disp_w, disp_h)
         painter.fillRect(label_rect, Qt.white)
 
-        step_5mm_px = (5.0 / 25.4) * dpi * scale
-        if step_5mm_px >= 10:
-            grid_pen = QColor("#e2e8f0" if is_light else "#2a3542")
-            painter.setPen(QPen(grid_pen, 1, Qt.SolidLine))
-            gx = off_x + step_5mm_px
-            while gx < off_x + disp_w:
-                painter.drawLine(int(gx), off_y, int(gx), off_y + disp_h)
-                gx += step_5mm_px
-            gy = off_y + step_5mm_px
-            while gy < off_y + disp_h:
-                painter.drawLine(off_x, int(gy), off_x + disp_w, int(gy))
-                gy += step_5mm_px
+        dots_per_mm = dpi / 25.4
 
+        # 1. Визуальная сетка (шаг 1 мм точки/пунктир, шаг 5 мм сплошные линии)
+        if self.show_grid:
+            step_1mm_px = dots_per_mm * scale
+            if step_1mm_px >= 5:
+                painter.setPen(QPen(QColor("#f1f5f9"), 1, Qt.DotLine))
+                gx = off_x + step_1mm_px
+                while gx < off_x + disp_w - 1:
+                    painter.drawLine(int(gx), off_y, int(gx), off_y + disp_h)
+                    gx += step_1mm_px
+                gy = off_y + step_1mm_px
+                while gy < off_y + disp_h - 1:
+                    painter.drawLine(off_x, int(gy), off_x + disp_w, int(gy))
+                    gy += step_1mm_px
+
+            step_5mm_px = 5.0 * dots_per_mm * scale
+            if step_5mm_px >= 10:
+                painter.setPen(QPen(QColor("#e2e8f0"), 1, Qt.SolidLine))
+                gx = off_x + step_5mm_px
+                while gx < off_x + disp_w - 1:
+                    painter.drawLine(int(gx), off_y, int(gx), off_y + disp_h)
+                    gx += step_5mm_px
+                gy = off_y + step_5mm_px
+                while gy < off_y + disp_h - 1:
+                    painter.drawLine(off_x, int(gy), off_x + disp_w, int(gy))
+                    gy += step_5mm_px
+
+        # 2. Пунктирная рамка зоны безопасности (1.5 мм от края)
+        if self.show_safety_margin and self.safety_margin_mm > 0:
+            sm_px = int(round(self.safety_margin_mm * dots_per_mm * scale))
+            if disp_w > 2 * sm_px and disp_h > 2 * sm_px:
+                safe_rect = QRect(off_x + sm_px, off_y + sm_px, disp_w - 2 * sm_px, disp_h - 2 * sm_px)
+                painter.setPen(QPen(QColor("#f59e0b"), 1, Qt.DashLine))
+                painter.drawRect(safe_rect)
+
+        # 3. Внешняя рамка этикетки
+        painter.setPen(QPen(QColor("#0f172a"), 2))
+        painter.drawRect(label_rect)
+
+        # 4. Линейка сверху и слева
+        if self.show_ruler:
+            self._draw_rulers(painter, off_x, off_y, disp_w, disp_h, w_mm, h_mm, dpi, scale)
+
+        # 5. Отрисовка элементов
         self._field_rects.clear()
 
-        # Строгий клиппинг по белому холсту
+        painter.save()
         painter.setClipRect(label_rect)
 
         for row_idx, f in enumerate(fields):
@@ -289,12 +530,147 @@ class LabelPreviewWidget(QWidget):
             if f.get("name") != "dataMatrix":
                 self._draw_single_text(painter, tab_key, row_idx, f, scale, off_x, off_y, dpi)
 
-        painter.setClipping(False)
+        painter.restore()
 
-        painter.setPen(QPen(QColor("#cbd5e1" if is_light else "#334155"), 2))
-        painter.drawRect(label_rect)
+        # 6. Информационный HUD-бейдж в реальном времени при Drag & Drop
+        if self._dragging or self._resizing:
+            self._draw_hud_badge(painter, off_x, off_y, disp_w, disp_h, dpi)
 
-    def _draw_single_dm(self, painter, tab_key, row_idx, f, scale, off_x, off_y, dpi):
+    def _draw_rulers(
+        self,
+        painter: QPainter,
+        off_x: int,
+        off_y: int,
+        disp_w: int,
+        disp_h: int,
+        w_mm: float,
+        h_mm: float,
+        dpi: int,
+        scale: float
+    ):
+        """Отрисовывает миллиметровые шкалы сверху и слева от холста этикетки."""
+        dots_per_mm = dpi / 25.4
+        step_mm_px = dots_per_mm * scale
+
+        font = QFont("Consolas", 7)
+        painter.setFont(font)
+
+        is_lt = _is_light_theme()
+        r_bg = QColor("#e2e8f0") if is_lt else QColor("#1e293b")
+        r_border = QColor("#cbd5e1") if is_lt else QColor("#475569")
+        r_tick_main = QColor("#475569") if is_lt else QColor("#94a3b8")
+        r_tick_sub = QColor("#94a3b8") if is_lt else QColor("#64748b")
+        r_text = QColor("#0f172a") if is_lt else QColor("#cbd5e1")
+
+        # Верхняя линейка
+        ruler_top_y = off_y - 18
+        painter.fillRect(QRect(off_x, ruler_top_y, disp_w, 16), r_bg)
+        painter.setPen(QPen(r_border, 1))
+        painter.drawRect(QRect(off_x, ruler_top_y, disp_w, 16))
+
+        cur_mm = 0.0
+        while cur_mm <= w_mm + 0.1:
+            x_pos = int(round(off_x + cur_mm * step_mm_px))
+            if x_pos > off_x + disp_w:
+                break
+            is_10mm = (int(round(cur_mm)) % 10 == 0)
+            is_5mm = (int(round(cur_mm)) % 5 == 0)
+
+            tick_len = 12 if is_10mm else (7 if is_5mm else 4)
+            painter.setPen(QPen(r_tick_main if is_10mm else r_tick_sub, 1))
+            painter.drawLine(x_pos, off_y - 2, x_pos, off_y - 2 - tick_len)
+
+            if is_10mm and cur_mm > 0 and (x_pos + 12) < (off_x + disp_w):
+                painter.setPen(QPen(r_text))
+                painter.drawText(x_pos + 2, off_y - 6, f"{int(round(cur_mm))}")
+            cur_mm += 1.0
+
+        # Левая линейка
+        ruler_left_x = off_x - 18
+        painter.fillRect(QRect(ruler_left_x, off_y, 16, disp_h), r_bg)
+        painter.setPen(QPen(r_border, 1))
+        painter.drawRect(QRect(ruler_left_x, off_y, 16, disp_h))
+
+        cur_mm = 0.0
+        while cur_mm <= h_mm + 0.1:
+            y_pos = int(round(off_y + cur_mm * step_mm_px))
+            if y_pos > off_y + disp_h:
+                break
+            is_10mm = (int(round(cur_mm)) % 10 == 0)
+            is_5mm = (int(round(cur_mm)) % 5 == 0)
+
+            tick_len = 12 if is_10mm else (7 if is_5mm else 4)
+            painter.setPen(QPen(r_tick_main if is_10mm else r_tick_sub, 1))
+            painter.drawLine(off_x - 2, y_pos, off_x - 2 - tick_len, y_pos)
+
+            if is_10mm and cur_mm > 0 and (y_pos + 8) < (off_y + disp_h):
+                painter.setPen(QPen(r_text))
+                painter.drawText(ruler_left_x + 2, y_pos - 2, f"{int(round(cur_mm))}")
+            cur_mm += 1.0
+
+    def _draw_hud_badge(self, painter: QPainter, off_x: int, off_y: int, disp_w: int, disp_h: int, dpi: int):
+        """Отрисовывает информационный бейдж с точными координатами в мм и точках."""
+        info_lines = []
+        is_warning = False
+
+        if self._live_drag_pos:
+            _tab, _row, x_dots, y_dots = self._live_drag_pos
+            x_mm = x_dots / dpi * 25.4
+            y_mm = y_dots / dpi * 25.4
+            info_lines.append(f"X: {x_mm:.1f} мм ({x_dots} dot)  Y: {y_mm:.1f} мм ({y_dots} dot)")
+
+            # Проверка зоны безопасности (1.5 мм)
+            if self.show_safety_margin:
+                w_dots, h_dots, _ = self._label_size_dots()
+                margin_dots = (self.safety_margin_mm / 25.4) * dpi
+                if x_dots < margin_dots or y_dots < margin_dots or x_dots > (w_dots - margin_dots) or y_dots > (h_dots - margin_dots):
+                    is_warning = True
+                    info_lines.append("⚠ Близко к краю (< 1.5 мм)")
+
+        elif self._live_resize_size_dots is not None:
+            size_dots = self._live_resize_size_dots
+            size_mm = size_dots / dpi * 25.4
+            info_lines.append(f"Размер ДМ: {size_mm:.1f}×{size_mm:.1f} мм ({size_dots} dot)")
+
+        if self.snap_to_grid:
+            info_lines.append(f"Сетка: {self.grid_step_mm:.1f} мм [Alt — свободно]")
+        else:
+            info_lines.append("Сетка: ВЫКЛ (свободное перемещение)")
+
+        text = "  |  ".join(info_lines)
+        font = QFont("Consolas", 8, QFont.Bold)
+        painter.setFont(font)
+        fm = QFontMetrics(font)
+        bw = fm.horizontalAdvance(text) + 16
+        bh = 22
+
+        badge_x = max(10, off_x + (disp_w - bw) // 2)
+        badge_y = off_y + disp_h + 8
+        if badge_y + bh > self.height():
+            badge_y = off_y + 8
+
+        b_rect = QRect(badge_x, badge_y, bw, bh)
+        bg_col = QColor("#7c2d12") if is_warning else QColor("#0f172a")
+        border_col = QColor("#f97316") if is_warning else QColor("#2563eb")
+
+        painter.fillRect(b_rect, bg_col)
+        painter.setPen(QPen(border_col, 1))
+        painter.drawRect(b_rect)
+
+        painter.setPen(QPen(QColor("#fef08a") if is_warning else Qt.white))
+        painter.drawText(b_rect, Qt.AlignCenter, text)
+
+    def _draw_single_dm(
+        self,
+        painter: QPainter,
+        tab_key: str,
+        row_idx: int,
+        f: Dict[str, Any],
+        scale: float,
+        off_x: int,
+        off_y: int,
+        dpi: int
+    ):
         x_dots = int(f.get("x", 16))
         y_dots = int(f.get("y", 16))
         size_mm = float(f.get("size") or 20.0)
@@ -303,13 +679,9 @@ class LabelPreviewWidget(QWidget):
         if self._live_drag_pos and self._live_drag_pos[0] == tab_key and self._live_drag_pos[1] == row_idx:
             x_dots, y_dots = self._live_drag_pos[2], self._live_drag_pos[3]
 
-        if (
-            self._live_resize_size_dots is not None
-            and self._resizing
-            and self._resizing[0] == tab_key
-            and self._resizing[1] == row_idx
-        ):
+        if self._live_resize_size_dots is not None and self._resizing and self._resizing[0] == tab_key and self._resizing[1] == row_idx:
             size_dots = self._live_resize_size_dots
+            size_mm = round(size_dots / dpi * 25.4, 1)
 
         sx = int(round(off_x + x_dots * scale))
         sy = int(round(off_y + y_dots * scale))
@@ -331,6 +703,14 @@ class LabelPreviewWidget(QWidget):
             painter.setPen(QPen(QColor("#2563eb"), 2, Qt.SolidLine))
             painter.drawRect(rect)
 
+            painter.setFont(QFont("Consolas", 8, QFont.Bold))
+            painter.setPen(QPen(QColor("#1d4ed8")))
+            painter.drawText(
+                rect.left(),
+                max(off_y + 11, rect.top() - 4),
+                f"ДМ {int(round(size_mm))}×{int(round(size_mm))} мм (X:{x_dots} Y:{y_dots})"
+            )
+
             handle_size = 10
             hr = QRect(rect.right() - handle_size + 1, rect.bottom() - handle_size + 1, handle_size, handle_size)
             painter.fillRect(hr, QColor("#2563eb"))
@@ -338,7 +718,17 @@ class LabelPreviewWidget(QWidget):
             painter.drawRect(hr)
             self._field_rects.append((hr, tab_key, row_idx, "dataMatrix", "handle"))
 
-    def _draw_single_text(self, painter, tab_key, row_idx, f, scale, off_x, off_y, dpi):
+    def _draw_single_text(
+        self,
+        painter: QPainter,
+        tab_key: str,
+        row_idx: int,
+        f: Dict[str, Any],
+        scale: float,
+        off_x: int,
+        off_y: int,
+        dpi: int
+    ):
         x_dots = int(f.get("x", 16))
         y_dots = int(f.get("y", 16))
 
@@ -349,41 +739,128 @@ class LabelPreviewWidget(QWidget):
         sy = int(round(off_y + y_dots * scale))
 
         font_size_pt = max(6, int(f.get("font_size") or 10))
-        font_px = max(9, int(round(font_size_pt * 1.33 * scale)))
-        font = QFont("Arial", font_px)
+        font_px = max(7, int(round(font_size_pt * dpi / 72.0 * scale)))
+        font = QFont("Arial")
+        font.setPixelSize(font_px)
         font.setBold(bool(f.get("bold", False)))
         painter.setFont(font)
 
         fname = str(f.get("name") or "").strip()
+        fname_l = fname.lower()
         flabel = str(f.get("label") or fname or "Поле").strip()
 
-        sample_val = SAMPLE_FIELD_VALUES.get(fname.lower(), flabel)
-        if flabel and sample_val and flabel != sample_val and fname.lower() not in ("name", "name_ru"):
-            text_str = f"{flabel}: {sample_val}"
+        # Подставляем реальные GTIN, ШК и SN из активного кода ДМ
+        if fname_l == "gtin" and self._current_gtin:
+            sample_val = self._current_gtin
+        elif fname_l in ("sn", "serial") and self._current_sn:
+            sample_val = self._current_sn
+        elif fname_l == "shk" and self._current_shk:
+            sample_val = self._current_shk
         else:
-            text_str = sample_val or flabel
+            sample_val = SAMPLE_FIELD_VALUES.get(fname_l, "")
+
+        if flabel and sample_val and fname_l not in ("name", "name_ru"):
+            text_str = f"{flabel}: {sample_val}"
+        elif sample_val:
+            text_str = sample_val
+        else:
+            text_str = flabel
 
         fm = QFontMetrics(font)
         tw = fm.horizontalAdvance(text_str)
         th = fm.height()
+        ascent = fm.ascent()
 
-        rect = QRect(sx, sy, tw + 8, th + 4)
+        rect = QRect(sx, sy, tw + 6, th + 2)
         self._field_rects.append((rect, tab_key, row_idx, flabel or fname, "text"))
 
+        # 1. Рисуем текст этикетки с гарантированным использованием целевого шрифта
+        painter.setFont(font)
+        painter.setPen(QPen(QColor("#0f172a")))
+        painter.drawText(sx + 2, sy + ascent, text_str)
+
+        # 2. Рисуем рамку выделения и бейдж поверх (без сброса шрифта основного текста)
         is_sel = (self._selected == (tab_key, row_idx))
         if is_sel:
-            painter.fillRect(rect, QColor(37, 99, 235, 40))
+            painter.fillRect(rect, QColor(37, 99, 235, 36))
             painter.setPen(QPen(QColor("#2563eb"), 1, Qt.DashLine))
             painter.drawRect(rect)
 
-        painter.setPen(QPen(QColor("#0f172a")))
-        painter.drawText(QRect(sx + 2, sy, tw + 6, th + 2), Qt.AlignLeft | Qt.AlignVCenter, text_str)
+            painter.setFont(QFont("Consolas", 8, QFont.Bold))
+            painter.setPen(QPen(QColor("#1d4ed8")))
+            painter.drawText(
+                rect.left(),
+                max(off_y + 11, rect.top() - 3),
+                f"{flabel} [{font_size_pt} pt]"
+            )
+
+    # ------------------------------------------------------------
+    # Обработка событий мыши (Drag, Resize, Selection, Double Click, Context Menu)
+    # ------------------------------------------------------------
+
+    def wheelEvent(self, event):
+        """Изменение размера шрифта выбранного текстового поля колёсиком мыши."""
+        pos = event.position().toPoint()
+        # 1. Если курсор находится над текстовым полем — выбираем его
+        for rect, tab_key, row_idx, name, kind in reversed(self._field_rects):
+            if kind == "text" and rect.contains(pos):
+                self._selected = (tab_key, row_idx)
+                try:
+                    widgets = self.parent_admin._tpl_tab_widgets.get(tab_key)
+                    if widgets and "fields" in widgets:
+                        widgets["fields"].selectRow(row_idx)
+                except Exception:
+                    pass
+                break
+
+        # 2. Если поле выбрано — меняем размер шрифта (Shift удваивает шаг)
+        if self._selected:
+            tab_key, row_idx = self._selected
+            _, _, _, _, fields = self._get_active_tab_context()
+            if 0 <= row_idx < len(fields) and fields[row_idx].get("name") != "dataMatrix":
+                delta_y = event.angleDelta().y()
+                if delta_y != 0:
+                    step = 1 if delta_y > 0 else -1
+                    if event.modifiers() & Qt.ShiftModifier:
+                        step *= 2
+                    if self.change_selected_font_size(step):
+                        event.accept()
+                        return
+
+        super().wheelEvent(event)
+
+    def keyPressEvent(self, event):
+        """Горячие клавиши изменения шрифта (+ / - / PageUp / PageDown) при выделенном поле."""
+        if self._selected:
+            tab_key, row_idx = self._selected
+            _, _, _, _, fields = self._get_active_tab_context()
+            if 0 <= row_idx < len(fields) and fields[row_idx].get("name") != "dataMatrix":
+                key = event.key()
+                if key in (Qt.Key_Plus, Qt.Key_Equal) or (event.modifiers() & Qt.ControlModifier and key == Qt.Key_Plus):
+                    if self.change_selected_font_size(+1):
+                        event.accept()
+                        return
+                elif key in (Qt.Key_Minus, Qt.Key_Underscore) or (event.modifiers() & Qt.ControlModifier and key == Qt.Key_Minus):
+                    if self.change_selected_font_size(-1):
+                        event.accept()
+                        return
+                elif key in (Qt.Key_BracketRight, Qt.Key_PageUp):
+                    if self.change_selected_font_size(+1):
+                        event.accept()
+                        return
+                elif key in (Qt.Key_BracketLeft, Qt.Key_PageDown):
+                    if self.change_selected_font_size(-1):
+                        event.accept()
+                        return
+        super().keyPressEvent(event)
 
     def mousePressEvent(self, event):
         if event.button() != Qt.LeftButton:
             return
+
         pos = event.position().toPoint()
 
+        # 1. Проверяем клик по ручке изменения размера DataMatrix
         for rect, tab_key, row_idx, name, kind in reversed(self._field_rects):
             if kind == "handle" and rect.contains(pos):
                 self._resizing = (tab_key, row_idx, name)
@@ -393,12 +870,24 @@ class LabelPreviewWidget(QWidget):
                 self.update()
                 return
 
+        # 2. Проверяем клик по элементу для перетаскивания (Drag & Drop)
         for rect, tab_key, row_idx, name, kind in reversed(self._field_rects):
             if kind in ("dm", "text") and rect.contains(pos):
                 self._dragging = (tab_key, row_idx, name)
                 self._drag_offset = pos - rect.topLeft()
                 self._selected = (tab_key, row_idx)
                 self._live_drag_pos = None
+                try:
+                    widgets = self.parent_admin._tpl_tab_widgets.get(tab_key)
+                    if widgets and "fields" in widgets:
+                        widgets["fields"].selectRow(row_idx)
+                    _, _, _, _, f_list = self._get_active_tab_context()
+                    if 0 <= row_idx < len(f_list):
+                        f_sel = f_list[row_idx]
+                        if f_sel.get("name") != "dataMatrix" and hasattr(self.parent_admin, "_tpl_update_font_badge"):
+                            self.parent_admin._tpl_update_font_badge(int(f_sel.get("font_size") or 10))
+                except Exception:
+                    pass
                 self.setCursor(Qt.ClosedHandCursor)
                 self.update()
                 return
@@ -408,37 +897,56 @@ class LabelPreviewWidget(QWidget):
 
     def mouseMoveEvent(self, event):
         pos = event.position().toPoint()
-        w_dots, h_dots, _ = self._label_size_dots()
+        alt_pressed = bool(event.modifiers() & Qt.AltModifier)
 
         if self._resizing:
-            tab_key, row_idx, _ = self._resizing
+            tab_key, row_idx, _name = self._resizing
             _, _, _, dpi, fields = self._get_active_tab_context()
-            if row_idx < len(fields):
-                f = fields[row_idx]
-                start_tl = self._dots_to_screen(f.get("x", 0), f.get("y", 0))
-                new_size_px = max(20, max(pos.x() - start_tl.x(), pos.y() - start_tl.y()))
-                new_size_dots = self._px_to_dots(new_size_px)
-                max_allowed = min(w_dots - int(f.get("x", 0)), h_dots - int(f.get("y", 0)))
-                self._live_resize_size_dots = max(24, min(max_allowed, new_size_dots))
-                self.update()
+            if row_idx >= len(fields):
+                return
+            f = fields[row_idx]
+
+            start_tl = self._dots_to_screen(f.get("x", 0), f.get("y", 0))
+            new_w_px = pos.x() - start_tl.x()
+            new_h_px = pos.y() - start_tl.y()
+            new_size_px = max(new_w_px, new_h_px, 20)
+            new_size_dots = self._px_to_dots(new_size_px)
+
+            # Snap-to-Grid при ресайзе
+            if self.snap_to_grid and not alt_pressed:
+                new_size_dots = self._snap_dots(new_size_dots, dpi)
+
+            w_dots, h_dots, _ = self._label_size_dots()
+            max_allowed = min(w_dots - int(f.get("x", 0)), h_dots - int(f.get("y", 0)))
+            self._live_resize_size_dots = max(24, min(max_allowed, new_size_dots))
+            self.update()
             return
 
         if self._dragging:
             new_tl = pos - self._drag_offset
             x_dots, y_dots = self._screen_to_dots(new_tl.x(), new_tl.y())
-            tab_key, row_idx, _ = self._dragging
+            tab_key, row_idx, _name = self._dragging
 
-            x_dots = max(0, min(max(0, w_dots - 10), x_dots))
-            y_dots = max(0, min(max(0, h_dots - 10), y_dots))
+            _, _, _, dpi, _ = self._get_active_tab_context()
+
+            # Snap-to-Grid при перетаскивании
+            if self.snap_to_grid and not alt_pressed:
+                x_dots = self._snap_dots(x_dots, dpi)
+                y_dots = self._snap_dots(y_dots, dpi)
+
+            w_dots, h_dots, _ = self._label_size_dots()
+            x_dots = max(0, min(w_dots - 20, x_dots))
+            y_dots = max(0, min(h_dots - 14, y_dots))
 
             self._live_drag_pos = (tab_key, row_idx, x_dots, y_dots)
             self.update()
             return
 
-        for rect, _, _, _, kind in reversed(self._field_rects):
+        for rect, _tab_key, _row_idx, _name, kind in reversed(self._field_rects):
             if kind == "handle" and rect.contains(pos):
                 self.setCursor(Qt.SizeFDiagCursor)
                 return
+        for rect, _tab_key, _row_idx, _name, kind in reversed(self._field_rects):
             if kind in ("dm", "text") and rect.contains(pos):
                 self.setCursor(Qt.OpenHandCursor)
                 return
@@ -446,14 +954,14 @@ class LabelPreviewWidget(QWidget):
 
     def mouseReleaseEvent(self, event):
         if self._resizing:
-            tab_key, row_idx, _ = self._resizing
+            tab_key, row_idx, _name = self._resizing
             if self._live_resize_size_dots is not None:
                 _, _, dpi = self._label_size_dots()
                 size_mm = round(self._live_resize_size_dots / dpi * 25.4, 0)
                 try:
-                    self.parent_admin._update_field_size(tab_key, row_idx, max(10.0, size_mm))
-                except Exception:
-                    pass
+                    self.parent_admin._update_field_size(tab_key, row_idx, max(8.0, size_mm))
+                except Exception as e:
+                    print("save size:", e)
             self._live_resize_size_dots = None
             self._resizing = None
 
@@ -462,8 +970,8 @@ class LabelPreviewWidget(QWidget):
                 tab_key, row_idx, x, y = self._live_drag_pos
                 try:
                     self.parent_admin._update_field_position(tab_key, row_idx, x, y)
-                except Exception:
-                    pass
+                except Exception as e:
+                    print("save pos:", e)
             self._live_drag_pos = None
             self._dragging = None
 
@@ -475,21 +983,149 @@ class LabelPreviewWidget(QWidget):
         _, _, _, _, fields = self._get_active_tab_context()
         for rect, tab_key, row_idx, name, kind in reversed(self._field_rects):
             if kind in ("dm", "text") and rect.contains(pos):
-                if row_idx < len(fields):
-                    f = fields[row_idx]
+                if row_idx >= len(fields):
+                    return
+                f = fields[row_idx]
+                if kind == "dm":
+                    default = f"{f.get('x', 0)} {f.get('y', 0)}"
                     text, ok = QInputDialog.getText(
                         self,
-                        f"Координаты поля «{name}»",
-                        "Введите X и Y через пробел (в точках):",
-                        text=f"{f.get('x', 0)} {f.get('y', 0)}",
+                        "Координаты DataMatrix",
+                        "Введите X и Y (в точках принтера):",
+                        text=default
                     )
-                    if ok and text.strip():
-                        try:
-                            parts = text.strip().split()
-                            x = max(0, int(parts[0]))
-                            y = max(0, int(parts[1])) if len(parts) > 1 else 0
-                            self.parent_admin._update_field_position(tab_key, row_idx, x, y)
-                            self.update()
-                        except Exception:
-                            pass
-                return
+                    if not ok or not text.strip():
+                        return
+                    try:
+                        parts = text.strip().split()
+                        x = max(0, int(parts[0]))
+                        y = max(0, int(parts[1])) if len(parts) > 1 else 0
+                        self.parent_admin._update_field_position(tab_key, row_idx, x, y)
+                        self.update()
+                    except Exception:
+                        pass
+                    return
+                else:
+                    cur_f = int(f.get("font_size") or 10)
+                    default = f"{f.get('x', 0)} {f.get('y', 0)} {cur_f}"
+                    text, ok = QInputDialog.getText(
+                        self,
+                        f"Параметры поля «{name}»",
+                        "Введите: X  Y  Размер_шрифта_pt (например: 120 40 14):",
+                        text=default
+                    )
+                    if not ok or not text.strip():
+                        return
+                    try:
+                        parts = text.strip().split()
+                        x = max(0, int(parts[0]))
+                        y = max(0, int(parts[1])) if len(parts) > 1 else 0
+                        self.parent_admin._update_field_position(tab_key, row_idx, x, y)
+                        if len(parts) > 2:
+                            f_sz = max(6, min(48, int(parts[2])))
+                            self.parent_admin._update_field_font(tab_key, row_idx, f_sz)
+                            f["font_size"] = f_sz
+                        self.update()
+                    except Exception:
+                        pass
+                    return
+
+    def contextMenuEvent(self, event):
+        """Контекстное меню по правому клику для настройки сетки, линеек и зон безопасности."""
+        menu = QMenu(self)
+
+        # Секция изменения шрифта выбранного текстового поля
+        if self._selected:
+            _tk, _r = self._selected
+            _, _, _, _, _f_all = self._get_active_tab_context()
+            if 0 <= _r < len(_f_all) and _f_all[_r].get("name") != "dataMatrix":
+                _f_data = _f_all[_r]
+                cur_pt = int(_f_data.get("font_size") or 10)
+                f_name = str(_f_data.get("label") or _f_data.get("name") or "Поле")
+
+                m_font = menu.addMenu(f"🔤 Размер шрифта «{f_name}»: {cur_pt} pt")
+                act_inc = m_font.addAction("➕ Увеличить шрифт (+1 pt) [Колёсико вверх / +]")
+                act_inc.triggered.connect(lambda: self.change_selected_font_size(+1))
+
+                act_dec = m_font.addAction("➖ Уменьшить шрифт (-1 pt) [Колёсико вниз / -]")
+                act_dec.triggered.connect(lambda: self.change_selected_font_size(-1))
+
+                act_custom = m_font.addAction("🔢 Задать точный размер шрифта (pt)...")
+                def _prompt_font(cur=cur_pt, fn=f_name):
+                    val, ok = QInputDialog.getInt(self, f"Шрифт поля «{fn}»", "Размер шрифта (pt):", cur, 6, 48, 1)
+                    if ok:
+                        self.set_selected_font_size(val)
+                act_custom.triggered.connect(_prompt_font)
+
+                menu.addSeparator()
+        is_lt = _is_light_theme()
+        m_bg = "#ffffff" if is_lt else "#1e293b"
+        m_fg = "#0f172a" if is_lt else "#f1f5f9"
+        m_bd = "#cbd5e1" if is_lt else "#334155"
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background-color: {m_bg};
+                color: {m_fg};
+                border: 1px solid {m_bd};
+                border-radius: 6px;
+                padding: 4px;
+            }}
+            QMenu::item {{
+                padding: 6px 24px 6px 12px;
+                border-radius: 4px;
+            }}
+            QMenu::item:selected {{
+                background-color: #2563eb;
+                color: #ffffff;
+            }}
+        """)
+
+        # 1. Шаг сетки (Snap-to-Grid)
+        m_grid = menu.addMenu("📐 Шаг сетки (Snap-to-Grid)")
+        act_1mm = m_grid.addAction("1 мм (по умолчанию)")
+        act_1mm.setCheckable(True)
+        act_1mm.setChecked(self.snap_to_grid and abs(self.grid_step_mm - 1.0) < 0.1)
+        act_1mm.triggered.connect(lambda: self.set_grid_step(1.0))
+
+        act_2mm = m_grid.addAction("2 мм")
+        act_2mm.setCheckable(True)
+        act_2mm.setChecked(self.snap_to_grid and abs(self.grid_step_mm - 2.0) < 0.1)
+        act_2mm.triggered.connect(lambda: self.set_grid_step(2.0))
+
+        act_5mm = m_grid.addAction("5 мм")
+        act_5mm.setCheckable(True)
+        act_5mm.setChecked(self.snap_to_grid and abs(self.grid_step_mm - 5.0) < 0.1)
+        act_5mm.triggered.connect(lambda: self.set_grid_step(5.0))
+
+        act_off = m_grid.addAction("Отключить прилипание (Alt)")
+        act_off.setCheckable(True)
+        act_off.setChecked(not self.snap_to_grid or self.grid_step_mm <= 0)
+        act_off.triggered.connect(lambda: self.set_grid_step(0.0))
+
+        # 2. Переключатели отображения
+        act_toggle_grid = menu.addAction("Отображать сетку")
+        act_toggle_grid.setCheckable(True)
+        act_toggle_grid.setChecked(self.show_grid)
+        act_toggle_grid.triggered.connect(self.toggle_grid)
+
+        act_sm = menu.addAction("Зона безопасности (1.5 мм от края)")
+        act_sm.setCheckable(True)
+        act_sm.setChecked(self.show_safety_margin)
+        act_sm.triggered.connect(self.toggle_safety_margin)
+
+        act_ruler = menu.addAction("Миллиметровая линейка")
+        act_ruler.setCheckable(True)
+        act_ruler.setChecked(self.show_ruler)
+        act_ruler.triggered.connect(self.toggle_ruler)
+
+        menu.addSeparator()
+
+        # 3. Тестовый образец наименования
+        m_samples = menu.addMenu("📦 Тестовый образец товара")
+        for i, preset in enumerate(SAMPLE_PRESETS):
+            act_p = m_samples.addAction(preset["title"])
+            act_p.setCheckable(True)
+            act_p.setChecked(self.current_sample_idx == i)
+            act_p.triggered.connect(lambda _=False, idx=i: self.set_sample_preset(idx))
+
+        menu.exec(event.globalPos())

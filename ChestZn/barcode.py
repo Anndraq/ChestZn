@@ -510,3 +510,4 @@ def encode_gs1_datamatrix_svg(code: str, size: int = 120) -> str:
                 rects.append(f'<rect x="{c}" y="{r}" width="1" height="1" fill="#000000"/>')
     svg_body = "".join(rects)
     return f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {dim} {dim}" width="{size}" height="{size}">{svg_body}</svg>'
+
