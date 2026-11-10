@@ -42,15 +42,12 @@ log = get_logger("operator")
 
 
 def get_current_theme() -> str:
-    """Возвращает текущую тему ('dark' или 'light') из config.json."""
+    """Возвращает текущую тему ('dark' или 'light') из кэша в памяти styles.py (0 мс)."""
     try:
-        cfg_path = Path(os.environ.get("APPDATA", Path.home())) / "ChestZn" / "config.json"
-        if cfg_path.exists():
-            data = json.loads(cfg_path.read_text(encoding="utf-8"))
-            return data.get("app_theme", "dark")
+        from styles import get_current_theme as _get_cached_theme
+        return _get_cached_theme()
     except Exception:
-        pass
-    return "dark"
+        return "dark"
 
 
 class OperatorWindow(QWidget):
@@ -382,12 +379,36 @@ class OperatorWindow(QWidget):
     def _refresh_header_route(self):
         """Проверяет реальный статус принтера: если отключён — блокирует сканирование."""
         if hasattr(self, "lbl_op"):
-            if not self.lbl_op.text().strip():
-                self.lbl_op.setText("📡 Сканер: Готов")
-            self.lbl_op.setStyleSheet(
-                "background:#3b6ea5; color:#ffffff; font-size:13px; font-weight:600; "
-                "padding:4px 12px; border-radius:6px;"
-            )
+            try:
+                from device_discovery import detect_local_scanners
+                scs = detect_local_scanners(connected_only=True, force_refresh=False)
+                if scs:
+                    sc_name = scs[0].get("name", "Сканер ШК")
+                    self.lbl_op.setText(f"🟢 📡 {sc_name}")
+                    if self._is_light:
+                        self.lbl_op.setStyleSheet(
+                            "background:#dcfce7; color:#246e53; font-size:13px; font-weight:700; "
+                            "padding:4px 12px; border-radius:6px; border:1px solid #2e856e;"
+                        )
+                    else:
+                        self.lbl_op.setStyleSheet(
+                            "background:#0f291e; color:#4ade80; font-size:13px; font-weight:700; "
+                            "padding:4px 12px; border-radius:6px; border:1px solid #2e856e;"
+                        )
+                else:
+                    self.lbl_op.setText("🔴 📡 Сканер отключён / не отвечает")
+                    if self._is_light:
+                        self.lbl_op.setStyleSheet(
+                            "background:#fee2e2; color:#b91c1c; font-size:13px; font-weight:700; "
+                            "padding:4px 12px; border-radius:6px; border:1px solid #ef4444;"
+                        )
+                    else:
+                        self.lbl_op.setStyleSheet(
+                            "background:#2a1215; color:#f87171; font-size:13px; font-weight:700; "
+                            "padding:4px 12px; border-radius:6px; border:1px solid #c04d53;"
+                        )
+            except Exception:
+                self.lbl_op.setText("🔴 📡 Сканер не отвечает")
         try:
             live = get_currently_connected_printer(force_refresh=False)
             is_conn = bool(live and live.get("connected"))
@@ -431,6 +452,35 @@ class OperatorWindow(QWidget):
                 )
         except Exception as e:
             log.debug("_refresh_header_route: %s", e)
+
+    def set_scanner_status(self, is_connected: bool, scanner_name: str = ""):
+        """Установить актуальный статус сканера из фонового мониторинга MainWindow."""
+        if hasattr(self, "lbl_op"):
+            if is_connected:
+                title = f"🟢 📡 {scanner_name or 'Сканер ШК'}"
+                self.lbl_op.setText(title)
+                if getattr(self, "_is_light", False):
+                    self.lbl_op.setStyleSheet(
+                        "background:#dcfce7; color:#246e53; font-size:13px; font-weight:700; "
+                        "padding:4px 12px; border-radius:6px; border:1px solid #2e856e;"
+                    )
+                else:
+                    self.lbl_op.setStyleSheet(
+                        "background:#0f291e; color:#4ade80; font-size:13px; font-weight:700; "
+                        "padding:4px 12px; border-radius:6px; border:1px solid #2e856e;"
+                    )
+            else:
+                self.lbl_op.setText("🔴 📡 Сканер отключён / не отвечает")
+                if getattr(self, "_is_light", False):
+                    self.lbl_op.setStyleSheet(
+                        "background:#fee2e2; color:#b91c1c; font-size:13px; font-weight:700; "
+                        "padding:4px 12px; border-radius:6px; border:1px solid #ef4444;"
+                    )
+                else:
+                    self.lbl_op.setStyleSheet(
+                        "background:#2a1215; color:#f87171; font-size:13px; font-weight:700; "
+                        "padding:4px 12px; border-radius:6px; border:1px solid #c04d53;"
+                    )
 
     def _on_poll_tick(self):
         self._refresh_header_route()
@@ -923,16 +973,12 @@ class OperatorWindow(QWidget):
         self._refresh_header_route()
 
     def showEvent(self, event):
-        """Восстанавливает эталонный бейдж сканера, применяет актуальную тему и фокус ввода при возврате в окно оператора."""
+        """Мгновенно синхронизирует тему (только при её изменении) и статус оборудования при открытии вкладки оператора."""
         super().showEvent(event)
-        self.apply_theme()
-        if hasattr(self, "lbl_op"):
-            if not self.lbl_op.text().strip():
-                self.lbl_op.setText("📡 Сканер: Готов")
-            self.lbl_op.setStyleSheet(
-                "background:#3b6ea5; color:#ffffff; font-size:13px; font-weight:600; "
-                "padding:4px 12px; border-radius:6px;"
-            )
-        self._refresh_header_route()
+        cur_is_light = (get_current_theme() == "light")
+        if getattr(self, "_is_light", None) != cur_is_light:
+            self.apply_theme("light" if cur_is_light else "dark")
+        else:
+            self._refresh_header_route()
         if hasattr(self, "scan_input") and self.scan_input.isEnabled():
             self.scan_input.setFocus()

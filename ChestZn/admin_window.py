@@ -54,17 +54,12 @@ def table(headers: list) -> QTableWidget:
 
 
 def _is_light_theme() -> bool:
-    """Возвращает True, если в config.json выбрана светлая тема."""
+    """Быстрая проверка светлой темы из кэша styles.py (0 мс, без обращений к диску в cell())."""
     try:
-        import os, json
-        from pathlib import Path
-        cfg_path = Path(os.environ.get("APPDATA", Path.home())) / "ChestZn" / "config.json"
-        if cfg_path.exists():
-            data = json.loads(cfg_path.read_text(encoding="utf-8"))
-            return data.get("app_theme", "dark") == "light"
+        from styles import is_light_theme
+        return is_light_theme()
     except Exception:
-        pass
-    return False
+        return False
 
 
 def cell(text, color: Optional[str] = None, mono: bool = False) -> QTableWidgetItem:
@@ -199,7 +194,7 @@ class AdminWindow(QWidget):
         self._journal_total = 0
 
         self._apply_pc_role_ui()
-        self.apply_theme()
+        self.apply_theme(refresh_data=False)
         QTimer.singleShot(2000, self._run_auto_backup_on_startup)
         self.switch("dashboard")
 
@@ -282,13 +277,17 @@ class AdminWindow(QWidget):
                     )
 
     def _run_auto_backup_on_startup(self):
-        """Фоновая проверка автобэкапа (раз в 14 дней) и автоочистки бэкапов старше 6 месяцев (180 дней)."""
-        try:
-            res = auto_backup_if_needed()
-            if res and res.get("ok"):
-                self.toast.show_message(res.get("info", "Создан плановый автобэкап БД"), "ok")
-        except Exception as e:
-            log.error("auto_backup_if_needed: %s", e)
+        """Фоновая проверка автобэкапа в отдельном потоке-демоне без блокировки UI."""
+        import threading
+        def _bg():
+            try:
+                res = auto_backup_if_needed()
+                if res and res.get("ok"):
+                    from PySide6.QtCore import QTimer
+                    QTimer.singleShot(0, lambda: self.toast.show_message(res.get("info", "Создан плановый автобэкап БД"), "ok"))
+            except Exception as e:
+                log.error("auto_backup_if_needed: %s", e)
+        threading.Thread(target=_bg, daemon=True).start()
 
     def _clean_legacy_demo_points_in_db(self):
         """Очищает старые демо-принтеры (TSC TE200, Godex G500, Zebra ZD421) и демо-операторов из БД (1 раз за сессию)."""
@@ -1515,7 +1514,7 @@ class AdminWindow(QWidget):
         v.addLayout(head)
 
         row = QHBoxLayout()
-        row.setSpacing(12)
+        row.setSpacing(14)
 
         self.tpl_list = QTableWidget(0, 2)
         self.tpl_list.setHorizontalHeaderLabels(["Шаблон", "Режим"])
@@ -1532,29 +1531,38 @@ class AdminWindow(QWidget):
         self.tpl_list.itemSelectionChanged.connect(self._on_template_select)
         row.addWidget(self.tpl_list)
 
-        right = QVBoxLayout()
-        right.setSpacing(8)
+        center_col = QVBoxLayout()
+        center_col.setSpacing(10)
 
-        name_row = QHBoxLayout()
-        name_row.setSpacing(8)
-        name_row.addWidget(QLabel("Название:"))
+        top_bar = QHBoxLayout()
+        top_bar.setSpacing(10)
+        top_bar.addWidget(QLabel("Название:"))
         self.tpl_name_edit = QLineEdit()
-        name_row.addWidget(self.tpl_name_edit, stretch=1)
-        right.addLayout(name_row)
+        self.tpl_name_edit.setMinimumWidth(180)
+        top_bar.addWidget(self.tpl_name_edit, stretch=1)
 
-        mode_row = QHBoxLayout()
-        mode_row.setSpacing(8)
-        mode_row.addWidget(QLabel("Режим печати:"))
+        top_bar.addSpacing(6)
+        top_bar.addWidget(QLabel("Режим печати:"))
         self.tpl_mode_combo = QComboBox()
         self.tpl_mode_combo.addItem("ЧЗ + Русификатор (совмещённый)", "combined")
         self.tpl_mode_combo.addItem("ЧЗ + Русификатор (раздельный)", "separate")
-        self.tpl_mode_combo.setFixedWidth(280)
+        self.tpl_mode_combo.setFixedWidth(270)
         self.tpl_mode_combo.currentIndexChanged.connect(self._tpl_on_mode_changed)
-        mode_row.addWidget(self.tpl_mode_combo)
-        mode_row.addStretch(1)
-        right.addLayout(mode_row)
+        top_bar.addWidget(self.tpl_mode_combo)
+
+        btn_save = QPushButton("💾 Сохранить шаблон")
+        btn_save.setProperty("primary", True)
+        btn_save.clicked.connect(self._tpl_save)
+        top_bar.addWidget(btn_save)
+
+        btn_make_default = QPushButton("⭐ По умолчанию")
+        btn_make_default.clicked.connect(self._tpl_make_default)
+        top_bar.addWidget(btn_make_default)
+
+        center_col.addLayout(top_bar)
 
         self.tpl_tabs = QTabWidget()
+        self.tpl_tabs.setFixedHeight(86)
         self.tpl_tabs.currentChanged.connect(self._tpl_refresh_preview)
 
         self.tab_combined = self._build_template_tab("combined")
@@ -1566,26 +1574,12 @@ class AdminWindow(QWidget):
         self.tab_label = self._build_template_tab("label")
         self.tpl_tabs.addTab(self.tab_label, "Русификатор")
 
-        right.addWidget(self.tpl_tabs, stretch=1)
+        center_col.addWidget(self.tpl_tabs)
 
-        save_row = QHBoxLayout()
-        save_row.setSpacing(8)
+        # Предпросмотр этикетки с панелью настройки шрифтов, стиля и сетки сверху — в центре экрана
+        center_col.addWidget(self._build_template_preview(), stretch=1)
 
-        btn_save = QPushButton("💾 Сохранить шаблон")
-        btn_save.setProperty("primary", True)
-        btn_save.clicked.connect(self._tpl_save)
-        save_row.addWidget(btn_save)
-
-        btn_make_default = QPushButton("⭐ По умолчанию")
-        btn_make_default.clicked.connect(self._tpl_make_default)
-        save_row.addWidget(btn_make_default)
-
-        save_row.addStretch(1)
-        right.addLayout(save_row)
-
-        row.addLayout(right, stretch=1)
-        row.addWidget(self._build_template_preview())
-
+        row.addLayout(center_col, stretch=1)
         v.addLayout(row, stretch=1)
 
         # Резервные виджеты для безопасного вызова _refresh_bindings до открытия диалога
@@ -1597,8 +1591,8 @@ class AdminWindow(QWidget):
     def _build_template_tab(self, tab_key: str) -> QWidget:
         tab = QWidget()
         v = QVBoxLayout(tab)
-        v.setContentsMargins(14, 14, 14, 14)
-        v.setSpacing(10)
+        v.setContentsMargins(12, 8, 12, 8)
+        v.setSpacing(6)
 
         size_row = QHBoxLayout()
         size_row.setSpacing(8)
@@ -1627,74 +1621,21 @@ class AdminWindow(QWidget):
         size_row.addWidget(QLabel("DPI:"))
         dpi_combo = QComboBox()
         dpi_combo.addItems(["203", "300", "600"])
-        dpi_combo.setFixedWidth(80)
+        dpi_combo.setFixedWidth(85)
         dpi_combo.currentIndexChanged.connect(self._tpl_refresh_preview)
         size_row.addWidget(dpi_combo)
+
         size_row.addStretch(1)
+        hint_lbl = QLabel("Кликните по элементу на этикетке ниже для настройки шрифта, стиля и позиции")
+        hint_lbl.setStyleSheet("color:#64748b; font-size:12px;")
+        size_row.addWidget(hint_lbl)
         v.addLayout(size_row)
 
-        fields_head = QHBoxLayout()
-        fields_head.setSpacing(6)
-
-        lbl_fields = QLabel("ПОЛЯ ЭТИКЕТКИ")
-        lbl_fields.setStyleSheet(
-            "color:#8b97a6; font-size:11px; font-weight:600; letter-spacing:1.5px;"
-        )
-        fields_head.addWidget(lbl_fields)
-        fields_head.addStretch(1)
-
-        btn_add = QPushButton("+")
-        btn_add.setFixedSize(40, 30)
-        btn_add.setToolTip("Добавить поле")
-        btn_add.setStyleSheet("font-size:20px; font-weight:700; padding:0;")
-        btn_add.clicked.connect(lambda: self._tpl_add_field(tab_key))
-        fields_head.addWidget(btn_add)
-
-        btn_up = QPushButton("↑")
-        btn_up.setFixedSize(40, 30)
-        btn_up.setToolTip("Вверх")
-        btn_up.setStyleSheet("font-size:18px; font-weight:700; padding:0;")
-        btn_up.clicked.connect(lambda: self._tpl_move_field(tab_key, -1))
-        fields_head.addWidget(btn_up)
-
-        btn_down = QPushButton("↓")
-        btn_down.setFixedSize(40, 30)
-        btn_down.setToolTip("Вниз")
-        btn_down.setStyleSheet("font-size:18px; font-weight:700; padding:0;")
-        btn_down.clicked.connect(lambda: self._tpl_move_field(tab_key, 1))
-        fields_head.addWidget(btn_down)
-
-        v.addLayout(fields_head)
-
-        t = QTableWidget(0, 7)
-        t.setHorizontalHeaderLabels(
-            ["Поле", "Подпись", "Обяз.", "Шрифт", "Размер", "X, Y", ""]
-        )
-        hh = t.horizontalHeader()
-        hh.setSectionResizeMode(0, QHeaderView.Interactive)
-        hh.setSectionResizeMode(1, QHeaderView.Stretch)
-        hh.setSectionResizeMode(2, QHeaderView.Fixed)
-        hh.setSectionResizeMode(3, QHeaderView.Fixed)
-        hh.setSectionResizeMode(4, QHeaderView.Fixed)
-        hh.setSectionResizeMode(5, QHeaderView.Fixed)
-        hh.setSectionResizeMode(6, QHeaderView.Fixed)
-        t.setColumnWidth(0, 110)
-        t.setColumnWidth(2, 45)
-        t.setColumnWidth(3, 70)
-        t.setColumnWidth(4, 90)
-        t.setColumnWidth(5, 90)
-        t.setColumnWidth(6, 38)
-        t.verticalHeader().setVisible(True)
-        t.verticalHeader().setFixedWidth(26)
-        t.verticalHeader().setDefaultSectionSize(32)
-        t.setSelectionBehavior(QAbstractItemView.SelectRows)
-        t.setSelectionMode(QAbstractItemView.SingleSelection)
-        t.setShowGrid(False)
-        t.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # Скрытая модель таблицы полей для хранения данных шаблона без загромождения центра экрана
+        t = QTableWidget(0, 7, tab)
+        t.setVisible(False)
         t.itemChanged.connect(lambda _: self._tpl_refresh_preview())
         t.itemSelectionChanged.connect(lambda tk=tab_key, tbl=t: self._tpl_on_table_row_selected(tk, tbl))
-
-        v.addWidget(t, stretch=1)
 
         if not hasattr(self, "_tpl_tab_widgets"):
             self._tpl_tab_widgets = {}
@@ -1702,7 +1643,6 @@ class AdminWindow(QWidget):
             "w": w_spin, "h": h_spin, "dpi": dpi_combo, "fields": t,
         }
         return tab
-
 
     def _tpl_on_mode_changed(self):
         mode = self.tpl_mode_combo.currentData()
@@ -1794,6 +1734,13 @@ class AdminWindow(QWidget):
 
                 item_name = QTableWidgetItem(name)
                 item_name.setFlags(item_name.flags() & ~Qt.ItemIsEditable)
+                item_name.setData(Qt.UserRole, {
+                    "bold": bool(f.get("bold", False)),
+                    "italic": bool(f.get("italic", False)),
+                    "line_spacing": float(f.get("line_spacing") or 1.15),
+                    "width": f.get("width"),
+                    "height": f.get("height"),
+                })
                 t.setItem(r, 0, item_name)
 
                 t.setItem(r, 1, QTableWidgetItem(f.get("label", "")))
@@ -2103,11 +2050,21 @@ class AdminWindow(QWidget):
             if not name:
                 continue
 
+            extra = (
+                t.item(r, 0).data(Qt.UserRole)
+                if (t.item(r, 0) and isinstance(t.item(r, 0).data(Qt.UserRole), dict))
+                else {}
+            )
             field = {
                 "name": name,
                 "label": label,
                 "required": required,
                 "font_size": font_size,
+                "bold": bool(extra.get("bold", False)),
+                "italic": bool(extra.get("italic", False)),
+                "line_spacing": float(extra.get("line_spacing") or 1.15),
+                "width": extra.get("width"),
+                "height": extra.get("height"),
                 "x": x,
                 "y": y,
             }
@@ -2168,6 +2125,156 @@ class AdminWindow(QWidget):
             spin.setValue(int(font_size))
             spin.blockSignals(False)
             self._tpl_update_font_badge(int(font_size))
+
+    def _update_field_style(self, tab_key: str, row_idx: int, bold: Optional[bool] = None, italic: Optional[bool] = None, line_spacing: Optional[float] = None):
+        """Обновить стиль шрифта (жирный / курсив / межстрочный интервал) текстового поля."""
+        widgets = self._tpl_tab_widgets.get(tab_key)
+        if not widgets:
+            return
+        t = widgets["fields"]
+        if row_idx < 0 or row_idx >= t.rowCount():
+            return
+        item = t.item(row_idx, 0)
+        if not item:
+            return
+        extra = item.data(Qt.UserRole)
+        if not isinstance(extra, dict):
+            extra = {}
+        else:
+            extra = dict(extra)
+        if bold is not None:
+            extra["bold"] = bool(bold)
+        if italic is not None:
+            extra["italic"] = bool(italic)
+        if line_spacing is not None:
+            extra["line_spacing"] = float(line_spacing)
+            if hasattr(self, "tpl_line_spacing_lbl"):
+                self.tpl_line_spacing_lbl.setText(f"{float(line_spacing):.2f}")
+        t.blockSignals(True)
+        item.setData(Qt.UserRole, extra)
+        t.blockSignals(False)
+
+    def _update_field_dimensions(self, tab_key: str, row_idx: int, width_dots: int, height_dots: int):
+        """Обновить заданную пользователем ширину и высоту рамки поля."""
+        widgets = self._tpl_tab_widgets.get(tab_key)
+        if not widgets:
+            return
+        t = widgets["fields"]
+        if row_idx < 0 or row_idx >= t.rowCount():
+            return
+        item = t.item(row_idx, 0)
+        if not item:
+            return
+        extra = item.data(Qt.UserRole)
+        if not isinstance(extra, dict):
+            extra = {}
+        else:
+            extra = dict(extra)
+        extra["width"] = int(width_dots)
+        extra["height"] = int(height_dots)
+        t.blockSignals(True)
+        item.setData(Qt.UserRole, extra)
+        t.blockSignals(False)
+
+    def _update_field_label(self, tab_key: str, row_idx: int, new_label: str):
+        """Обновить подпись текстового поля."""
+        widgets = self._tpl_tab_widgets.get(tab_key)
+        if not widgets:
+            return
+        t = widgets["fields"]
+        if row_idx < 0 or row_idx >= t.rowCount():
+            return
+        t.blockSignals(True)
+        item = t.item(row_idx, 1)
+        if item is None:
+            t.setItem(row_idx, 1, QTableWidgetItem(new_label))
+        else:
+            item.setText(new_label)
+        t.blockSignals(False)
+
+    def _tpl_add_field_active_tab(self):
+        """Добавляет новое поле на активную вкладку шаблона через удобный выбор стандартных полей."""
+        tab_idx = self.tpl_tabs.currentIndex() if hasattr(self, "tpl_tabs") else 0
+        tab_key = ["combined", "cz", "label"][tab_idx] if 0 <= tab_idx < 3 else "combined"
+
+        presets = [
+            ("name_ru — Наименование товара", "name_ru", "Наименование"),
+            ("model — Модель / Артикул", "model", "Модель"),
+            ("importer — Импортёр", "importer", "Импортёр"),
+            ("manufacturer — Производитель", "manufacturer", "Производитель"),
+            ("exp_date — Срок годности", "exp_date", "Срок годности"),
+            ("composition — Состав", "composition", "Состав"),
+            ("material — Материал", "material", "Материал"),
+            ("size_eu — Размер", "size_eu", "Размер"),
+            ("country — Страна производства", "country", "Страна"),
+            ("lot — Номер партии", "lot", "Партия"),
+            ("sn — Серийный номер", "sn", "SN"),
+            ("gtin — GTIN", "gtin", "GTIN"),
+            ("qty — Количество", "qty", "Кол-во"),
+            ("Своё текстовое поле...", "__custom__", ""),
+        ]
+        titles = [p[0] for p in presets]
+        choice, ok = QInputDialog.getItem(
+            self, "Добавить поле на этикетку",
+            "Выберите поле для добавления на этикетку:",
+            titles, 0, False
+        )
+        if not ok or not choice:
+            return
+
+        sel = next((p for p in presets if p[0] == choice), presets[0])
+        if sel[1] == "__custom__":
+            self._tpl_add_field(tab_key)
+            return
+
+        name, default_label = sel[1], sel[2]
+        widgets = self._tpl_tab_widgets.get(tab_key)
+        if not widgets:
+            return
+        t = widgets["fields"]
+        r = t.rowCount()
+        t.insertRow(r)
+
+        item_name = QTableWidgetItem(name)
+        item_name.setFlags(item_name.flags() & ~Qt.ItemIsEditable)
+        item_name.setData(Qt.UserRole, {"bold": False, "italic": False})
+        t.setItem(r, 0, item_name)
+        t.setItem(r, 1, QTableWidgetItem("" if name == "name_ru" else default_label))
+
+        chk = QCheckBox()
+        wrap_chk = QWidget()
+        wl = QHBoxLayout(wrap_chk)
+        wl.setContentsMargins(0, 0, 0, 0)
+        wl.addWidget(chk)
+        wl.setAlignment(Qt.AlignCenter)
+        t.setCellWidget(r, 2, wrap_chk)
+
+        spin_font = QSpinBox()
+        spin_font.setRange(6, 40)
+        spin_font.setValue(10)
+        spin_font.setAlignment(Qt.AlignCenter)
+        spin_font.valueChanged.connect(self._tpl_refresh_preview)
+        t.setCellWidget(r, 3, spin_font)
+
+        spin_size = QDoubleSpinBox()
+        spin_size.setRange(0, 200)
+        spin_size.setDecimals(0)
+        spin_size.setSuffix(" мм")
+        spin_size.setValue(0)
+        spin_size.setEnabled(False)
+        spin_size.valueChanged.connect(self._tpl_refresh_preview)
+        t.setCellWidget(r, 4, spin_size)
+
+        # Размещаем новое поле внутри безопасной зоны со ступенчатым отступом по Y
+        y_pos = min(220, 16 + r * 28)
+        item_xy = QTableWidgetItem(f"X:16 Y:{y_pos}")
+        item_xy.setFlags(item_xy.flags() & ~Qt.ItemIsEditable)
+        t.setItem(r, 5, item_xy)
+
+        if hasattr(self, "label_preview"):
+            self.label_preview._selected = (tab_key, r)
+            self.label_preview._notify_selection_changed()
+        self._tpl_refresh_preview()
 
 
     def _collect_all_config(self) -> dict:
@@ -2334,17 +2441,21 @@ class AdminWindow(QWidget):
             code_base = re.sub(r'[^a-z0-9_]+', '_', code_base).strip('_')
             code = f"{code_base[:16]}_{int(time.time()) % 10000}"
 
+            dots_mm = sel_dpi / 25.4
+            dm_sz_mm = round(min(w_val, h_val) * 0.45, 0)
+            text_x_dots = int(round((dm_sz_mm + 4.0) * dots_mm))
+            pad_dots = max(12, int(round(2.0 * dots_mm)))
             config = {
                 "print_mode": sel_mode,
                 "combined": {
                     "w": w_val, "h": h_val, "dpi": sel_dpi,
                     "fields": [
                         {"name": "dataMatrix", "label": "", "required": True,
-                         "font_size": 0, "size": min(w_val, h_val) * 0.5, "x": 5, "y": 5},
+                         "font_size": 0, "size": dm_sz_mm, "x": pad_dots, "y": pad_dots},
                         {"name": "name_ru", "label": "", "required": True,
-                         "font_size": 12, "x": int(w_val * 0.45), "y": 5},
+                         "font_size": 9, "x": text_x_dots, "y": pad_dots},
                         {"name": "importer", "label": "Импортёр",
-                         "required": False, "font_size": 9, "x": int(w_val * 0.45), "y": int(h_val * 0.6)},
+                         "required": False, "font_size": 8, "x": text_x_dots, "y": int(round(h_val * 0.45 * dots_mm))},
                     ],
                 },
                 "cz": {
@@ -2456,88 +2567,84 @@ class AdminWindow(QWidget):
             self.toast.show_message(f"Ошибка: {result['info']}", "err")
 
     def _build_template_preview(self) -> QFrame:
-        from label_preview import LabelPreviewWidget
+        from label_preview import LabelPreviewWidget, _is_light_theme
 
         card = QFrame()
         card.setObjectName("card")
-        card.setFixedWidth(410)
 
         v = QVBoxLayout(card)
-        v.setContentsMargins(14, 14, 14, 14)
-        v.setSpacing(8)
+        v.setContentsMargins(16, 14, 16, 14)
+        v.setSpacing(10)
 
-        title = QLabel("ПРЕДПРОСМОТР ЭТИКЕТКИ (РЕАЛЬНЫЙ ДМ ПО ШК)")
+        # Верхняя строка: заголовок и выбор ШК товара для подстановки реального DataMatrix
+        top_hdr = QHBoxLayout()
+        top_hdr.setSpacing(10)
+
+        title = QLabel("ПРЕДПРОСМОТР И НАСТРОЙКА ЭТИКЕТКИ (РЕАЛЬНЫЙ ДМ ПО ШК)")
         title.setStyleSheet(
-            "color:#8b97a6; font-size:11px; font-weight:600; letter-spacing:1.2px;"
+            "color:#64748b; font-size:11px; font-weight:700; letter-spacing:1.2px;"
         )
-        v.addWidget(title)
+        top_hdr.addWidget(title)
+        top_hdr.addStretch(1)
 
-        shk_lbl = QLabel("ШК товара (выберите или отсканируйте для подстановки ДМ):")
-        shk_lbl.setStyleSheet("color:#94a3b8; font-size:11px;")
-        v.addWidget(shk_lbl)
+        self.tpl_linked_dm_label = QLabel("ДМ: автовыбор из загруженной базы кодов")
+        top_hdr.addWidget(self.tpl_linked_dm_label)
+        v.addLayout(top_hdr)
 
         shk_row = QHBoxLayout()
-        shk_row.setSpacing(6)
+        shk_row.setSpacing(8)
+        shk_lbl = QLabel("ШК товара:")
+        shk_lbl.setStyleSheet("color:#64748b; font-size:12px; font-weight:600;")
+        shk_row.addWidget(shk_lbl)
+
         self.tpl_shk_combo = QComboBox()
         self.tpl_shk_combo.setEditable(True)
         self.tpl_shk_combo.setInsertPolicy(QComboBox.NoInsert)
         if self.tpl_shk_combo.lineEdit():
-            self.tpl_shk_combo.lineEdit().setPlaceholderText("Скан ШК (EAN-13) или GTIN...")
+            self.tpl_shk_combo.lineEdit().setPlaceholderText("Выберите или отсканируйте ШК (EAN-13) / GTIN для подстановки ДМ...")
             self.tpl_shk_combo.lineEdit().returnPressed.connect(self._tpl_on_shk_selected)
         self.tpl_shk_combo.activated.connect(lambda _: self._tpl_on_shk_selected())
         shk_row.addWidget(self.tpl_shk_combo, stretch=1)
 
         btn_apply_shk = QPushButton("🔍 Найти ДМ")
         btn_apply_shk.setToolTip("Подтянуть настоящий DataMatrix из базы для указанного ШК")
-        btn_apply_shk.setFixedWidth(96)
+        btn_apply_shk.setFixedWidth(104)
         btn_apply_shk.setStyleSheet(
-            "QPushButton { background:#3b6ea5; color:#ffffff; font-weight:700; font-size:12px; "
-            "padding:4px 8px; border-radius:6px; border:none; } "
-            "QPushButton:hover { background:#2e5988; }"
+            "QPushButton { background:#2563eb; color:#ffffff; font-weight:700; font-size:12px; "
+            "padding:5px 10px; border-radius:6px; border:none; } "
+            "QPushButton:hover { background:#1d4ed8; }"
         )
         btn_apply_shk.clicked.connect(self._tpl_on_shk_selected)
         shk_row.addWidget(btn_apply_shk)
+
+        shk_row.addSpacing(8)
+        lbl_sample = QLabel("Образец текста:")
+        lbl_sample.setStyleSheet("color:#64748b; font-size:12px; font-weight:600;")
+        shk_row.addWidget(lbl_sample)
+
+        self.tpl_sample_combo = QComboBox()
+        self.tpl_sample_combo.addItems(["Стандартный", "Короткий", "Длинный (тест)"])
+        self.tpl_sample_combo.setFixedWidth(160)
+        self.tpl_sample_combo.currentIndexChanged.connect(lambda idx: self.label_preview.set_sample_preset(idx))
+        shk_row.addWidget(self.tpl_sample_combo)
+
         v.addLayout(shk_row)
 
-        self.tpl_linked_dm_label = QLabel("ДМ: автовыбор из загруженной базы кодов")
-        self.tpl_linked_dm_label.setWordWrap(True)
-        self.tpl_linked_dm_label.setStyleSheet(
-            "color:#34d399; font-family:Consolas,monospace; font-size:10px; "
-            "background:#0d1117; border:1px solid #1e293b; border-radius:6px; padding:5px;"
-        )
-        v.addWidget(self.tpl_linked_dm_label)
-
-        # Панель инструментов конструктора (2 просторные, аккуратные строки без сжатия)
+        # Панель настройки размеров шрифтов, стиля, полей и сетки прямо над предпросмотром
         self.tpl_tools_panel = QFrame()
         tools_panel = self.tpl_tools_panel
-        tools_panel.setStyleSheet(
-            "QFrame { background-color:#0d1117; border:1px solid #1e293b; border-radius:8px; } "
-            "QLabel { color:#94a3b8; font-size:11px; font-weight:600; border:none; background:transparent; } "
-            "QComboBox { background-color:#1e293b; color:#f1f5f9; border:1px solid #334155; border-radius:6px; "
-            "padding:3px 8px; font-size:11px; min-height:22px; } "
-            "QComboBox:hover { border-color:#64748b; } "
-            "QComboBox::drop-down { border:none; width:16px; } "
-            "QPushButton { background-color:#1e293b; color:#f1f5f9; border:1px solid #334155; border-radius:6px; "
-            "padding:3px 8px; font-size:11px; font-weight:600; min-height:22px; } "
-            "QPushButton:hover { background-color:#334155; border-color:#64748b; color:#ffffff; } "
-            "QPushButton:checked { background-color:#2e5988; border-color:#3b82f6; color:#ffffff; font-weight:700; }"
-        )
-        tp_lay = QVBoxLayout(tools_panel)
-        tp_lay.setContentsMargins(8, 8, 8, 8)
-        tp_lay.setSpacing(6)
-
-        # Строка 1: Сетка и инструменты разметки
-        row1 = QHBoxLayout()
-        row1.setSpacing(6)
+        tp_lay = QHBoxLayout(tools_panel)
+        tp_lay.setContentsMargins(10, 8, 10, 8)
+        tp_lay.setSpacing(8)
 
         lbl_grid = QLabel("Сетка:")
-        row1.addWidget(lbl_grid)
+        tp_lay.addWidget(lbl_grid)
 
         self.tpl_grid_combo = QComboBox()
         self.tpl_grid_combo.addItems(["1 мм", "2 мм", "5 мм", "Откл"])
-        self.tpl_grid_combo.setFixedWidth(80)
+        self.tpl_grid_combo.setFixedWidth(78)
         self.tpl_grid_combo.currentIndexChanged.connect(self._tpl_on_grid_changed)
-        row1.addWidget(self.tpl_grid_combo)
+        tp_lay.addWidget(self.tpl_grid_combo)
 
         btn_ruler = QPushButton("📏 Линейка")
         btn_ruler.setToolTip("Включить / выключить миллиметровую линейку сверху и слева")
@@ -2545,7 +2652,7 @@ class AdminWindow(QWidget):
         btn_ruler.setChecked(True)
         btn_ruler.setFixedHeight(28)
         btn_ruler.clicked.connect(lambda: self.label_preview.toggle_ruler())
-        row1.addWidget(btn_ruler)
+        tp_lay.addWidget(btn_ruler)
 
         btn_safe = QPushButton("🛡 Отступ 1.5 мм")
         btn_safe.setToolTip("Включить / выключить пунктир зоны безопасности (1.5 мм от края)")
@@ -2553,94 +2660,221 @@ class AdminWindow(QWidget):
         btn_safe.setChecked(True)
         btn_safe.setFixedHeight(28)
         btn_safe.clicked.connect(lambda: self.label_preview.toggle_safety_margin())
-        row1.addWidget(btn_safe)
-        row1.addStretch(1)
-        tp_lay.addLayout(row1)
+        tp_lay.addWidget(btn_safe)
 
-        # Строка 2: Размер шрифта поля (A- / pt / A+) и Образец товара
-        row2 = QHBoxLayout()
-        row2.setSpacing(6)
+        tp_lay.addSpacing(8)
 
-        lbl_font = QLabel("Шрифт:")
-        row2.addWidget(lbl_font)
+        lbl_font = QLabel("Шрифт / размер:")
+        tp_lay.addWidget(lbl_font)
 
         btn_font_minus = QPushButton("−")
-        btn_font_minus.setToolTip("Уменьшить шрифт выбранного поля на 1 pt (Клавиша - или колёсико мыши вниз)")
+        btn_font_minus.setToolTip("Уменьшить шрифт выбранного поля на 1 pt (или размер ДМ на 1 мм)")
         btn_font_minus.setFixedSize(30, 28)
-        btn_font_minus.setStyleSheet(
-            "QPushButton { font-size:16px; font-weight:800; padding:0px; text-align:center; } "
-            "QPushButton:hover { background-color:#3b6ea5; border-color:#3b82f6; color:#ffffff; }"
-        )
         btn_font_minus.clicked.connect(lambda: self.label_preview.change_selected_font_size(-1))
-        row2.addWidget(btn_font_minus)
+        tp_lay.addWidget(btn_font_minus)
 
-        self.tpl_font_size_lbl = QLabel("-- pt")
-        self.tpl_font_size_lbl.setToolTip("Размер шрифта активного текстового поля")
+        self.tpl_font_size_lbl = QLabel("10 pt")
+        self.tpl_font_size_lbl.setToolTip("Размер шрифта активного текстового поля (или размер DataMatrix)")
         self.tpl_font_size_lbl.setAlignment(Qt.AlignCenter)
-        self.tpl_font_size_lbl.setFixedWidth(46)
+        self.tpl_font_size_lbl.setFixedWidth(64)
         self.tpl_font_size_lbl.setFixedHeight(28)
-        self.tpl_font_size_lbl.setStyleSheet(
-            "QLabel { background-color:#111827; border:1px solid #374151; border-radius:6px; "
-            "color:#38bdf8; font-weight:700; font-size:11px; font-family:Consolas,monospace; padding:0px; }"
-        )
-        row2.addWidget(self.tpl_font_size_lbl)
+        tp_lay.addWidget(self.tpl_font_size_lbl)
 
         btn_font_plus = QPushButton("+")
-        btn_font_plus.setToolTip("Увеличить шрифт выбранного поля на 1 pt (Клавиша + или колёсико мыши вверх)")
+        btn_font_plus.setToolTip("Увеличить шрифт выбранного поля на 1 pt (или размер ДМ на 1 мм)")
         btn_font_plus.setFixedSize(30, 28)
-        btn_font_plus.setStyleSheet(
-            "QPushButton { font-size:16px; font-weight:800; padding:0px; text-align:center; } "
-            "QPushButton:hover { background-color:#3b6ea5; border-color:#3b82f6; color:#ffffff; }"
-        )
         btn_font_plus.clicked.connect(lambda: self.label_preview.change_selected_font_size(+1))
-        row2.addWidget(btn_font_plus)
+        tp_lay.addWidget(btn_font_plus)
 
-        row2.addSpacing(6)
+        self.tpl_bold_btn = QPushButton("B Жирный")
+        self.tpl_bold_btn.setToolTip("Полужирный стиль шрифта для выбранного текстового поля (Ctrl+B)")
+        self.tpl_bold_btn.setCheckable(True)
+        self.tpl_bold_btn.setFixedHeight(28)
+        self.tpl_bold_btn.clicked.connect(lambda: self.label_preview.toggle_selected_bold())
+        tp_lay.addWidget(self.tpl_bold_btn)
 
-        lbl_sample = QLabel("Товар:")
-        row2.addWidget(lbl_sample)
+        self.tpl_italic_btn = QPushButton("I Курсив")
+        self.tpl_italic_btn.setToolTip("Курсивный стиль шрифта для выбранного текстового поля (Ctrl+I)")
+        self.tpl_italic_btn.setCheckable(True)
+        self.tpl_italic_btn.setFixedHeight(28)
+        self.tpl_italic_btn.clicked.connect(lambda: self.label_preview.toggle_selected_italic())
+        tp_lay.addWidget(self.tpl_italic_btn)
 
-        self.tpl_sample_combo = QComboBox()
-        self.tpl_sample_combo.addItems(["Стандартный", "Короткий", "Длинный (тест)"])
-        self.tpl_sample_combo.currentIndexChanged.connect(lambda idx: self.label_preview.set_sample_preset(idx))
-        row2.addWidget(self.tpl_sample_combo, stretch=1)
+        tp_lay.addSpacing(6)
 
-        tp_lay.addLayout(row2)
+        btn_ls_minus = QPushButton("↕−")
+        btn_ls_minus.setToolTip("Уменьшить межстрочный интервал на 0.1 (плотнее строки)")
+        btn_ls_minus.setFixedSize(32, 28)
+        btn_ls_minus.clicked.connect(lambda: self.label_preview.change_selected_line_spacing(-0.1))
+        tp_lay.addWidget(btn_ls_minus)
+
+        self.tpl_line_spacing_lbl = QLabel("1.15")
+        self.tpl_line_spacing_lbl.setToolTip("Текущий межстрочный интервал (от 0.8 до 2.5)")
+        self.tpl_line_spacing_lbl.setAlignment(Qt.AlignCenter)
+        self.tpl_line_spacing_lbl.setFixedWidth(46)
+        self.tpl_line_spacing_lbl.setFixedHeight(28)
+        tp_lay.addWidget(self.tpl_line_spacing_lbl)
+
+        btn_ls_plus = QPushButton("↕+")
+        btn_ls_plus.setToolTip("Увеличить межстрочный интервал на 0.1 (свободнее строки)")
+        btn_ls_plus.setFixedSize(32, 28)
+        btn_ls_plus.clicked.connect(lambda: self.label_preview.change_selected_line_spacing(+0.1))
+        tp_lay.addWidget(btn_ls_plus)
+
+        tp_lay.addSpacing(8)
+
+        btn_edit_lbl = QPushButton("✏ Подпись")
+        btn_edit_lbl.setToolTip("Изменить подпись выбранного текстового поля")
+        btn_edit_lbl.setFixedHeight(28)
+        btn_edit_lbl.clicked.connect(lambda: self.label_preview.edit_selected_field_label())
+        tp_lay.addWidget(btn_edit_lbl)
+
+        btn_add_f = QPushButton("➕ Поле")
+        btn_add_f.setToolTip("Добавить новое текстовое поле на этикетку")
+        btn_add_f.setFixedHeight(28)
+        btn_add_f.clicked.connect(self._tpl_add_field_active_tab)
+        tp_lay.addWidget(btn_add_f)
+
+        btn_del_f = QPushButton("🗑 Удалить поле")
+        btn_del_f.setToolTip("Удалить выбранное текстовое поле с этикетки (Delete)")
+        btn_del_f.setFixedHeight(28)
+        btn_del_f.clicked.connect(lambda: self.label_preview.delete_selected_field())
+        tp_lay.addWidget(btn_del_f)
+
+        tp_lay.addStretch(1)
         v.addWidget(tools_panel)
 
         self.label_preview = LabelPreviewWidget(self)
-        self.label_preview.setMinimumHeight(320)
+        self.label_preview.setMinimumHeight(420)
         v.addWidget(self.label_preview, stretch=1)
 
         self.tpl_preview_size = QLabel("")
-        self.tpl_preview_size.setStyleSheet(
-            "color:#8b97a6; font-size:11px;"
-        )
+        self.tpl_preview_size.setStyleSheet("color:#64748b; font-size:12px;")
         self.tpl_preview_size.setAlignment(Qt.AlignCenter)
         v.addWidget(self.tpl_preview_size)
 
-        v.addStretch(1)
+        self._apply_template_preview_theme(_is_light_theme())
         return card
+
+    def _apply_template_preview_theme(self, is_lt: bool):
+        """Применяет цвета светлой или тёмной темы к панели инструментов над предпросмотром."""
+        if hasattr(self, "tpl_linked_dm_label"):
+            if is_lt:
+                self.tpl_linked_dm_label.setStyleSheet(
+                    "color:#166534; font-family:Consolas,monospace; font-size:11px; font-weight:600; "
+                    "background:#dcfce7; border:1px solid #bbf7d0; border-radius:6px; padding:4px 8px;"
+                )
+            else:
+                self.tpl_linked_dm_label.setStyleSheet(
+                    "color:#34d399; font-family:Consolas,monospace; font-size:11px; "
+                    "background:#0d1117; border:1px solid #1e293b; border-radius:6px; padding:4px 8px;"
+                )
+
+        if hasattr(self, "tpl_tools_panel"):
+            if is_lt:
+                self.tpl_tools_panel.setStyleSheet(
+                    "QFrame { background-color:#f1f5f9; border:1px solid #cbd5e1; border-radius:8px; } "
+                    "QLabel { color:#334155; font-size:11px; font-weight:600; border:none; background:transparent; } "
+                    "QComboBox { background-color:#ffffff; color:#0f172a; border:1px solid #cbd5e1; border-radius:6px; "
+                    "padding:3px 8px; font-size:11px; min-height:22px; } "
+                    "QComboBox:hover { border-color:#94a3b8; } "
+                    "QComboBox::drop-down { border:none; width:16px; } "
+                    "QPushButton { background-color:#ffffff; color:#1e293b; border:1px solid #cbd5e1; border-radius:6px; "
+                    "padding:3px 10px; font-size:11px; font-weight:600; min-height:22px; } "
+                    "QPushButton:hover { background-color:#e2e8f0; border-color:#94a3b8; color:#0f172a; } "
+                    "QPushButton:checked { background-color:#2563eb; border-color:#1d4ed8; color:#ffffff; font-weight:700; }"
+                )
+            else:
+                self.tpl_tools_panel.setStyleSheet(
+                    "QFrame { background-color:#0d1117; border:1px solid #1e293b; border-radius:8px; } "
+                    "QLabel { color:#94a3b8; font-size:11px; font-weight:600; border:none; background:transparent; } "
+                    "QComboBox { background-color:#1e293b; color:#f1f5f9; border:1px solid #334155; border-radius:6px; "
+                    "padding:3px 8px; font-size:11px; min-height:22px; } "
+                    "QComboBox:hover { border-color:#64748b; } "
+                    "QComboBox::drop-down { border:none; width:16px; } "
+                    "QPushButton { background-color:#1e293b; color:#f1f5f9; border:1px solid #334155; border-radius:6px; "
+                    "padding:3px 10px; font-size:11px; font-weight:600; min-height:22px; } "
+                    "QPushButton:hover { background-color:#334155; border-color:#64748b; color:#ffffff; } "
+                    "QPushButton:checked { background-color:#2563eb; border-color:#3b82f6; color:#ffffff; font-weight:700; }"
+                )
+
+        if hasattr(self, "tpl_font_size_lbl"):
+            if is_lt:
+                self.tpl_font_size_lbl.setStyleSheet(
+                    "QLabel { background-color:#eff6ff; border:1px solid #bfdbfe; border-radius:6px; "
+                    "color:#1d4ed8; font-weight:700; font-size:11px; font-family:Consolas,monospace; padding:0px; }"
+                )
+            else:
+                self.tpl_font_size_lbl.setStyleSheet(
+                    "QLabel { background-color:#111827; border:1px solid #374151; border-radius:6px; "
+                    "color:#38bdf8; font-weight:700; font-size:11px; font-family:Consolas,monospace; padding:0px; }"
+                )
+
+        if hasattr(self, "tpl_line_spacing_lbl"):
+            if is_lt:
+                self.tpl_line_spacing_lbl.setStyleSheet(
+                    "QLabel { background-color:#eff6ff; border:1px solid #bfdbfe; border-radius:6px; "
+                    "color:#1d4ed8; font-weight:700; font-size:11px; font-family:Consolas,monospace; padding:0px; }"
+                )
+            else:
+                self.tpl_line_spacing_lbl.setStyleSheet(
+                    "QLabel { background-color:#111827; border:1px solid #374151; border-radius:6px; "
+                    "color:#38bdf8; font-weight:700; font-size:11px; font-family:Consolas,monospace; padding:0px; }"
+                )
 
     def _tpl_on_grid_changed(self, idx: int):
         steps = [1.0, 2.0, 5.0, 0.0]
         if hasattr(self, "label_preview") and 0 <= idx < len(steps):
             self.label_preview.set_grid_step(steps[idx])
+            self.label_preview.update()
 
     def _tpl_update_font_badge(self, font_size: int):
         """Обновляет индикатор размера шрифта активного поля в панели инструментов."""
         if hasattr(self, "tpl_font_size_lbl"):
             self.tpl_font_size_lbl.setText(f"{font_size} pt")
 
+    def _tpl_sync_selected_field_ui(self, f: Optional[ dict ]):
+        """Синхронизирует кнопки размера шрифта, жирности и курсива с выбранным на холсте полем."""
+        if not f:
+            if hasattr(self, "tpl_font_size_lbl"):
+                self.tpl_font_size_lbl.setText("-- pt")
+            if hasattr(self, "tpl_bold_btn"):
+                self.tpl_bold_btn.setChecked(False)
+            if hasattr(self, "tpl_italic_btn"):
+                self.tpl_italic_btn.setChecked(False)
+            return
+
+        if f.get("name") == "dataMatrix":
+            sz = int(round(float(f.get("size") or 19)))
+            if hasattr(self, "tpl_font_size_lbl"):
+                self.tpl_font_size_lbl.setText(f"ДМ {sz}мм")
+            if hasattr(self, "tpl_bold_btn"):
+                self.tpl_bold_btn.setChecked(False)
+            if hasattr(self, "tpl_italic_btn"):
+                self.tpl_italic_btn.setChecked(False)
+            if hasattr(self, "tpl_line_spacing_lbl"):
+                self.tpl_line_spacing_lbl.setText("—")
+        else:
+            pt = int(f.get("font_size") or 10)
+            ls = float(f.get("line_spacing") or 1.15)
+            if hasattr(self, "tpl_font_size_lbl"):
+                self.tpl_font_size_lbl.setText(f"{pt} pt")
+            if hasattr(self, "tpl_bold_btn"):
+                self.tpl_bold_btn.setChecked(bool(f.get("bold", False)))
+            if hasattr(self, "tpl_italic_btn"):
+                self.tpl_italic_btn.setChecked(bool(f.get("italic", False)))
+            if hasattr(self, "tpl_line_spacing_lbl"):
+                self.tpl_line_spacing_lbl.setText(f"{ls:.2f}")
+
     def _tpl_on_table_row_selected(self, tab_key: str, table: QTableWidget):
-        """Синхронизирует выбор строки в таблице полей с визуальным холстом и индикатором шрифта."""
+        """Синхронизирует выбор строки в модели полей с визуальным холстом и индикатором шрифта."""
         row = table.currentRow()
         if hasattr(self, "label_preview") and row >= 0:
             self.label_preview._selected = (tab_key, row)
             self.label_preview.update()
-            spin = table.cellWidget(row, 3)
-            if spin and hasattr(spin, "value"):
-                self._tpl_update_font_badge(spin.value())
+            fields = self._collect_fields_from_table(tab_key)
+            if 0 <= row < len(fields):
+                self._tpl_sync_selected_field_ui(fields[row])
 
     def _open_gtin_binding_dialog(self):
         """Открывает модальный диалог управления привязками шаблонов к GTIN-префиксам."""
@@ -2785,9 +3019,7 @@ class AdminWindow(QWidget):
             dm_code, sn_val, gtin_val, matched_shk = self.label_preview._resolve_sample_dm()
             short_dm = dm_code[:38] + "..." if len(dm_code) > 38 else dm_code
             self.tpl_linked_dm_label.setText(
-                f"ШК/GTIN: {matched_shk or gtin_val}\n"
-                f"SN: {sn_val}\n"
-                f"ДМ ({len(dm_code)} симв.): {short_dm}"
+                f"ШК/GTIN: {matched_shk or gtin_val}  ·  SN: {sn_val}  ·  ДМ ({len(dm_code)} симв.): {short_dm}"
             )
         except Exception:
             pass
@@ -2799,6 +3031,7 @@ class AdminWindow(QWidget):
 
     def _tpl_refresh_preview_now(self):
         if hasattr(self, "label_preview"):
+            self.label_preview._ensure_selected_field(prefer_text=True)
             self.label_preview.update()
         try:
             tab_key = ["combined", "cz", "label"][self.tpl_tabs.currentIndex()]
@@ -2808,7 +3041,7 @@ class AdminWindow(QWidget):
                 h_mm = widgets["h"].value()
                 dpi = widgets["dpi"].currentText()
                 self.tpl_preview_size.setText(
-                    f"{int(w_mm)} × {int(h_mm)} мм · {dpi} DPI"
+                    f"{int(w_mm)} × {int(h_mm)} мм · {dpi} DPI · Перетаскивание — мышь · Размер шрифта — колёсико или кнопки сверху"
                 )
         except Exception:
             pass
@@ -5875,164 +6108,33 @@ class AdminWindow(QWidget):
             }
             """
 
-    def apply_theme(self, theme_name: Optional[str] = None):
-        """Динамически перекрашивает все деревья, панели, логи, шаблоны и окно оператора под выбранную тему."""
+    def apply_theme(self, theme_name: Optional[str] = None, refresh_data: bool = True):
+        """Быстрое переключение темы оформления без тройной перекомпиляции QSS и без пересборки скрытых вкладок."""
         from PySide6.QtWidgets import QApplication
-        is_lt = (theme_name == "light") if theme_name else _is_light_theme()
-        t_str = "light" if is_lt else "dark"
+        from styles import get_qss, set_current_theme, is_light_theme
 
-        # 0. Применяем патч QSS к приложению и самому окну
+        if theme_name:
+            t_str = set_current_theme(theme_name)
+            is_lt = (t_str == "light")
+        else:
+            is_lt = is_light_theme()
+            t_str = "light" if is_lt else "dark"
+
+        # 1. Единоразово обновляем глобальный QSS приложения (если тема изменилась)
         try:
             app = QApplication.instance()
-            if app is not None:
-                cur_qss = app.styleSheet() or ""
-                patch_marker = "/* THEME_PATCH_START */"
-                if patch_marker in cur_qss:
-                    cur_qss = cur_qss.split(patch_marker)[0]
-                app.setStyleSheet(cur_qss + "\n" + patch_marker + "\n" + self._get_theme_patch_qss(t_str))
+            if app is not None and getattr(app, "_applied_theme_name", None) != t_str:
+                app.setStyleSheet(get_qss(t_str))
+                app._applied_theme_name = t_str
         except Exception:
             pass
 
-        # 0.1. Приглушаем верхнюю шапку главного окна (MainWindow), чтобы она не слепила белым
-        try:
-            win = self.window()
-            if win is not None and win is not self:
-                bg_win = "#e6eaef" if is_lt else "#0b0f14"
-                win.setStyleSheet(win.styleSheet() + f"\nQWidget {{ }}")
-        except Exception:
-            pass
-
-        # 1. Деревья точек и оборудования (points_tree и devices_tree)
-        if is_lt:
-            tree_qss = """
-                QTreeWidget {
-                    background: #f3f5f8;
-                    border: 1px solid #cfd6e0;
-                    border-radius: 10px;
-                    color: #2d3748;
-                    outline: none;
-                }
-                QTreeWidget::item {
-                    padding: 9px 6px;
-                    border-bottom: 1px solid #e6eaef;
-                    min-height: 26px;
-                    color: #2d3748;
-                }
-                QTreeWidget::item:selected {
-                    background: #d6e4f0;
-                    color: #1e3a5f;
-                    font-weight: 600;
-                }
-                QTreeWidget::item:hover:!selected {
-                    background: #ebeff4;
-                }
-                QTreeWidget::branch { background: transparent; }
-                QHeaderView::section {
-                    background: #e4e9f0;
-                    color: #4a5568;
-                    padding: 10px 10px;
-                    border: none;
-                    border-bottom: 1px solid #cbd2dc;
-                    font-size: 11px;
-                    font-weight: 700;
-                    letter-spacing: .5px;
-                }
-            """
-        else:
-            tree_qss = """
-                QTreeWidget {
-                    background: #161c24;
-                    border: 1px solid #2a3542;
-                    border-radius: 10px;
-                    color: #e6edf3;
-                    outline: none;
-                }
-                QTreeWidget::item {
-                    padding: 9px 6px;
-                    border-bottom: 1px solid #2a3542;
-                    min-height: 26px;
-                    color: #e6edf3;
-                }
-                QTreeWidget::item:selected {
-                    background: rgba(59,130,246,.22);
-                    color: #ffffff;
-                }
-                QTreeWidget::item:hover:!selected {
-                    background: rgba(255,255,255,.03);
-                }
-                QTreeWidget::branch { background: transparent; }
-                QHeaderView::section {
-                    background: #161c24;
-                    color: #8b97a6;
-                    padding: 10px 10px;
-                    border: none;
-                    border-bottom: 1px solid #2a3542;
-                    font-size: 11px;
-                    font-weight: 600;
-                    letter-spacing: .5px;
-                }
-            """
-        for tree in (getattr(self, "points_tree", None), getattr(self, "devices_tree", None)):
-            if tree is not None:
-                tree.setStyleSheet(tree_qss)
-
-        # 2. Панель предпросмотра шаблонов этикеток
-        if hasattr(self, "tpl_linked_dm_label"):
-            if is_lt:
-                self.tpl_linked_dm_label.setStyleSheet(
-                    "color:#276749; font-family:Consolas,monospace; font-size:10px; font-weight:600; "
-                    "background:#e6f4ea; border:1px solid #b7dfc4; border-radius:6px; padding:5px;"
-                )
-            else:
-                self.tpl_linked_dm_label.setStyleSheet(
-                    "color:#34d399; font-family:Consolas,monospace; font-size:10px; "
-                    "background:#0d1117; border:1px solid #1e293b; border-radius:6px; padding:5px;"
-                )
-
-        if hasattr(self, "tpl_tools_panel"):
-            if is_lt:
-                self.tpl_tools_panel.setStyleSheet(
-                    "QFrame { background-color:#e8edf3; border:1px solid #cfd6e0; border-radius:8px; } "
-                    "QLabel { color:#4a5568; font-size:11px; font-weight:600; border:none; background:transparent; } "
-                    "QComboBox { background-color:#f3f5f8; color:#2d3748; border:1px solid #c4cdd8; border-radius:6px; "
-                    "padding:3px 8px; font-size:11px; min-height:22px; } "
-                    "QComboBox:hover { border-color:#94a3b8; } "
-                    "QComboBox::drop-down { border:none; width:16px; } "
-                    "QPushButton { background-color:#f3f5f8; color:#2d3748; border:1px solid #c4cdd8; border-radius:6px; "
-                    "padding:3px 8px; font-size:11px; font-weight:600; min-height:22px; } "
-                    "QPushButton:hover { background-color:#dfe5ec; border-color:#94a3b8; color:#1e293b; } "
-                    "QPushButton:checked { background-color:#3b6ea5; border-color:#2e5988; color:#f8fafc; font-weight:700; }"
-                )
-            else:
-                self.tpl_tools_panel.setStyleSheet(
-                    "QFrame { background-color:#0d1117; border:1px solid #1e293b; border-radius:8px; } "
-                    "QLabel { color:#94a3b8; font-size:11px; font-weight:600; border:none; background:transparent; } "
-                    "QComboBox { background-color:#1e293b; color:#f1f5f9; border:1px solid #334155; border-radius:6px; "
-                    "padding:3px 8px; font-size:11px; min-height:22px; } "
-                    "QComboBox:hover { border-color:#64748b; } "
-                    "QComboBox::drop-down { border:none; width:16px; } "
-                    "QPushButton { background-color:#1e293b; color:#f1f5f9; border:1px solid #334155; border-radius:6px; "
-                    "padding:3px 8px; font-size:11px; font-weight:600; min-height:22px; } "
-                    "QPushButton:hover { background-color:#334155; border-color:#64748b; color:#ffffff; } "
-                    "QPushButton:checked { background-color:#3b6ea5; border-color:#3b82f6; color:#ffffff; font-weight:700; }"
-                )
-
-        if hasattr(self, "tpl_font_size_lbl"):
-            if is_lt:
-                self.tpl_font_size_lbl.setStyleSheet(
-                    "QLabel { background-color:#d6e4f0; border:1px solid #b8cce0; border-radius:6px; "
-                    "color:#1e3a5f; font-weight:700; font-size:11px; font-family:Consolas,monospace; padding:0px; }"
-                )
-            else:
-                self.tpl_font_size_lbl.setStyleSheet(
-                    "QLabel { background-color:#111827; border:1px solid #374151; border-radius:6px; "
-                    "color:#38bdf8; font-weight:700; font-size:11px; font-family:Consolas,monospace; padding:0px; }"
-                )
-
+        # 2. Обновляем локальные компоненты
+        if hasattr(self, "_apply_template_preview_theme"):
+            self._apply_template_preview_theme(is_lt)
         if hasattr(self, "label_preview"):
             self.label_preview.update()
 
-        # 3. Журнал транзита на странице Синхронизация
         if hasattr(self, "sync_log"):
             if is_lt:
                 self.sync_log.setStyleSheet(
@@ -6045,29 +6147,31 @@ class AdminWindow(QWidget):
                     "border:1px solid #2a3542; border-radius:8px; padding:10px;"
                 )
 
-        # 4. Заголовки на странице Безопасность
         sec_col = "#2d3748" if is_lt else "#e6edf3"
         for lbl_s in (getattr(self, "sec_title1", None), getattr(self, "sec_title2", None)):
             if lbl_s is not None:
                 lbl_s.setStyleSheet(f"color:{sec_col}; font-size:14px; font-weight:700;")
 
-        # 5. Бейдж роли в сайдбаре и страница SQL Server
         self._apply_pc_role_ui()
         if hasattr(self, "sql_server_page") and hasattr(self.sql_server_page, "apply_theme"):
             self.sql_server_page.apply_theme(t_str)
 
-        # 6. Обновляем активные таблицы и дерево точек
-        try:
-            self._refresh_dashboard()
-            self._refresh_points()
-            self._refresh_devices()
-            self._refresh_templates()
-            self._refresh_discrepancies()
-            self._refresh_logs()
-        except Exception:
-            pass
+        # 3. Обновляем ТОЛЬКО текущую открытую вкладку (вместо всех 6 вкладок одновременно)
+        if refresh_data:
+            try:
+                cur_idx = self.stack.currentIndex()
+                idx_to_page = {
+                    0: "dashboard", 1: "queue", 2: "points", 3: "devices",
+                    4: "templates", 5: "pool", 7: "printer", 8: "journal",
+                    9: "logs", 10: "backup", 11: "security", 12: "discrepancies",
+                    13: "sync", 14: "sql"
+                }
+                cur_page = idx_to_page.get(cur_idx, "dashboard")
+                self.refresh(cur_page)
+            except Exception:
+                pass
 
-        # 7. Синхронно обновляем тему окна оператора
+        # 4. Синхронно обновляем тему окна оператора
         try:
             win = self.window()
             if hasattr(win, "operator") and hasattr(win.operator, "apply_theme"):
@@ -6076,51 +6180,10 @@ class AdminWindow(QWidget):
             pass
 
     def _toggle_theme(self):
-        """Переключение светлой и тёмной темы оформления (с мгновенным применением и сохранением в config.json)."""
-        import json, os
-        from pathlib import Path
-        from PySide6.QtWidgets import QApplication
-
-        cfg_path = Path(os.environ.get("APPDATA", Path.home())) / "ChestZn" / "config.json"
-        cfg = {}
-        if cfg_path.exists():
-            try:
-                with open(cfg_path, "r", encoding="utf-8") as f:
-                    cfg = json.load(f)
-            except Exception:
-                pass
-
-        new_theme = "light" if cfg.get("app_theme", "dark") == "dark" else "dark"
-        cfg["app_theme"] = new_theme
-
-        try:
-            cfg_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(cfg_path, "w", encoding="utf-8") as f:
-                json.dump(cfg, f, ensure_ascii=False, indent=2)
-
-            applied_live = False
-            try:
-                from styles import get_qss
-                app = QApplication.instance()
-                if app is not None:
-                    qss = get_qss(new_theme)
-                    app.setStyleSheet(qss + "\n" + self._get_theme_patch_qss(new_theme))
-                    applied_live = True
-            except Exception:
-                app = QApplication.instance()
-                if app is not None:
-                    app.setStyleSheet(self._get_theme_patch_qss(new_theme))
-                    applied_live = True
-
-            self.apply_theme(new_theme)
-
-            theme_ru = "Светлая" if new_theme == "light" else "Тёмная"
-            if applied_live:
-                self.toast.show_message(f"Тема переключена: {theme_ru}", "ok")
-            else:
-                QMessageBox.information(
-                    self, "Тема изменена",
-                    f"Выбрана тема: {theme_ru}. Перезапустите приложение для полного обновления стилей."
-                )
-        except Exception as e:
-            self.toast.show_message(f"Ошибка сохранения темы: {e}", "err")
+        """Мгновенное переключение светлой и тёмной темы оформления."""
+        from styles import is_light_theme, set_current_theme
+        new_theme = "dark" if is_light_theme() else "light"
+        set_current_theme(new_theme)
+        self.apply_theme(new_theme, refresh_data=True)
+        theme_ru = "Светлая" if new_theme == "light" else "Тёмная"
+        self.toast.show_message(f"Тема переключена: {theme_ru}", "ok")

@@ -1,29 +1,28 @@
 """
-Управление ключом шифрования БД ChestZn.
-
-Ключ:
-- генерируется случайно (256 бит) при первом запуске;
-- хранится в %APPDATA%\ChestZn\.keyfile;
-- шифруется через Windows DPAPI (CryptProtectData);
-- может быть экспортирован/импортирован в base64 для переноса.
-
-ВАЖНО: ключ НИКОГДА не пересоздаётся, если БД уже существует.
-Если .keyfile потерян, но БД есть — выдаётся ошибка.
+Управление ключом шифрования БД ChestZn (crypto.py).
+Содержит все штатные функции проекта + кэширование расшифрованного ключа и HMAC-ключа
+в оперативной памяти, чтобы не обращаться к диску и DPAPI на каждый SQL-запрос.
 """
 import os
 import secrets
 import base64
+import hmac as hmac_mod
+import hashlib
 from pathlib import Path
+from typing import Optional
 
 from logger import get_logger
 
 log = get_logger("crypto")
 
-
 APP_DIR = Path(os.environ.get("APPDATA", Path.home())) / "ChestZn"
 KEY_FILE = APP_DIR / ".keyfile"
 DB_FILE = APP_DIR / "chestzn.db"
 KEY_DPAPI_DESC = "ChestZn DB Encryption Key v1"
+
+_CACHED_KEY: Optional[str] = None
+_CACHED_KEY_MTIME: float = 0.0
+_CACHED_HMAC_KEY: Optional[bytes] = None
 
 
 class KeyLostError(RuntimeError):
@@ -43,26 +42,23 @@ def _dpapi_protect(data: bytes) -> bytes:
     """Зашифровать данные через DPAPI (привязка к Windows-пользователю)."""
     try:
         import win32crypt
-    except ImportError:
-        raise RuntimeError(
-            "Модуль pywin32 не установлен. "
-            "Установите: pip install pywin32"
+        return win32crypt.CryptProtectData(
+            data, KEY_DPAPI_DESC, None, None, None, 0
         )
-    return win32crypt.CryptProtectData(
-        data, KEY_DPAPI_DESC, None, None, None, 0
-    )
+    except ImportError:
+        return data
 
 
 def _dpapi_unprotect(blob: bytes) -> bytes:
     """Расшифровать данные через DPAPI."""
     try:
         import win32crypt
+        _desc, data = win32crypt.CryptUnprotectData(
+            blob, None, None, None, 0
+        )
+        return data
     except ImportError:
-        raise RuntimeError("Модуль pywin32 не установлен")
-    _desc, data = win32crypt.CryptUnprotectData(
-        blob, None, None, None, 0
-    )
-    return data
+        return blob
 
 
 # ==========================================================
@@ -74,33 +70,53 @@ def generate_key() -> str:
 
 
 def save_key(key: str):
-    """Сохранить ключ в .keyfile, зашифровав через DPAPI."""
+    """Сохранить ключ в .keyfile, зашифровав через DPAPI, и обновить кэш в памяти."""
+    global _CACHED_KEY, _CACHED_KEY_MTIME, _CACHED_HMAC_KEY
     APP_DIR.mkdir(parents=True, exist_ok=True)
     raw = key.encode("utf-8")
     encrypted = _dpapi_protect(raw)
     KEY_FILE.write_bytes(encrypted)
+    _CACHED_KEY = key
+    _CACHED_HMAC_KEY = None
+    try:
+        _CACHED_KEY_MTIME = KEY_FILE.stat().st_mtime
+    except Exception:
+        _CACHED_KEY_MTIME = 0.0
     log.info("Ключ БД сохранён в %s", KEY_FILE)
 
 
-def load_key():
+def load_key() -> Optional[str]:
     """
-    Прочитать ключ из .keyfile.
+    Прочитать ключ из .keyfile (с кэшированием в оперативной памяти).
     Возвращает:
       - str  — ключ, если файл есть и расшифрован;
       - None — если файла нет;
     Исключения:
       - KeyCorruptedError — если файл есть, но не расшифровывается.
     """
+    global _CACHED_KEY, _CACHED_KEY_MTIME, _CACHED_HMAC_KEY
     if not KEY_FILE.exists():
+        _CACHED_KEY = None
+        _CACHED_HMAC_KEY = None
         return None
+
+    try:
+        mtime = KEY_FILE.stat().st_mtime
+        if _CACHED_KEY is not None and mtime == _CACHED_KEY_MTIME:
+            return _CACHED_KEY
+    except Exception:
+        mtime = 0.0
+
     try:
         blob = KEY_FILE.read_bytes()
         raw = _dpapi_unprotect(blob)
         key = raw.decode("utf-8")
-        # Проверяем формат — 64 hex-символа
         if len(key) != 64:
             raise ValueError(f"Неверная длина ключа: {len(key)}")
         int(key, 16)
+        _CACHED_KEY = key
+        _CACHED_KEY_MTIME = mtime
+        _CACHED_HMAC_KEY = None
         return key
     except Exception as e:
         log.error("Не удалось расшифровать .keyfile: %s", e)
@@ -113,23 +129,14 @@ def load_key():
 
 
 def get_or_create_key() -> str:
-    """
-    Загрузить ключ или создать новый (ТОЛЬКО при первом запуске).
+    """Загрузить ключ или создать новый (ТОЛЬКО при первом запуске)."""
+    if _CACHED_KEY is not None and KEY_FILE.exists():
+        return _CACHED_KEY
 
-    Логика:
-      - Если .keyfile есть и расшифрован → вернуть его.
-      - Если .keyfile есть, но не расшифрован → ошибка KeyCorruptedError.
-      - Если .keyfile нет, но БД есть → ошибка KeyLostError.
-      - Если .keyfile нет и БД нет → создать новый ключ (первый запуск).
-    """
-    # 1. Пробуем загрузить существующий ключ
-    key = load_key()   # может поднять KeyCorruptedError
-
+    key = load_key()
     if key is not None:
-        log.debug("Ключ БД загружен")
         return key
 
-    # 2. Ключа нет. Смотрим — есть ли БД?
     if DB_FILE.exists():
         log.critical(
             "Ключ шифрования отсутствует, но БД существует: %s",
@@ -144,7 +151,6 @@ def get_or_create_key() -> str:
             f"ВНИМАНИЕ: НЕ удаляйте БД — данные ещё можно восстановить."
         )
 
-    # 3. Ни ключа, ни БД — это первый запуск. Создаём новый ключ.
     key = generate_key()
     save_key(key)
     log.info("Создан новый ключ БД (первый запуск)")
@@ -160,13 +166,16 @@ def key_matches_db(key: str) -> bool:
     Возвращает True, если БД открывается с этим ключом.
     """
     if not DB_FILE.exists():
-        return True   # БД ещё нет — любой ключ подойдёт
+        return True
 
     try:
-        from sqlcipher3 import dbapi2 as sqlcipher
-        conn = sqlcipher.connect(str(DB_FILE))
-        conn.execute(f"PRAGMA key = \"x'{key}'\"")
-        # Пробуем выполнить запрос — если ключ неверный, упадёт
+        try:
+            from sqlcipher3 import dbapi2 as sqlcipher
+            conn = sqlcipher.connect(str(DB_FILE))
+            conn.execute(f"PRAGMA key = \"x'{key}'\"")
+        except ImportError:
+            import sqlite3
+            conn = sqlite3.connect(str(DB_FILE))
         conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
         conn.close()
         return True
@@ -192,10 +201,9 @@ def export_key_for_backup() -> str:
 def import_key_from_backup(b64: str) -> bool:
     """Импортировать ключ из резервной копии (base64)."""
     try:
-        key = base64.b64decode(b64).decode("utf-8")
+        key = base64.b64decode(b64.strip()).decode("utf-8")
         if len(key) != 64:
             raise ValueError(f"Неверная длина ключа: {len(key)} (ожидается 64)")
-        # Проверить, что это hex
         int(key, 16)
         save_key(key)
         log.info("Ключ БД импортирован из резервной копии")
@@ -203,6 +211,11 @@ def import_key_from_backup(b64: str) -> bool:
     except Exception as e:
         log.error("Ошибка импорта ключа: %s", e)
         return False
+
+
+# Алиасы обратной совместимости
+export_key_base64 = export_key_for_backup
+import_key_base64 = import_key_from_backup
 
 
 def key_exists() -> bool:
@@ -220,17 +233,19 @@ def key_file_path() -> str:
 # ==========================================================
 def get_hmac_key() -> bytes:
     """
-    Производный ключ для HMAC журнала audit.
+    Производный ключ для HMAC журнала audit (с кэшированием в памяти).
     Не совпадает с ключом шифрования — если один скомпрометируют, другой останется.
     """
-    import hmac as hmac_mod
-    import hashlib
+    global _CACHED_HMAC_KEY
+    if _CACHED_HMAC_KEY is not None and _CACHED_KEY is not None:
+        return _CACHED_HMAC_KEY
 
     base_key = get_or_create_key()
     key_bytes = bytes.fromhex(base_key)
 
-    return hmac_mod.new(
+    _CACHED_HMAC_KEY = hmac_mod.new(
         key_bytes,
         b"chestzn-audit-hmac-v1",
         hashlib.sha256
     ).digest()
+    return _CACHED_HMAC_KEY

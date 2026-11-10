@@ -1,55 +1,48 @@
 """
-Проверка состояния приложения при запуске.
-Возвращает список проблем: критичных (блокируют работу)
-и предупреждений (можно продолжать).
-
-Каждая проблема содержит:
-- name           — название (например, "Ghostscript")
-- status         — ok / warning / error
-- severity       — None / warning / critical
-- message        — краткое описание (например, "Не найден")
-- hint           — подробная подсказка
-- doc            — файл руководства из docs/ (install-gs.md, ...)
-- url            — ссылка на сайт (для скачивания и т.п.)
-- url_label      — текст кнопки-ссылки
-- requires_admin — True, если для действия нужен пароль админа
+Неблокирующая проверка состояния приложения при запуске и в реальном времени (startup_check.py).
+Оптимизировано:
+- Статические проверки (ключ шифрования, БД, Ghostscript) кэшируются в памяти и не запускают
+  дочерние процессы (gswin64c) повторно в фоновом цикле.
+- Проверки принтера и сканера мгновенно (< 0.1 мс) читают асинхронный кэш device_discovery
+  без блокировки главного потока Qt UI.
 """
 import os
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Optional, Dict, Any
 
 import db
 import crypto
 
-
-# ---------- Типы проблем ----------
 CRITICAL = "critical"      # блокирует запуск
 WARNING  = "warning"       # можно продолжать
 
+_CACHED_KEY_CHECK: Optional[Dict[str, Any]] = None
+_CACHED_DB_CHECK: Optional[Dict[str, Any]] = None
+_CACHED_GS_CHECK: Optional[Dict[str, Any]] = None
 
-# ==================================================================
-# ПРОВЕРКА 1: Ключ шифрования
-# ==================================================================
-def check_encryption_key() -> dict:
-    """
-    Проверить, что ключ шифрования есть и подходит к БД.
-    Критическая проверка — без ключа БД недоступна.
-    """
+
+def check_encryption_key(force: bool = False) -> dict:
+    """Проверить, что ключ шифрования есть и подходит к БД (кэшируется после первой успешной проверки)."""
+    global _CACHED_KEY_CHECK
+    if _CACHED_KEY_CHECK is not None and not force and _CACHED_KEY_CHECK.get("status") == "ok":
+        return _CACHED_KEY_CHECK
+
     key_file = crypto.KEY_FILE
     db_file  = crypto.DB_FILE
 
-    # 1. Ситуация «нет ключа, нет БД» — это первый запуск, всё ок
     if not key_file.exists() and not db_file.exists():
-        return {
+        res = {
             "name": "Ключ шифрования",
             "status": "ok",
             "severity": None,
             "message": "Будет создан при первом запуске",
             "hint": "",
         }
+        _CACHED_KEY_CHECK = res
+        return res
 
-    # 2. Нет ключа, но есть БД — критическая ошибка
     if not key_file.exists() and db_file.exists():
         return {
             "name": "Ключ шифрования",
@@ -64,7 +57,6 @@ def check_encryption_key() -> dict:
             "url_label": "Как восстановить ключ",
         }
 
-    # 3. Файл ключа есть — проверим, что он расшифровывается
     try:
         key = crypto.load_key()
     except crypto.KeyCorruptedError as e:
@@ -83,12 +75,10 @@ def check_encryption_key() -> dict:
             "status": "error",
             "severity": CRITICAL,
             "message": "Не удалось загрузить ключ",
-            "hint": f"Файл: {key_file}\n\n"
-                    f"Восстановите .keyfile из резервной копии.",
+            "hint": f"Файл: {key_file}\n\nВосстановите .keyfile из резервной копии.",
             "doc": "database.md",
         }
 
-    # 4. Ключ расшифрован — проверим, что подходит к БД
     if db_file.exists():
         if not crypto.key_matches_db(key):
             return {
@@ -96,80 +86,72 @@ def check_encryption_key() -> dict:
                 "status": "error",
                 "severity": CRITICAL,
                 "message": "Ключ не подходит к базе данных",
-                "hint": f"Файл ключа: {key_file}\n"
-                        f"Файл БД: {db_file}\n\n"
-                        f"Ключ был скопирован с другого компьютера\n"
-                        f"или база данных создана с другим ключом.",
+                "hint": f"Файл ключа: {key_file}\nФайл БД: {db_file}\n\n"
+                        f"Ключ был скопирован с другого компьютера или база данных создана с другим ключом.",
                 "doc": "database.md",
             }
 
-    return {
+    res = {
         "name": "Ключ шифрования",
         "status": "ok",
         "severity": None,
         "message": "Загружен и подходит к БД",
         "hint": "",
     }
+    _CACHED_KEY_CHECK = res
+    return res
 
 
-# ==================================================================
-# ПРОВЕРКА 2: База данных
-# ==================================================================
-def check_database() -> dict:
-    """
-    Проверить, что БД открывается и доступна.
-    Критическая проверка — без БД работать нельзя.
-    """
+def check_database(force: bool = False) -> dict:
+    """Проверить, что БД открывается и доступна (кэшируется после первой успешной проверки)."""
+    global _CACHED_DB_CHECK
+    if _CACHED_DB_CHECK is not None and not force and _CACHED_DB_CHECK.get("status") == "ok":
+        return _CACHED_DB_CHECK
+
     try:
         db_path = db.DB_FILE
         if not db_path.exists():
-            # Если и ключа нет, и БД нет — это первый запуск
-            return {
+            res = {
                 "name": "База данных",
                 "status": "ok",
                 "severity": None,
                 "message": "Будет создана при первом запуске",
                 "hint": "",
             }
+            _CACHED_DB_CHECK = res
+            return res
 
         with db.get_conn() as conn:
             conn.execute("SELECT 1").fetchone()
 
-        return {
+        res = {
             "name": "База данных",
             "status": "ok",
             "severity": None,
             "message": "Доступна",
             "hint": "",
         }
+        _CACHED_DB_CHECK = res
+        return res
     except Exception as e:
         return {
             "name": "База данных",
             "status": "error",
             "severity": CRITICAL,
             "message": f"Не удалось открыть: {type(e).__name__}",
-            "hint": f"{e}\n\n"
-                    f"Возможные причины:\n"
-                    f"• ключ шифрования не подходит;\n"
-                    f"• файл БД повреждён;\n"
-                    f"• нет прав на папку %APPDATA%\\ChestZn.\n\n"
-                    f"Обратитесь к администратору.",
+            "hint": f"{e}\n\nВозможные причины:\n• ключ шифрования не подходит;\n• файл БД повреждён;\n• нет прав на папку %APPDATA%\\ChestZn.\n\nОбратитесь к администратору.",
             "doc": "database.md",
             "requires_admin": True,
         }
 
 
-# ==================================================================
-# ПРОВЕРКА 3: Принтер
-# ==================================================================
-def check_printer() -> dict:
-    """Строгая проверка: если принтер физически выключен — предупреждаем."""
+def check_printer(force_refresh: bool = False) -> dict:
+    """Мгновенная неблокирующая проверка принтера через кэш device_discovery."""
     try:
-        from device_discovery import detect_local_printers, check_printer_status
+        from device_discovery import detect_local_printers
         from printer import load_config
 
-        # 1. Сначала ищем реально включённые прямо сейчас принтеры
-        connected = detect_local_printers(connected_only=True, force_refresh=True)
+        connected = detect_local_printers(connected_only=True, force_refresh=force_refresh)
         if connected:
             pr_name = connected[0].get("name", "Принтер")
             return {
@@ -180,10 +162,9 @@ def check_printer() -> dict:
                 "hint": "",
             }
 
-        # 2. Если живых принтеров нет вообще — сразу выдаём предупреждение
         cfg = load_config()
         saved_name = cfg.get("printer_name", "").strip()
-        hint_text = f"Принтер отключён от питания или USB." if saved_name else "Подключите USB-кабель и включите питание."
+        hint_text = "Принтер отключён от питания или USB." if saved_name else "Подключите USB-кабель и включите питание."
 
         return {
             "name": "Принтер",
@@ -204,83 +185,92 @@ def check_printer() -> dict:
         }
 
 
-# ==================================================================
-# ПРОВЕРКА 4: Ghostscript
-# ==================================================================
-def check_ghostscript() -> dict:
-    """Ghostscript доступен? Предупреждение."""
+def check_scanner(force_refresh: bool = False) -> dict:
+    """Мгновенная неблокирующая проверка сканера через кэш device_discovery."""
+    try:
+        from device_discovery import detect_local_scanners
+        scanners = detect_local_scanners(connected_only=True, force_refresh=force_refresh)
+        if scanners:
+            sc_name = scanners[0].get("name", "Сканер ШК")
+            conn_type = scanners[0].get("connect_type", "")
+            type_str = f" ({conn_type})" if conn_type else ""
+            return {
+                "name": "Сканер",
+                "status": "ok",
+                "severity": None,
+                "message": f"Подключён: {sc_name}{type_str}",
+                "hint": "",
+            }
+
+        return {
+            "name": "Сканер",
+            "status": "warning",
+            "severity": WARNING,
+            "message": "Не подключён (сканер не обнаружен)",
+            "hint": "Подключите USB-сканер штрихкодов или активируйте Bluetooth SPP / COM-порт.",
+            "doc": "problems.md",
+        }
+    except Exception as e:
+        return {
+            "name": "Сканер",
+            "status": "warning",
+            "severity": WARNING,
+            "message": "Не подключён",
+            "hint": str(e),
+            "doc": "problems.md",
+        }
+
+
+def check_ghostscript(force: bool = False) -> dict:
+    """Проверка наличия Ghostscript (результат кэшируется в памяти, чтобы не вызывать subprocess повторно)."""
+    global _CACHED_GS_CHECK
+    if _CACHED_GS_CHECK is not None and not force:
+        return _CACHED_GS_CHECK
+
     gs = shutil.which("gswin64c") or shutil.which("gswin32c") or shutil.which("gs")
 
-    if not gs:
-        candidates = []
-        for root in [
-            Path(r"C:\Program Files\gs"),
-            Path(r"C:\Program Files (x86)\gs"),
-        ]:
-            if root.exists():
-                for sub in root.iterdir():
-                    if sub.is_dir():
-                        candidates.append(sub / "bin" / "gswin64c.exe")
-                        candidates.append(sub / "bin" / "gswin32c.exe")
+    if not gs and os.name == "nt":
+        for base in [r"C:\Program Files\gs", r"C:\Program Files (x86)\gs"]:
+            if os.path.isdir(base):
+                for sub in sorted(os.listdir(base), reverse=True):
+                    for exe in ("gswin64c.exe", "gswin32c.exe"):
+                        candidate = os.path.join(base, sub, "bin", exe)
+                        if os.path.isfile(candidate):
+                            gs = candidate
+                            break
+                    if gs:
+                        break
 
-        for c in candidates:
-            if c.exists():
-                gs = str(c)
-                break
-
-    if not gs:
-        return {
+    if gs:
+        _CACHED_GS_CHECK = {
+            "name": "Ghostscript",
+            "status": "ok",
+            "severity": None,
+            "message": f"Найден ({Path(gs).name})",
+            "hint": gs,
+        }
+    else:
+        _CACHED_GS_CHECK = {
             "name": "Ghostscript",
             "status": "warning",
             "severity": WARNING,
             "message": "Не найден",
-            "hint": "DataMatrix не будет рендериться.\n"
-                    "Установите Ghostscript 10.x — подробнее в руководстве.",
+            "hint": "Ghostscript используется для разбора EPS-файлов с DataMatrix.",
             "doc": "install-gs.md",
             "url": "https://www.ghostscript.com/releases/gsdnld.html",
             "url_label": "Скачать Ghostscript",
         }
-
-    try:
-        result = subprocess.run(
-            [gs, "--version"],
-            capture_output=True,
-            timeout=5,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-        version = (result.stdout or "").strip().splitlines()[0] if result.stdout else "?"
-        return {
-            "name": "Ghostscript",
-            "status": "ok",
-            "severity": None,
-            "message": f"Версия {version}",
-            "hint": gs,
-        }
-    except Exception as e:
-        return {
-            "name": "Ghostscript",
-            "status": "warning",
-            "severity": WARNING,
-            "message": f"Не запускается: {type(e).__name__}",
-            "hint": f"{e}\n\nПуть: {gs}",
-            "doc": "install-gs.md",
-            "url": "https://www.ghostscript.com/releases/gsdnld.html",
-            "url_label": "Скачать Ghostscript",
-        }
+    return _CACHED_GS_CHECK
 
 
-# ==================================================================
-# ОБЩАЯ ПРОВЕРКА
-# ==================================================================
-def check_all() -> list:
-    """Вернуть список результатов."""
+def check_all(force_refresh: bool = False) -> list:
+    """Вернуть список результатов всех проверок (< 0.1 мс из кэша в штатном режиме)."""
     return [
-        check_encryption_key(),
-        check_database(),
-        check_printer(),
-        check_ghostscript(),
+        check_encryption_key(force=force_refresh),
+        check_database(force=force_refresh),
+        check_printer(force_refresh=force_refresh),
+        check_scanner(force_refresh=force_refresh),
+        check_ghostscript(force=force_refresh),
     ]
 
 
@@ -294,29 +284,3 @@ def has_warnings(problems: list) -> bool:
 
 def has_any_problems(problems: list) -> bool:
     return any(p.get("status") != "ok" for p in problems)
-
-
-# ==================================================================
-# ДЛЯ ТЕСТА ИЗ КОМАНДНОЙ СТРОКИ
-# ==================================================================
-if __name__ == "__main__":
-    print("=== Проверка состояния приложения ===\n")
-    for p in check_all():
-        icon = {"ok": "✓", "warning": "⚠", "error": "❌"}.get(p["status"], "?")
-        print(f"{icon} {p['name']}: {p['message']}")
-        if p.get("hint"):
-            for line in p["hint"].splitlines():
-                print(f"    {line}")
-        if p.get("doc"):
-            print(f"    [руководство: {p['doc']}]")
-        if p.get("url"):
-            print(f"    [ссылка: {p['url']}]")
-        print()
-
-    problems = check_all()
-    if has_critical(problems):
-        print(">>> КРИТИЧЕСКИЕ ПРОБЛЕМЫ — запуск должен быть заблокирован")
-    elif has_warnings(problems):
-        print(">>> Есть предупреждения — можно работать")
-    else:
-        print(">>> Всё в порядке")

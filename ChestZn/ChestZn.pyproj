@@ -52,7 +52,6 @@
     <Compile Include="mssql_ui.py" />
     <Compile Include="operator_window.py" />
     <Compile Include="recovery_window.py" />
-    <Compile Include="reset_templates.py" />
     <Compile Include="scanner.py" />
     <Compile Include="security.py" />
     <Compile Include="startup_check.py" />
@@ -60,7 +59,6 @@
     <Compile Include="store.py" />
     <Compile Include="styles.py" />
     <Compile Include="sync.py" />
-    <Compile Include="test_old_audit.py" />
     <Compile Include="toast.py" />
     <Compile Include="printer.py" />
     <Compile Include="security_question_window.py" />

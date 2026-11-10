@@ -3,11 +3,12 @@ import sys
 import os
 import json
 from pathlib import Path
+from typing import Optional
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout,
     QHBoxLayout, QLabel, QFrame, QMessageBox
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 
 import docs_helper
 import startup_check
@@ -18,7 +19,7 @@ from banner import WarningBanner
 from store import Store
 from operator_window import OperatorWindow
 from admin_window import AdminWindow
-from styles import get_qss  # Импортируем функцию получения темы
+from styles import get_qss, get_current_theme
 from login_window import LoginWindow
 from security_question_window import SecurityQuestionWindow
 
@@ -27,7 +28,7 @@ ADMIN_LOGIN = "admin"
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, initial_problems: list = None):
+    def __init__(self, initial_problems: list = None, store: Optional[Store] = None):
         super().__init__()
         self.setWindowTitle("ChestZn · Маркировка")
         self.resize(1360, 900)
@@ -39,16 +40,13 @@ class MainWindow(QMainWindow):
         # ---------- Определение точки ----------
         point = detect_point(cfg)
         if not point:
-            # Не задана — оставляем как есть, оператор увидит «T-01»
-            # (админ может настроить точку в config.json)
             point = "T-01"
-            print(f"[ChestZn] Точка не задана в config.json, "
-                  f"используется по умолчанию: {point}")
+            print(f"[ChestZn] Точка не задана в config.json, используется по умолчанию: {point}")
         else:
             print(f"[ChestZn] Точка определена: {point}")
 
-        # ---------- Создание Store ----------
-        self.store = Store()
+        # ---------- Создание / переиспользование Store ----------
+        self.store = store if store is not None else Store()
         self.store.current_point = point
 
         # ---------- Оператор по точке ----------
@@ -58,7 +56,6 @@ class MainWindow(QMainWindow):
 
         # ---------- Автоопределение принтера ----------
         if not cfg.get("printer_name") and not cfg.get("printer_ip"):
-            # Общий принтер не задан — попробуем автоопределить
             result = autodetect()
             if result.get("suggested"):
                 s = result["suggested"]
@@ -71,16 +68,12 @@ class MainWindow(QMainWindow):
             else:
                 print("[ChestZn] Принтеры не найдены — настройте вручную в админке")
         else:
-            print(f"[ChestZn] Общий принтер из настроек: "
-                  f"{cfg.get('printer_name')} ({cfg.get('printer_lang')})")
+            print(f"[ChestZn] Общий принтер из настроек: {cfg.get('printer_name')} ({cfg.get('printer_lang')})")
 
-        # Проверим, есть ли принтер для текущей точки
         printers = cfg.get("printers") or {}
         if point in printers:
             p = printers[point]
-            print(f"[ChestZn] Принтер для точки {point}: "
-                  f"{p.get('printer_name', '?')} "
-                  f"({p.get('printer_lang', 'auto')})")
+            print(f"[ChestZn] Принтер для точки {point}: {p.get('printer_name', '?')} ({p.get('printer_lang', 'auto')})")
 
         # ---------- Флаг: админ авторизован? ----------
         self.admin_authenticated = False
@@ -126,24 +119,40 @@ class MainWindow(QMainWindow):
         role.setObjectName("brandRole")
         h.addWidget(role)
 
-        h.addSpacing(20)
+        h.addSpacing(16)
 
         # Точка в шапке
         point_badge = QLabel(f"● {point}")
-        point_badge.setObjectName("brandRole")
-        point_badge.setStyleSheet(
-            "background:rgba(59,130,246,.18); color:#93c5fd; "
-            "padding:3px 10px; border-radius:4px; "
-            "font-size:11px; font-weight:600;"
-        )
+        point_badge.setObjectName("pointBadge")
         h.addWidget(point_badge)
 
         # Название точки
         point_name = self._point_name(point)
         if point_name:
             point_label = QLabel(point_name)
-            point_label.setStyleSheet("color:#8b97a6; font-size:12px;")
+            point_label.setObjectName("pointLabel")
             h.addWidget(point_label)
+
+        h.addSpacing(14)
+
+        # Динамические индикаторы оборудования (на одной строке с принтером и сканером)
+        self.header_printer_badge = QLabel("🖨 Принтер: Опрос...")
+        self.header_printer_badge.setObjectName("headerDeviceBadge")
+        self.header_printer_badge.setProperty("state", "warn")
+        self.header_printer_badge.setFixedHeight(26)
+        self.header_printer_badge.setAlignment(Qt.AlignCenter)
+        self.header_printer_badge.setCursor(Qt.PointingHandCursor)
+        self.header_printer_badge.mousePressEvent = lambda _: self.show_problems_window()
+        h.addWidget(self.header_printer_badge)
+
+        self.header_scanner_badge = QLabel("📡 Сканер: Опрос...")
+        self.header_scanner_badge.setObjectName("headerDeviceBadge")
+        self.header_scanner_badge.setProperty("state", "warn")
+        self.header_scanner_badge.setFixedHeight(26)
+        self.header_scanner_badge.setAlignment(Qt.AlignCenter)
+        self.header_scanner_badge.setCursor(Qt.PointingHandCursor)
+        self.header_scanner_badge.mousePressEvent = lambda _: self.show_problems_window()
+        h.addWidget(self.header_scanner_badge)
 
         h.addStretch(1)
 
@@ -160,13 +169,9 @@ class MainWindow(QMainWindow):
         h.addWidget(meta_ver)
 
         avatar = QLabel("АД")
+        avatar.setObjectName("headerAvatar")
         avatar.setFixedSize(26, 26)
         avatar.setAlignment(Qt.AlignCenter)
-        avatar.setStyleSheet("""
-            background:#232e3c; color:#e6edf3;
-            border:1px solid #3a4a5c; border-radius:13px;
-            font-size:11px;
-        """)
         h.addWidget(avatar)
 
         self._root_layout.addWidget(header)
@@ -184,6 +189,15 @@ class MainWindow(QMainWindow):
         self._root_layout.addWidget(self.tabs, stretch=1)
 
         self.setCentralWidget(root)
+
+        # Неблокирующий опрос кэша оборудования (раз в 3.0 сек, занимает < 0.1 мс в UI потоке)
+        self._last_banner_sig = None
+        self._device_poll_timer = QTimer(self)
+        self._device_poll_timer.setInterval(3000)
+        self._device_poll_timer.timeout.connect(self._poll_devices_status)
+        self._device_poll_timer.start()
+
+        QTimer.singleShot(150, self._poll_devices_status)
 
         print("[ChestZn] MainWindow создан, размер:", self.size())
         print("[ChestZn] вкладок:", self.tabs.count())
@@ -203,6 +217,74 @@ class MainWindow(QMainWindow):
             if p["id"] == point_id:
                 return p.get("operator") or "Оператор"
         return "Оператор"
+
+    def _set_badge_state(self, badge: QLabel, state: str, text: str, tooltip: str):
+        if badge.text() == text and badge.property("state") == state:
+            return
+        badge.setText(text)
+        badge.setToolTip(tooltip)
+        if badge.property("state") != state:
+            badge.setProperty("state", state)
+            badge.style().unpolish(badge)
+            badge.style().polish(badge)
+
+    # ------------------------------------------------------------------
+    def _poll_devices_status(self):
+        """Неблокирующее обновление статусов принтера и сканера из асинхронного кэша."""
+        try:
+            from device_discovery import detect_local_printers, detect_local_scanners
+            from startup_check import check_all
+
+            printers = detect_local_printers(connected_only=True, force_refresh=False)
+            has_pr = bool(printers)
+            pr_name = printers[0].get("name", "Принтер") if has_pr else ""
+
+            scanners = detect_local_scanners(connected_only=True, force_refresh=False)
+            has_sc = bool(scanners)
+            sc_name = scanners[0].get("name", "Сканер") if has_sc else ""
+
+            if hasattr(self, "header_printer_badge"):
+                if has_pr:
+                    self._set_badge_state(
+                        self.header_printer_badge,
+                        "ok",
+                        f"🟢 🖨 {pr_name}",
+                        f"Принтер подключён: {pr_name} (кликните для подробностей)",
+                    )
+                else:
+                    self._set_badge_state(
+                        self.header_printer_badge,
+                        "err",
+                        "🔴 🖨 Принтер отключён",
+                        "Внимание: принтер физически выключен или отсоединён от ПК!",
+                    )
+
+            if hasattr(self, "header_scanner_badge"):
+                if has_sc:
+                    self._set_badge_state(
+                        self.header_scanner_badge,
+                        "ok",
+                        f"🟢 📡 {sc_name}",
+                        f"Сканер подключён: {sc_name} (кликните для подробностей)",
+                    )
+                else:
+                    self._set_badge_state(
+                        self.header_scanner_badge,
+                        "warn",
+                        "🔴 📡 Сканер офлайн",
+                        "Предупреждение: сканер штрихкодов не отвечает или не подключён!",
+                    )
+
+            current_problems = check_all(force_refresh=False)
+            sig = tuple((p.get("name"), p.get("status"), p.get("message")) for p in current_problems)
+            if sig != self._last_banner_sig:
+                self._last_banner_sig = sig
+                self.update_banner(current_problems)
+
+            if hasattr(self, "operator") and hasattr(self.operator, "set_scanner_status"):
+                self.operator.set_scanner_status(has_sc, sc_name)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     def show_problems_window(self):
@@ -313,21 +395,26 @@ class MainWindow(QMainWindow):
         screen = self.grab()
         w, h = screen.width(), screen.height()
 
+        # Ускоряем размытие в 4 раза: уменьшаем копию в 2 раза, применяем QGraphicsBlurEffect и растягиваем обратно
+        small_w, small_h = max(1, w // 2), max(1, h // 2)
+        small_pix = screen.scaled(small_w, small_h, Qt.IgnoreAspectRatio, Qt.FastTransformation)
+
         blur = QGraphicsBlurEffect()
-        blur.setBlurRadius(18)
-        blur.setBlurHints(QGraphicsBlurEffect.QualityHint)
+        blur.setBlurRadius(10)
+        blur.setBlurHints(QGraphicsBlurEffect.PerformanceHint)
 
         scene = QGraphicsScene()
-        pixmap_item = QGraphicsPixmapItem(screen)
+        pixmap_item = QGraphicsPixmapItem(small_pix)
         pixmap_item.setGraphicsEffect(blur)
         scene.addItem(pixmap_item)
 
-        blurred_pixmap = QPixmap(w, h)
-        blurred_pixmap.fill(Qt.transparent)
-        painter = QPainter(blurred_pixmap)
-        painter.setRenderHint(QPainter.Antialiasing)
-        scene.render(painter, QRectF(0, 0, w, h), QRectF(0, 0, w, h))
+        blurred_small = QPixmap(small_w, small_h)
+        blurred_small.fill(Qt.transparent)
+        painter = QPainter(blurred_small)
+        scene.render(painter, QRectF(0, 0, small_w, small_h), QRectF(0, 0, small_w, small_h))
         painter.end()
+
+        blurred_pixmap = blurred_small.scaled(w, h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
 
         overlay = QWidget(self)
         overlay.setGeometry(self.rect())
@@ -344,18 +431,9 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
-    
+
     # ---------- Загрузка темы из настроек ----------
-    cfg_path = Path(os.environ.get("APPDATA", Path.home())) / "ChestZn" / "config.json"
-    theme = "dark"
-    if cfg_path.exists():
-        try:
-            with open(cfg_path, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-                theme = cfg.get("app_theme", "dark")
-        except Exception:
-            pass
-            
+    theme = get_current_theme(force_reload=True)
     app.setStyleSheet(get_qss(theme))
 
     # ---------- 1. Скопировать руководства ----------
@@ -367,8 +445,7 @@ def main():
     critical = has_critical(problems)
     warnings = has_warnings(problems)
 
-    print(f"[ChestZn] Проверка при запуске: "
-          f"критических={critical}, предупреждений={warnings}")
+    print(f"[ChestZn] Проверка при запуске: критических={critical}, предупреждений={warnings}")
 
     # ---------- 3. Показать окно проблем ВСЕГДА ----------
     try:
@@ -381,7 +458,7 @@ def main():
     result = dlg.exec()
 
     # Если критические — не пускаем
-    if critical:
+    if has_critical(dlg.problems):
         print("[ChestZn] Критические проблемы — выход")
         sys.exit(1)
 
@@ -391,7 +468,7 @@ def main():
         sys.exit(0)
 
     # ---------- 4. Открыть главное окно ----------
-    win = MainWindow(initial_problems=problems)
+    win = MainWindow(initial_problems=dlg.problems, store=store_for_dialog)
     win.show()
 
     print("[ChestZn] Окно показано, visible:", win.isVisible())

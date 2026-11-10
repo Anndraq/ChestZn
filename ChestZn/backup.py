@@ -78,12 +78,13 @@ def create_backup(is_auto: bool = False) -> Dict[str, Any]:
     prefix = "chestzn_auto" if is_auto else "chestzn"
     target = make_backup_path(prefix=prefix)
     try:
-        src = sqlite3.connect(str(db_file), timeout=10.0)
-        dst = sqlite3.connect(str(target))
-        with dst:
-            src.backup(dst)
-        dst.close()
-        src.close()
+        try:
+            if hasattr(db, "get_conn"):
+                with db.get_conn() as conn:
+                    conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+        except Exception:
+            pass
+        shutil.copy2(str(db_file), str(target))
 
         size_kb = max(1, target.stat().st_size // 1024)
         kind_label = "Автобэкап (раз в 2 недели)" if is_auto else "Бэкап"
@@ -239,6 +240,11 @@ def restore_backup(backup_path: str) -> Dict[str, Any]:
             shutil.copy2(str(target_db), str(safety))
             log.info("Текущая БД сохранена перед восстановлением: %s", safety.name)
 
+        if hasattr(db, "close_all_connections"):
+            try:
+                db.close_all_connections()
+            except Exception:
+                pass
         for suffix in ("-wal", "-shm"):
             aux = Path(str(target_db) + suffix)
             if aux.exists():

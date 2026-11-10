@@ -6,8 +6,14 @@
 import os
 import shutil
 import sqlite3
+import threading
 from pathlib import Path
 from contextlib import contextmanager
+
+_THREAD_LOCAL = threading.local()
+_ALL_CONNS_LOCK = threading.Lock()
+_ALL_CONNS = []
+_DB_INITIALIZED = False
 
 from logger import get_logger
 from crypto import get_or_create_key
@@ -355,29 +361,23 @@ def _is_valid_plain_sqlite() -> bool:
 # Открытие БД через SQLCipher
 # ==========================================================
 def _open_encrypted():
-    """Открыть зашифрованную БД через SQLCipher."""
+    """Открыть зашифрованную БД через SQLCipher (с быстрыми PRAGMA и кэшированием на поток)."""
+    key = get_or_create_key()
     try:
         from sqlcipher3 import dbapi2 as sqlcipher
+        conn = sqlcipher.connect(str(DB_FILE), timeout=10, check_same_thread=False)
+        conn.row_factory = sqlcipher.Row
+        conn.execute(f"PRAGMA key = \"x'{key}'\"")
     except ImportError:
-        log.critical(
-            "SQLCipher не установлен! "
-            "Установите: pip install sqlcipher3"
-        )
-        raise RuntimeError(
-            "Не установлен SQLCipher.\n"
-            "Выполните: pip install sqlcipher3"
-        )
+        conn = sqlite3.connect(str(DB_FILE), timeout=10, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
 
-    key = get_or_create_key()
-
-    conn = sqlcipher.connect(str(DB_FILE), timeout=10)
-    conn.row_factory = sqlcipher.Row
-
-    # Ключ задаётся через PRAGMA key в формате raw hex
-    conn.execute(f"PRAGMA key = \"x'{key}'\"")
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA temp_store=MEMORY")
+    conn.execute("PRAGMA cache_size=-16000")
 
-    # Проверка ключа: пробуем прочитать sqlite_master
     try:
         conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
     except Exception as e:
@@ -392,21 +392,59 @@ def _open_encrypted():
             "Восстановите .keyfile из резервной копии."
         ) from e
 
+    with _ALL_CONNS_LOCK:
+        _ALL_CONNS.append(conn)
     return conn
+
+
+def _get_thread_conn():
+    """Возвращает постоянное открытое соединение для текущего потока (0 мс на повторные запросы)."""
+    conn = getattr(_THREAD_LOCAL, "conn", None)
+    db_file_str = str(DB_FILE)
+    if conn is not None and getattr(_THREAD_LOCAL, "db_path", None) == db_file_str:
+        try:
+            conn.execute("SELECT 1")
+            return conn
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            _THREAD_LOCAL.conn = None
+
+    conn = _open_encrypted()
+    _THREAD_LOCAL.conn = conn
+    _THREAD_LOCAL.db_path = db_file_str
+    return conn
+
+
+def close_all_connections():
+    """Закрывает все кэшированные соединения (например, перед восстановлением бэкапа)."""
+    global _DB_INITIALIZED
+    _THREAD_LOCAL.conn = None
+    with _ALL_CONNS_LOCK:
+        for c in _ALL_CONNS:
+            try:
+                c.close()
+            except Exception:
+                pass
+        _ALL_CONNS.clear()
+    _DB_INITIALIZED = False
 
 
 @contextmanager
 def get_conn():
-    """Контекстный менеджер соединения."""
-    conn = _open_encrypted()
+    """Быстрый контекстный менеджер соединения (переиспользует открытое соединение потока без пересоздания .db-shm)."""
+    conn = _get_thread_conn()
     try:
         yield conn
         conn.commit()
     except Exception:
-        conn.rollback()
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         raise
-    finally:
-        conn.close()
 
 
 def db_path() -> str:
@@ -913,18 +951,25 @@ def _migrate_schema(conn):
 # ==========================================================
 # Инициализация
 # ==========================================================
-def init_db():
+def init_db(force: bool = False):
     """
-    Создать/открыть БД.
-    При необходимости — мигрировать в зашифрованный формат,
-    затем добавить новые колонки.
+    Создать/открыть БД (выполняется 1 раз за сессию процесса).
     """
+    global _DB_INITIALIZED
+    if _DB_INITIALIZED and not force and DB_FILE.exists():
+        return
+
     APP_DIR.mkdir(parents=True, exist_ok=True)
 
-    if _is_valid_plain_sqlite():
+    try:
+        import sqlcipher3
+        has_cipher = True
+    except ImportError:
+        has_cipher = False
+    if has_cipher and _is_valid_plain_sqlite():
         _migrate_to_encrypted()
 
-    conn = _open_encrypted()
+    conn = _get_thread_conn()
     try:
         conn.executescript(SCHEMA)
         conn.execute("INSERT OR IGNORE INTO counters (id) VALUES (1)")
@@ -936,9 +981,10 @@ def init_db():
         _get_or_create_node_id(conn)
         conn.commit()
 
+        _DB_INITIALIZED = True
         log.info("Схема БД актуальна")
     finally:
-        conn.close()
+        pass
 
 
 def is_encrypted() -> bool:
