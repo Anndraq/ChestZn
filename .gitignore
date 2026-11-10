@@ -384,3 +384,6 @@ Thumbs.db
 .DS_Store
 desktop.ini
 /agy.exe
+/ChestZn/build_exe.bat
+*.py
+/ChestZn/setup_inno.iss
