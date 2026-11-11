@@ -816,43 +816,13 @@ class AdminWindow(QWidget):
         self.points_tree.setColumnWidth(3, 160)
         self.points_tree.setAlternatingRowColors(False)
         self.points_tree.setRootIsDecorated(True)
-        self.points_tree.setStyleSheet("""
-            QTreeWidget {
-                background: #161c24;
-                border: 1px solid #2a3542;
-                border-radius: 10px;
-                color: #e6edf3;
-                outline: none;
-            }
-            QTreeWidget::item {
-                padding: 9px 6px;
-                border-bottom: 1px solid #2a3542;
-                min-height: 26px;
-            }
-            QTreeWidget::item:selected {
-                background: rgba(59,130,246,.22);
-                color: #ffffff;
-            }
-            QTreeWidget::item:hover:!selected {
-                background: rgba(255,255,255,.03);
-            }
-            QTreeWidget::branch {
-                background: transparent;
-            }
-            QHeaderView::section {
-                background: #161c24;
-                color: #8b97a6;
-                padding: 10px 10px;
-                border: none;
-                border-bottom: 1px solid #2a3542;
-                font-size: 11px;
-                font-weight: 600;
-                letter-spacing: .5px;
-            }
-        """)
+        # Стили дерева управляются централизованно через styles.py и apply_theme()
 
         self.points_tree.itemDoubleClicked.connect(
             lambda item, col: self._points_edit_item(item)
+        )
+        self.points_tree.itemClicked.connect(
+            lambda item, col: item.setExpanded(not item.isExpanded())
         )
 
         v.addWidget(self.points_tree, stretch=1)
@@ -1098,41 +1068,13 @@ class AdminWindow(QWidget):
         self.devices_tree.setColumnWidth(4, 220)
         self.devices_tree.setAlternatingRowColors(False)
         self.devices_tree.setRootIsDecorated(True)
-        self.devices_tree.setStyleSheet("""
-            QTreeWidget {
-                background: #161c24;
-                border: 1px solid #2a3542;
-                border-radius: 10px;
-                color: #e6edf3;
-                outline: none;
-            }
-            QTreeWidget::item {
-                padding: 9px 6px;
-                border-bottom: 1px solid #2a3542;
-                min-height: 26px;
-            }
-            QTreeWidget::item:selected {
-                background: rgba(59,130,246,.22);
-                color: #ffffff;
-            }
-            QTreeWidget::item:hover:!selected {
-                background: rgba(255,255,255,.03);
-            }
-            QTreeWidget::branch { background: transparent; }
-            QHeaderView::section {
-                background: #161c24;
-                color: #8b97a6;
-                padding: 10px 10px;
-                border: none;
-                border-bottom: 1px solid #2a3542;
-                font-size: 11px;
-                font-weight: 600;
-                letter-spacing: .5px;
-            }
-        """)
+        # Стили дерева управляются централизованно через styles.py и apply_theme()
 
         self.devices_tree.itemDoubleClicked.connect(
             lambda item, col: self._devices_edit_item(item)
+        )
+        self.devices_tree.itemClicked.connect(
+            lambda item, col: item.setExpanded(not item.isExpanded())
         )
         self.devices_tree.itemSelectionChanged.connect(
             self._devices_on_selection
@@ -1164,11 +1106,36 @@ class AdminWindow(QWidget):
     def _refresh_devices(self):
         self.devices_tree.clear()
 
+        import socket
+        try:
+            local_hostname = socket.gethostname().strip().lower()
+        except Exception:
+            local_hostname = ""
+
+        try:
+            from device_discovery import detect_local_printers, detect_local_scanners
+            live_printers_list = detect_local_printers(connected_only=True, force_refresh=False)
+            live_scanners_list = detect_local_scanners(connected_only=True, force_refresh=False)
+        except Exception:
+            live_printers_list = []
+            live_scanners_list = []
+
+        live_pr_names = {p['name'].strip().lower() for p in live_printers_list if p.get('name')}
+        live_sc_devs = {str(s.get('device') or '').strip().lower() for s in live_scanners_list}
+        has_any_live_sc = bool(live_scanners_list)
+        cur_point_id = getattr(self.store, 'current_point', None) or 'T-01'
+
         for point in self.store.points:
             point_item = QTreeWidgetItem(self.devices_tree)
+            is_active_point = (point["id"] == cur_point_id)
             point_item.setText(0, f"🏢  {point['id']} — {point['name']}")
             point_item.setText(1, point.get("address", "—"))
-            point_item.setText(2, "🟢  онлайн" if point.get("online") else "🟡  офлайн")
+            if is_active_point:
+                point_item.setText(2, "🟢  онлайн")
+                point_item.setForeground(2, QBrush(QColor("#16a34a" if _is_light_theme() else "#22c55e")))
+            else:
+                point_item.setText(2, "🟡  офлайн")
+                point_item.setForeground(2, QBrush(QColor("#d97706" if _is_light_theme() else "#f59e0b")))
             point_item.setText(3, point.get("ip", "—"))
             point_item.setData(0, Qt.UserRole, ("point", point["id"]))
 
@@ -1190,7 +1157,11 @@ class AdminWindow(QWidget):
                 c_item.setText(0, f"    💻  {comp['name']}")
                 c_item.setText(1, comp.get("role", "—"))
 
-                c_online = comp.get("online", True)
+                comp_name_l = str(comp.get("name") or "").strip().lower()
+                sync_node_l = str(comp.get("sync_node") or "").strip().lower()
+                is_this_machine = bool(local_hostname and (local_hostname in comp_name_l or local_hostname in sync_node_l))
+                # Компьютер онлайн только если запущен на текущей активной точке
+                c_online = bool(is_active_point and (is_this_machine or comp.get("online", True)))
                 c_item.setText(2, "🟢  онлайн" if c_online else "🟡  офлайн")
                 c_item.setText(3, comp.get("ip") or "—")
 
@@ -1211,30 +1182,68 @@ class AdminWindow(QWidget):
                 printers = self.store.list_printers_for_computer(comp["id"])
                 for pr in printers:
                     p_item = QTreeWidgetItem(c_item)
-                    p_item.setText(0, f"        🖨  {pr['name']}")
-                    p_item.setText(1, f"язык: {pr['lang']}")
-                    p_item.setText(2, "🟢  онлайн" if pr.get("online") else "🟡  офлайн")
+                    pr_name_clean = str(pr.get("name", "")).strip()
+                    p_item.setText(0, f"        🖨  {pr_name_clean}")
+                    p_item.setText(1, f"язык: {pr.get('lang', 'auto')}")
+
+                    # Живая проверка: принтер онлайн только если он реально подключен и включён
+                    is_local_point = bool(is_active_point and c_online)
+                    if is_local_point:
+                        pr_is_live = bool(pr_name_clean.lower() in live_pr_names or any(pr_name_clean.lower() in lp for lp in live_pr_names))
+                    else:
+                        pr_is_live = bool(pr.get("online", False))
+
+                    if pr_is_live:
+                        p_item.setText(2, "🟢  онлайн")
+                        p_item.setForeground(2, QBrush(QColor("#16a34a" if _is_light_theme() else "#22c55e")))
+                    else:
+                        p_item.setText(2, "🔴  отключён")
+                        p_item.setForeground(2, QBrush(QColor("#dc2626" if _is_light_theme() else "#ef4444")))
+
                     target = pr.get("ip") or "USB"
                     if pr.get("port") and pr.get("ip"):
                         target = f"{pr['ip']}:{pr['port']}"
                     p_item.setText(3, target)
-                    p_item.setText(4, f"{int(pr['width_mm'])}×{int(pr['height_mm'])} мм · {pr['dpi']} DPI")
+                    p_item.setText(4, f"{int(pr.get('width_mm', 58))}×{int(pr.get('height_mm', 40))} мм · {pr.get('dpi', 203)} DPI")
                     p_item.setData(0, Qt.UserRole, ("printer", pr["id"]))
 
                 scanners = self.store.list_scanners_for_computer(comp["id"])
                 for sc in scanners:
                     s_item = QTreeWidgetItem(c_item)
-                    s_item.setText(0, f"        📡  {sc['name']}")
-                    s_item.setText(1, f"Тип подключения: {sc['connect_type']}")
+                    sc_name_clean = str(sc.get("name", "")).strip()
+                    s_item.setText(0, f"        📡  {sc_name_clean}")
+                    s_item.setText(1, f"Тип: {sc.get('connect_type', 'usb')}")
 
-                    s_item.setText(2, "🟢  активен" if sc.get("enabled") else "⚪  отключён")
+                    # Живая проверка: сканер онлайн только если он физически присутствует в системе
+                    c_type = str(sc.get("connect_type", "usb")).lower()
+                    com_port_val = str(sc.get("com_port", "")).strip().lower()
+                    is_local_point = bool(is_active_point and c_online)
 
-                    if sc["connect_type"] in ("usb-com", "bt-spp") and sc.get("com_port"):
+                    if not sc.get("enabled", True):
+                        sc_is_live = False
+                        status_str = "⚪  отключён"
+                    elif is_local_point:
+                        if c_type in ("usb-com", "bt-spp") and com_port_val:
+                            sc_is_live = bool(com_port_val in live_sc_devs)
+                        else:
+                            sc_is_live = has_any_live_sc
+                        status_str = "🟢  онлайн" if sc_is_live else "🔴  отключён"
+                    else:
+                        sc_is_live = bool(sc.get("enabled", True))
+                        status_str = "🟢  активен" if sc_is_live else "🔴  отключён"
+
+                    s_item.setText(2, status_str)
+                    if sc_is_live:
+                        s_item.setForeground(2, QBrush(QColor("#16a34a" if _is_light_theme() else "#22c55e")))
+                    else:
+                        s_item.setForeground(2, QBrush(QColor("#dc2626" if _is_light_theme() else "#ef4444")))
+
+                    if c_type in ("usb-com", "bt-spp") and sc.get("com_port"):
                         target = sc["com_port"]
-                    elif sc["connect_type"] == "tcp" and sc.get("ip"):
+                    elif c_type == "tcp" and sc.get("ip"):
                         target = f"{sc['ip']}:{sc['port']}"
                     else:
-                        target = "USB-HID (клавиатура)"
+                        target = "USB-HID (сканер)"
 
                     s_item.setText(3, target)
 
@@ -6129,7 +6138,80 @@ class AdminWindow(QWidget):
         except Exception:
             pass
 
-        # 2. Обновляем локальные компоненты
+        # 2. Обновляем деревья Точки и ПК (points_tree и devices_tree) и локальные компоненты
+        if is_lt:
+            tree_qss = """
+                QTreeWidget {
+                    background-color: #f3f5f8;
+                    border: 1px solid #cfd6e0;
+                    border-radius: 10px;
+                    color: #1e293b;
+                    outline: none;
+                }
+                QTreeWidget::item {
+                    padding: 9px 6px;
+                    border-bottom: 1px solid #e2e8f0;
+                    min-height: 26px;
+                    color: #1e293b;
+                }
+                QTreeWidget::item:selected {
+                    background-color: #d6e4f0;
+                    color: #1e3a5f;
+                    font-weight: 600;
+                }
+                QTreeWidget::item:hover:!selected {
+                    background-color: #ebeff4;
+                }
+                QTreeWidget::branch { background: transparent; }
+                QHeaderView::section {
+                    background-color: #e4e9f0;
+                    color: #475569;
+                    padding: 10px 10px;
+                    border: none;
+                    border-bottom: 1px solid #cbd2dc;
+                    font-size: 11px;
+                    font-weight: 700;
+                    letter-spacing: .5px;
+                }
+            """
+        else:
+            tree_qss = """
+                QTreeWidget {
+                    background-color: #161c24;
+                    border: 1px solid #2a3542;
+                    border-radius: 10px;
+                    color: #e6edf3;
+                    outline: none;
+                }
+                QTreeWidget::item {
+                    padding: 9px 6px;
+                    border-bottom: 1px solid #2a3542;
+                    min-height: 26px;
+                    color: #e6edf3;
+                }
+                QTreeWidget::item:selected {
+                    background-color: rgba(59,130,246,.22);
+                    color: #ffffff;
+                }
+                QTreeWidget::item:hover:!selected {
+                    background-color: rgba(255,255,255,.03);
+                }
+                QTreeWidget::branch { background: transparent; }
+                QHeaderView::section {
+                    background-color: #161c24;
+                    color: #8b97a6;
+                    padding: 10px 10px;
+                    border: none;
+                    border-bottom: 1px solid #2a3542;
+                    font-size: 11px;
+                    font-weight: 600;
+                    letter-spacing: .5px;
+                }
+            """
+        for tree in (getattr(self, "points_tree", None), getattr(self, "devices_tree", None)):
+            if tree is not None:
+                tree.setStyleSheet(tree_qss)
+
         if hasattr(self, "_apply_template_preview_theme"):
             self._apply_template_preview_theme(is_lt)
         if hasattr(self, "label_preview"):

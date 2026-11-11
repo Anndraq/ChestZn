@@ -147,8 +147,13 @@ class StartupProblemsWindow(QDialog):
 
     # ------------------------------------------------------------------
     def refresh_problems(self):
-        """Перепроверить состояние и обновить окно."""
-        self.problems = check_all()
+        """Перепроверить состояние и обновить окно с принудительным опросом оборудования."""
+        try:
+            from device_discovery import _refresh_all_caches_sync
+            _refresh_all_caches_sync()
+        except Exception:
+            pass
+        self.problems = check_all(force_refresh=True)
         self._render()
         self.problems_changed.emit(self.problems)
         print("[startup] проверка обновлена")

@@ -205,8 +205,12 @@ def _scan_printers_sync(has_usbprint: bool, present_pnp_printers: List[str]) -> 
 
             physically_connected = False
             if not is_virtual_port:
-                if port_up.startswith("USB"):
-                    if has_usbprint and (
+                if port_up.startswith("USB") or port_up.startswith("DOT4"):
+                    # 1. Если Windows явно рапортует, что принтер не офлайн — он подключён
+                    if not (is_offline_flag or work_offline_attr or is_error_flag):
+                        physically_connected = True
+                    # 2. Либо если PnP зафиксировал активное USBPRINT устройство
+                    elif has_usbprint and (
                         _is_printer_name_matching_pnp(name, present_pnp_printers)
                         or _is_printer_name_matching_pnp(driver, present_pnp_printers)
                     ):
@@ -424,11 +428,19 @@ _ensure_bg_worker(force=True)
 
 def detect_local_printers(connected_only: bool = True, force_refresh: bool = False) -> List[Dict[str, Any]]:
     """
-    Мгновенно возвращает список принтеров из кэша в памяти.
-    При устаревании кэша или force_refresh=True сигнализирует фоновому потоку обновить данные.
+    Возвращает список принтеров. Если кэш ещё пуст (например, при первом запуске приложения),
+    выполняет мгновенный синхронный опрос, чтобы стартовое окно проверки гарантированно видело включённый принтер!
     """
+    global _PRINTERS_CACHE_TS, _PRINTERS_CACHE_DATA, _PRINTERS_ALL_CACHE_DATA
     now = time.time()
-    if force_refresh or (now - _PRINTERS_CACHE_TS) >= _CACHE_TTL_SEC:
+
+    # Если кэш ещё ни разу не заполнялся или запрошен принудительный синхронный опрос — опрашиваем сразу!
+    if _PRINTERS_CACHE_TS == 0.0 or (force_refresh and not _PRINTERS_CACHE_DATA):
+        try:
+            _refresh_all_caches_sync()
+        except Exception as e:
+            logger.debug("Синхронный первичный опрос принтеров: %s", e)
+    elif force_refresh or (now - _PRINTERS_CACHE_TS) >= _CACHE_TTL_SEC:
         _ensure_bg_worker(force=force_refresh)
 
     with _DISCOVERY_LOCK:
@@ -439,11 +451,17 @@ def detect_local_printers(connected_only: bool = True, force_refresh: bool = Fal
 
 def detect_local_scanners(connected_only: bool = True, force_refresh: bool = False) -> List[Dict[str, Any]]:
     """
-    Мгновенно возвращает список сканеров штрихкодов из кэша в памяти.
-    При устаревании кэша или force_refresh=True сигнализирует фоновому потоку обновить данные.
+    Возвращает список сканеров штрихкодов. Если кэш ещё пуст, выполняет мгновенный синхронный опрос.
     """
+    global _SCANNERS_CACHE_TS, _SCANNERS_CACHE_DATA, _SCANNERS_ALL_CACHE_DATA
     now = time.time()
-    if force_refresh or (now - _SCANNERS_CACHE_TS) >= _CACHE_TTL_SEC:
+
+    if _SCANNERS_CACHE_TS == 0.0 or (force_refresh and not _SCANNERS_CACHE_DATA):
+        try:
+            _refresh_all_caches_sync()
+        except Exception as e:
+            logger.debug("Синхронный первичный опрос сканеров: %s", e)
+    elif force_refresh or (now - _SCANNERS_CACHE_TS) >= _CACHE_TTL_SEC:
         _ensure_bg_worker(force=force_refresh)
 
     with _DISCOVERY_LOCK:
