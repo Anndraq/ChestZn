@@ -1,5 +1,5 @@
 """
-ChestZn — Модуль точного обнаружения реально подключенного оборудования (device_discovery.py)
+Dotmark — Модуль точного обнаружения реально подключенного оборудования (device_discovery.py)
 Определяет ТОЛЬКО физически подключенные в данный момент принтеры и сканеры:
 1. detect_local_printers(connected_only=True):
    - Отсекает виртуальные принтеры (PDF, XPS, OneNote, Fax) и пустые порты (LPT, FILE, PORTPROMуPT, WSD).
@@ -32,7 +32,7 @@ _SCANNERS_CACHE_DATA: list = []
 _CACHE_TTL_SEC: float = 30.0
 from typing import List, Dict, Any, Tuple, Optional
 
-logger = logging.getLogger("ChestZn.Discovery")
+logger = logging.getLogger("Dotmark.Discovery")
 
 # Строгий список Vendor ID настоящих производителей сканеров штрихкодов (для USB-HID и USB-COM)
 # Исключены чипы обычных клавиатур и мышей (04d9 Holtek, 1d57, 248a Telink, 062a MosArt)

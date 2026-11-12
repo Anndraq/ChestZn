@@ -1,6 +1,6 @@
 from datetime import datetime
 r"""
-ChestZn — Модуль интеграции с Microsoft SQL Server (mssql.py).
+Dotmark — Модуль интеграции с Microsoft SQL Server (mssql.py).
 Обеспечивает двухсторонний обмен между Мастер-ПК и сервером БД MS SQL:
 1. Импорт пар «ШК товара (EAN-13 / GTIN) ↔ ДМ (DataMatrix Честного Знака)» + название партии/заказа
    с автоматическим разбором GTIN/SN из строки DataMatrix и формированием именованных JSON-пакетов для обычных ПК.
@@ -18,7 +18,7 @@ import platform
 from pathlib import Path
 from typing import Dict, Any, List, Tuple, Optional
 
-logger = logging.getLogger("ChestZn.MSSQL")
+logger = logging.getLogger("Dotmark.MSSQL")
 
 try:
     import pyodbc
@@ -579,7 +579,7 @@ class MSSQLManager:
     def export_structure_template(filepath: str):
         template = {
             "version": "1.1",
-            "description": "Шаблон сопоставления структуры таблиц MS SQL Server для ChestZn (ШК + ДМ)",
+            "description": "Шаблон сопоставления структуры таблиц MS SQL Server для Dotmark (ШК + ДМ)",
             "import_codes_mapping": {
                 "source_table": "dbo.ChestnyZnakCodes",
                 "code_col": "mark_code",

@@ -1,5 +1,5 @@
 """
-ChestZn — Модуль управления печатью и динамического определения принтеров (printer.py)
+Dotmark — Модуль управления печатью и динамического определения принтеров (printer.py)
 
 Ключевая логика:
 1. НЕ запоминает отключённый принтер: если ранее настроенный принтер физически выключен
@@ -267,7 +267,7 @@ def get_printer_for_point(cfg: Optional[Dict[str, Any]], point: str, *args, **kw
         res["connected"] = True
         res["online"] = True
         res["status_text"] = f"🟢 {live_name}"
-        log.info("[ChestZn] Принтер для точки %s: 🟢 %s (%s)", point, live_name, live_lang)
+        log.info("[Dotmark] Принтер для точки %s: 🟢 %s (%s)", point, live_name, live_lang)
     else:
         # Прямо сейчас ни один принтер не подключён (как на фото пользователя)
         res["printer_name"] = ""
@@ -277,9 +277,9 @@ def get_printer_for_point(cfg: Optional[Dict[str, Any]], point: str, *args, **kw
         res["status_text"] = "🔴 Принтер отключён"
         if saved_point_pr:
             res["last_saved_name"] = saved_point_pr
-            log.warning("[ChestZn] Принтер для точки %s: 🔴 ОТКЛЮЧЁН (ранее был «%s», но сейчас отключён в Windows)", point, saved_point_pr)
+            log.warning("[Dotmark] Принтер для точки %s: 🔴 ОТКЛЮЧЁН (ранее был «%s», но сейчас отключён в Windows)", point, saved_point_pr)
         else:
-            log.warning("[ChestZn] Принтер для точки %s: 🔴 ОТКЛЮЧЁН (нет физически подключенных принтеров)", point)
+            log.warning("[Dotmark] Принтер для точки %s: 🔴 ОТКЛЮЧЁН (нет физически подключенных принтеров)", point)
 
     return res
 
@@ -348,7 +348,7 @@ def print_code(code: str, cfg: Optional[Dict[str, Any]] = None, *args, **kwargs)
                     }
 
                 # Формируем документ и отправляем RAW данные
-                job = win32print.StartDocPrinter(h, 1, ("ChestZn Label", None, "RAW"))
+                job = win32print.StartDocPrinter(h, 1, ("Dotmark Label", None, "RAW"))
                 try:
                     win32print.StartPagePrinter(h)
                     raw_bytes = code.encode("utf-8") if isinstance(code, str) else bytes(code)

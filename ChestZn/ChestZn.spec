@@ -74,7 +74,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='ChestZn',
+    name='Dotmark',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

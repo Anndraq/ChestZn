@@ -2887,7 +2887,7 @@ class AdminWindow(QWidget):
         else:
             self.toast.show_message(f"Ошибка: {result['info']}", "err")
 
-    def _tpl_bind_delete(self, binding_id: int):)
+    def _tpl_bind_delete(self, binding_id: int):
         result = self.store.delete_binding(binding_id)
         if result["ok"]:
             self.toast.show_message(result["info"], "ok")
@@ -4075,7 +4075,7 @@ class AdminWindow(QWidget):
         fc.addWidget(QLabel("Транзитный канал Мастер-ПК (мост к серверу):"))
         self.sync_folder_edit = QLineEdit()
         self.sync_folder_edit.setPlaceholderText(
-            r"например, \MASTER-PC\ChestZnSync или локальный путь транзита"
+            r"например, \MASTER-PC\DotmarkSync или локальный путь транзита"
         )
         fc.addWidget(self.sync_folder_edit, stretch=1)
 
@@ -4888,7 +4888,7 @@ class AdminWindow(QWidget):
         path, _ = QFileDialog.getSaveFileName(
             self,
             "Экспорт ненапечатанных",
-            f"chestzn_unprinted_{datetime.now().strftime('%Y-%m-%d_%H-%M')}.csv",
+            f"dotmark_unprinted_{datetime.now().strftime('%Y-%m-%d_%H-%M')}.csv",
             "CSV (*.csv);;Все файлы (*)"
         )
         if not path:
@@ -4920,7 +4920,7 @@ class AdminWindow(QWidget):
         path, _ = QFileDialog.getSaveFileName(
             self,
             "Экспорт расхождений",
-            f"chestzn_discrepancies_{datetime.now().strftime('%Y-%m-%d_%H-%M')}.csv",
+            f"dotmark_discrepancies_{datetime.now().strftime('%Y-%m-%d_%H-%M')}.csv",
             "CSV (*.csv);;Все файлы (*)"
         )
         if not path:
@@ -5631,7 +5631,7 @@ class AdminWindow(QWidget):
             self.toast.show_message("Нечего экспортировать", "warn")
             return
 
-        default_name = f"chestzn_logs_{datetime.now().strftime('%Y-%m-%d_%H-%M')}.csv"
+        default_name = f"dotmark_logs_{datetime.now().strftime('%Y-%m-%d_%H-%M')}.csv"
         path, _ = QFileDialog.getSaveFileName(
             self, "Сохранить логи", default_name, "CSV (*.csv);;Все файлы (*)"
         )
@@ -5896,7 +5896,7 @@ class AdminWindow(QWidget):
         filters = self._journal_get_filters()
 
         stamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
-        default_name = f"chestzn_journal_{stamp}.csv"
+        default_name = f"dotmark_journal_{stamp}.csv"
 
         path, _ = QFileDialog.getSaveFileName(
             self, "Экспорт журнала", default_name,

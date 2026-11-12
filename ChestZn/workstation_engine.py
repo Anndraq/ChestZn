@@ -1,5 +1,5 @@
 """
-ChestZn — Высокопроизводительный многопоточный диспетчер рабочих мест (workstation_engine.py)
+Dotmark — Высокопроизводительный многопоточный диспетчер рабочих мест (workstation_engine.py)
 Архитектурный принцип: 1 ПК = N независимых пар «Сканер_i <-> Принтер_i» (N сканеров = N принтеров).
 
 Полная интеграция с актуальной версией репозитория Anndraq/ChestZn (operator_window.py и store.py):
@@ -32,7 +32,7 @@ import threading
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 
-logger = logging.getLogger("ChestZn.Engine")
+logger = logging.getLogger("Dotmark.Engine")
 
 try:
     from PySide6.QtCore import QObject, QThread, Signal, QRunnable, QThreadPool, Slot, QTimer, QEvent, Qt
@@ -727,9 +727,8 @@ def resolve_and_claim_cz_code(
 
 def update_operator_printer_badge(op_win=None):
     """
-    Динамически обновляет статусную плашку принтера в окне оператора (OperatorWindow):
-    - Если принтер подключён: 🟢 Принтер поста: [Имя] (зелёная рамка)
-    - Если принтер отключён: 🔴 Принтер поста: Отключён (красная рамка)
+    Делегирует обновление плашек принтера, сканера и баннера в единый метод OperatorWindow._refresh_header_route(),
+    чтобы во всём приложении был строго один согласованный стиль без мигания.
     """
     if op_win is None:
         op_win = _find_operator_window()
@@ -737,47 +736,10 @@ def update_operator_printer_badge(op_win=None):
         return
 
     try:
-        from device_discovery import get_currently_connected_printer
-        live = get_currently_connected_printer(force_refresh=False)
-        is_conn = bool(live and live.get("connected"))
-        pr_name = live["name"] if is_conn else ""
-
-        # Обновляем ТОЛЬКО плашку принтера в шапке (не трогая центральный баннер)
-        lbl_pr = getattr(op_win, "lbl_printer", None) or getattr(op_win, "btn_printer", None)
-        if lbl_pr is not None:
-            if is_conn:
-                lbl_pr.setText(f"🟢 {pr_name}")
-                lbl_pr.setStyleSheet(
-                    "background:#0f291e; color:#4ade80; border:1px solid #16a34a; "
-                    "border-radius:6px; padding:4px 10px; font-weight:700;"
-                )
-            else:
-                lbl_pr.setText("🔴 Принтер отключён")
-                lbl_pr.setStyleSheet(
-                    "background:#2a1215; color:#f87171; border:1px solid #dc2626; "
-                    "border-radius:6px; padding:4px 10px; font-weight:700;"
-                )
-
-        # Центральный баннер: стабильно показываем ТОЛЬКО вариант 2 (без мигания и без дублирующих полос)
-        scan_in = getattr(op_win, "scan_input", None)
-        if hasattr(op_win, "_show_status"):
-            if is_conn:
-                if scan_in is not None and not scan_in.isEnabled():
-                    scan_in.setEnabled(True)
-                    scan_in.setPlaceholderText("Ожидание сканирования / ручного ввода...")
-                    op_win._show_status("ready", "🟢 Ожидание сканирования / ручного ввода", sub="Поднесите штрихкод товара к сканеру или введите цифры вручную")
-            else:
-                if scan_in is not None and scan_in.isEnabled():
-                    scan_in.setEnabled(False)
-                    scan_in.setPlaceholderText("🔴 Сканирование заблокировано: подключите принтер")
-                op_win._show_status(
-                    "error",
-                    "🔴 Принтер не подключён. Подключите принтер к ПК для начала работы",
-                    sub="Включите питание принтера или подключите USB-кабель к компьютеру"
-                )
+        if hasattr(op_win, "_refresh_header_route"):
+            op_win._refresh_header_route()
     except Exception as e:
         logger.debug("update_operator_printer_badge: %s", e)
-
 
 def _find_operator_window():
     """

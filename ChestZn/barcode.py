@@ -1,5 +1,5 @@
 """
-ChestZn — Мгновенный автономный генератор настоящего GS1 DataMatrix ECC200 (ISO/IEC 16022) в QPixmap (barcode.py).
+Dotmark — Мгновенный автономный генератор настоящего GS1 DataMatrix ECC200 (ISO/IEC 16022) в QPixmap (barcode.py).
 Особенности:
 - Работает на чистом Python без внешних процессов Ghostscript / treepoem (время генерации < 1 мс вместо 500–800 мс).
 - Полностью соответствует стандарту ISO/IEC 16022 ECC200 и требованиям Честного ЗНАКа:
