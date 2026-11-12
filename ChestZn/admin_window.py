@@ -474,13 +474,7 @@ class AdminWindow(QWidget):
         if pt_id:
             self.store.current_point = pt_id
 
-        try:
-            import db
-            with db.get_conn() as conn:
-                conn.execute("UPDATE counters SET [limit] = ? WHERE id = 1", (new_limit,))
-                conn.commit()
-        except Exception:
-            pass
+
 
         # Синхронизируем шапку и счётчики с открытым OperatorWindow
         try:
@@ -5499,9 +5493,15 @@ class AdminWindow(QWidget):
         self.log_level_combo.currentTextChanged.connect(self._refresh_logs)
         toolbar.addWidget(self.log_level_combo)
 
+        from PySide6.QtCore import QTimer
+        self._log_search_timer = QTimer(self)
+        self._log_search_timer.setSingleShot(True)
+        self._log_search_timer.setInterval(180)
+        self._log_search_timer.timeout.connect(self._refresh_logs)
+
         self.log_search = QLineEdit()
         self.log_search.setPlaceholderText("Поиск по тексту...")
-        self.log_search.textChanged.connect(self._refresh_logs)
+        self.log_search.textChanged.connect(lambda _: self._log_search_timer.start())
         toolbar.addWidget(self.log_search, stretch=1)
 
         self.log_limit_combo = QComboBox()
@@ -5566,8 +5566,9 @@ class AdminWindow(QWidget):
         )
 
         try:
+            from collections import deque
             with open(path, "r", encoding="utf-8", errors="replace") as f:
-                all_lines = f.readlines()
+                all_lines = list(deque(f, maxlen=max(limit * 4, 2000)))
         except Exception as e:
             log.error("Не удалось прочитать лог: %s", e)
             self.log_status.setText(f"Ошибка чтения: {e}")
@@ -6179,273 +6180,6 @@ class AdminWindow(QWidget):
             QTimer.singleShot(0, _apply_ui)
 
         threading.Thread(target=_worker, daemon=True).start()
-
-    def _get_theme_patch_qss(self, theme_name: str) -> str:
-        """Палитра приглушённой, спокойной светлой темы (Calm Nordic Sand / Stone) без резкой белизны."""
-        is_lt = (theme_name == "light")
-        if is_lt:
-            return """
-            /* Глобальный фон всех окон и контейнеров — спокойный приглушённый серо-бежевый камень */
-            QMainWindow, QDialog, QStackedWidget {
-                background-color: #e6eaef;
-                color: #2d3748;
-            }
-            /* Все страницы и контейнеры внутри стека наследуют мягкий фон */
-            QStackedWidget > QWidget {
-                background-color: #e6eaef;
-                color: #2d3748;
-            }
-            /* Левое навигационное меню (Сайдбар) */
-            QFrame#sidebar {
-                background-color: #dde3ea;
-                border-right: 1px solid #cbd2dc;
-            }
-            QLabel#navSection {
-                color: #64748b;
-                font-size: 11px;
-                font-weight: 700;
-                letter-spacing: 1px;
-                padding: 10px 10px 4px 10px;
-                background: transparent;
-            }
-            QPushButton#navBtn {
-                background-color: transparent;
-                color: #334155;
-                border: none;
-                border-radius: 8px;
-                padding: 9px 12px;
-                text-align: left;
-                font-size: 13px;
-                font-weight: 600;
-            }
-            QPushButton#navBtn:hover:!checked {
-                background-color: #cfd7e2;
-                color: #1e293b;
-            }
-            QPushButton#navBtn:checked {
-                background-color: #3b6ea5;
-                color: #f8fafc;
-                font-weight: 700;
-            }
-            /* Карточки — тёплый матовый бумажный оттенок #f3f5f8 (нигде нет чистого #ffffff!) */
-            QFrame#card {
-                background-color: #f3f5f8;
-                border: 1px solid #cfd6e0;
-                border-radius: 12px;
-            }
-            /* Поля ввода, спинбоксы и комбобоксы */
-            QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {
-                background-color: #dde3eb;
-                color: #2d3748;
-                border: 1px solid #c4cdd8;
-                border-radius: 7px;
-                padding: 5px 10px;
-                selection-background-color: #3b6ea5;
-                selection-color: #ffffff;
-            }
-            QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {
-                background-color: #f5f7fa;
-                border: 1px solid #3b6ea5;
-            }
-            QComboBox QAbstractItemView {
-                background-color: #f3f5f8;
-                color: #2d3748;
-                border: 1px solid #c4cdd8;
-                border-radius: 6px;
-                padding: 4px;
-                selection-background-color: #d6e4f0;
-                selection-color: #1e3a5f;
-                outline: none;
-            }
-            /* Кнопки (вторичные — спокойные матовые, основные — благородный джинсовый синий) */
-            QPushButton {
-                background-color: #dde3eb;
-                color: #2d3748;
-                border: 1px solid #c4cdd8;
-                border-radius: 8px;
-                padding: 6px 14px;
-                font-weight: 600;
-            }
-            QPushButton:hover {
-                background-color: #dfe5ec;
-                border-color: #a8b4c4;
-                color: #1e293b;
-            }
-            QPushButton:pressed {
-                background-color: #d4dce6;
-            }
-            QPushButton[primary="true"] {
-                background-color: #3b6ea5;
-                color: #f8fafc;
-                border: 1px solid #2e5988;
-                font-weight: 700;
-            }
-            QPushButton[primary="true"]:hover {
-                background-color: #2e5988;
-                border-color: #23476e;
-            }
-            /* Вкладки QTabWidget */
-            QTabWidget::pane {
-                border: 1px solid #cfd6e0;
-                border-radius: 10px;
-                background-color: #f3f5f8;
-                top: -1px;
-            }
-            QTabBar::tab {
-                background-color: #dde3ea;
-                color: #4a5568;
-                border: 1px solid #c4cdd8;
-                border-bottom: none;
-                border-top-left-radius: 8px;
-                border-top-right-radius: 8px;
-                padding: 7px 16px;
-                margin-right: 4px;
-                font-weight: 600;
-            }
-            QTabBar::tab:hover:!selected {
-                background-color: #e6eaef;
-                color: #2d3748;
-            }
-            QTabBar::tab:selected {
-                background-color: #3b6ea5;
-                color: #f8fafc;
-                border-color: #3b6ea5;
-                font-weight: 700;
-            }
-            /* Таблицы QTableWidget — приглушённый бумажный фон #f3f5f8 без слепящих пятен */
-            QTableWidget {
-                background-color: #f3f5f8;
-                alternate-background-color: #dde3eb;
-                color: #2d3748;
-                border: 1px solid #cfd6e0;
-                border-radius: 10px;
-                gridline-color: #e2e7ee;
-                selection-background-color: #d6e4f0;
-                selection-color: #1e3a5f;
-                outline: none;
-            }
-            QTableWidget::item {
-                padding: 6px 8px;
-                border-bottom: 1px solid #e6eaef;
-                color: #2d3748;
-            }
-            QTableWidget::item:selected {
-                background-color: #d6e4f0;
-                color: #1e3a5f;
-                font-weight: 600;
-            }
-            QHeaderView::section:horizontal {
-                background-color: #dde3eb;
-                color: #4a5568;
-                font-size: 11px;
-                font-weight: 700;
-                padding: 8px 10px;
-                border: none;
-                border-bottom: 1px solid #c2cbd6;
-                border-right: 1px solid #d8dfe8;
-            }
-            QTableWidget QTableCornerButton::section,
-            QHeaderView::section:vertical {
-                background-color: #dde3eb;
-                color: #64748b;
-                border: none;
-                border-right: 1px solid #cbd2dc;
-                border-bottom: 1px solid #d8dfe8;
-            }
-            /* Группы QGroupBox */
-            QGroupBox {
-                background-color: #f3f5f8;
-                border: 1px solid #cfd6e0;
-                border-radius: 10px;
-                margin-top: 12px;
-                padding: 14px;
-                color: #2d3748;
-                font-weight: 600;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                subcontrol-position: top left;
-                left: 12px;
-                padding: 0 6px;
-                color: #4a5568;
-                font-weight: 700;
-            }
-            /* Чекбоксы */
-            QCheckBox {
-                color: #2d3748;
-                spacing: 6px;
-            }
-            /* Скроллбары */
-            QScrollBar:vertical {
-                background: #e6eaef;
-                width: 8px;
-                margin: 2px;
-                border-radius: 4px;
-            }
-            QScrollBar::handle:vertical {
-                background: #b8c2cf;
-                min-height: 24px;
-                border-radius: 4px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background: #94a3b8;
-            }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-                height: 0px;
-            }
-            /* Контекстные меню */
-            QMenu {
-                background-color: #f3f5f8;
-                color: #2d3748;
-                border: 1px solid #c4cdd8;
-                border-radius: 8px;
-                padding: 4px;
-            }
-            QMenu::item {
-                padding: 6px 20px 6px 12px;
-                border-radius: 5px;
-            }
-            QMenu::item:selected {
-                background-color: #3b6ea5;
-                color: #ffffff;
-            }
-            """
-        else:
-            return """
-            QComboBox QAbstractItemView {
-                background-color: #1e293b;
-                color: #f8fafc;
-                border: 1px solid #334155;
-                selection-background-color: #3b6ea5;
-                selection-color: #ffffff;
-                outline: none;
-            }
-            QTableWidget QTableCornerButton::section,
-            QHeaderView::section:vertical {
-                background-color: #161c24;
-                color: #8b97a6;
-                border: none;
-                border-right: 1px solid #2a3542;
-                border-bottom: 1px solid #2a3542;
-            }
-            QGroupBox {
-                background-color: #0f172a;
-                border: 1px solid #1e293b;
-                border-radius: 10px;
-                margin-top: 10px;
-                padding: 14px;
-                color: #f8fafc;
-                font-weight: 600;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                subcontrol-position: top left;
-                left: 12px;
-                padding: 0 6px;
-                color: #94a3b8;
-                font-weight: 700;
-            }
-            """
 
     def apply_theme(self, theme_name: Optional[str] = None, refresh_data: bool = True):
         """Быстрое переключение темы оформления без тройной перекомпиляции QSS и без пересборки скрытых вкладок."""

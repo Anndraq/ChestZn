@@ -23,19 +23,30 @@ import platform
 import subprocess
 import time
 import threading
+from typing import List, Dict, Any, Tuple, Optional
 
 _DISCOVERY_LOCK = threading.Lock()
+_BG_WORKER_LOCK = threading.Lock()
+_BG_WORKER_RUNNING = False
+
 _PRINTERS_CACHE_TS: float = 0.0
 _PRINTERS_CACHE_DATA: list = []
+_PRINTERS_ALL_CACHE_DATA: list = []
+
 _SCANNERS_CACHE_TS: float = 0.0
 _SCANNERS_CACHE_DATA: list = []
-_CACHE_TTL_SEC: float = 30.0
-from typing import List, Dict, Any, Tuple, Optional
+
+_CACHE_TTL_SEC: float = 12.0
+
+_PS_SNAPSHOT_TS: float = 0.0
+_PS_OFFLINE_CACHE_DATA: Dict[str, bool] = {}
+_USB_PNP_CACHE_HAS: bool = False
+_USB_PNP_CACHE_NAMES: List[str] = []
+_HID_PNP_CACHE_ITEMS: List[Dict[str, Any]] = []
+
 
 logger = logging.getLogger("Dotmark.Discovery")
 
-# Строгий список Vendor ID настоящих производителей сканеров штрихкодов (для USB-HID и USB-COM)
-# Исключены чипы обычных клавиатур и мышей (04d9 Holtek, 1d57, 248a Telink, 062a MosArt)
 BARCODE_SCANNER_HID_VENDORS = {
     "05e0": "Zebra / Motorola / Symbol",
     "0c2e": "Honeywell",
@@ -48,7 +59,6 @@ BARCODE_SCANNER_HID_VENDORS = {
     "23d0": "Urovo / iData",
 }
 
-# Для режима USB-COM (Virtual Serial Port) также учитываем мосты USB-UART
 SCANNER_COM_VENDORS = {
     **BARCODE_SCANNER_HID_VENDORS,
     "1a86": "WCH (CH340/CH341 USB-COM сканер)",
@@ -58,7 +68,6 @@ SCANNER_COM_VENDORS = {
     "067b": "Prolific (USB-COM сканер)",
 }
 
-# Совместимый алиас
 SCANNER_KNOWN_VENDORS = SCANNER_COM_VENDORS
 
 VIRTUAL_PRINTER_KEYWORDS = [
@@ -80,123 +89,121 @@ def is_virtual_printer(printer_name: str) -> bool:
     return any(k in name_l for k in VIRTUAL_PRINTER_KEYWORDS)
 
 
-_PS_OFFLINE_CACHE_TS: float = 0.0
-_PS_OFFLINE_CACHE_DATA: Dict[str, bool] = {}
-
-def _get_windows_printer_offline_statuses(force: bool = False) -> Dict[str, bool]:
+def _refresh_ps_hardware_snapshot(force: bool = False) -> None:
     """
-    Кэшированный (30 сек) опрос Windows Get-Printer.
-    На горячем пути не запускает PowerShell, полностью исключая лаги при переключении вкладок.
+    Объединённый 1-проходный опрос Windows PnP и спулера в одном вызове PowerShell (вместо 3 процессов
+    и медленного Get-PnpDeviceProperty в цикле). Работает в 4-5 раз быстрее и никогда не блокирует UI.
     """
-    global _PS_OFFLINE_CACHE_TS, _PS_OFFLINE_CACHE_DATA
+    global _PS_SNAPSHOT_TS, _PS_OFFLINE_CACHE_DATA, _USB_PNP_CACHE_HAS, _USB_PNP_CACHE_NAMES, _HID_PNP_CACHE_ITEMS
     if platform.system() != "Windows":
-        return {}
+        return
 
     now = time.time()
-    if not force and (now - _PS_OFFLINE_CACHE_TS) < _CACHE_TTL_SEC and _PS_OFFLINE_CACHE_DATA:
-        return dict(_PS_OFFLINE_CACHE_DATA)
+    if not force and _PS_SNAPSHOT_TS > 0.0 and (now - _PS_SNAPSHOT_TS) < _CACHE_TTL_SEC:
+        return
 
+    ps_script = (
+        "$pr = @(Get-Printer -ErrorAction SilentlyContinue | Select-Object Name, PortName, PrinterStatus, WorkOffline); "
+        "$pnp = @(Get-PnpDevice -PresentOnly -Status OK -ErrorAction SilentlyContinue | "
+        "Where-Object { $_.Class -in @('Printer','PrinterQueue','HIDClass','Keyboard','POSBarcodeScanner') -or "
+        "$_.InstanceId -like 'USBPRINT*' -or $_.InstanceId -like '*DOT4*' -or $_.Service -eq 'usbprint' } | "
+        "Select-Object FriendlyName, InstanceId, Class, Service); "
+        "@{ printers = $pr; pnp = $pnp } | ConvertTo-Json -Compress -Depth 3"
+    )
     try:
-        ps_cmd = (
-            "Get-Printer -ErrorAction SilentlyContinue | "
-            "Select-Object Name, PortName, PrinterStatus, WorkOffline | "
-            "ConvertTo-Json -Compress"
-        )
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        res = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", ps_cmd],
-            capture_output=True,
-            text=True,
-            timeout=1.5,
-            creationflags=creationflags
-        )
-        if res.returncode == 0 and res.stdout.strip():
-            raw = json.loads(res.stdout.strip())
-            if isinstance(raw, dict):
-                raw = [raw]
-            res_dict = {}
-            for item in raw:
-                p_name = str(item.get("Name") or "").strip().lower()
-                is_off = bool(item.get("WorkOffline", False)) or str(item.get("PrinterStatus", "")).lower() in ("offline", "error", "not available")
-                if p_name:
-                    res_dict[p_name] = is_off
-            _PS_OFFLINE_CACHE_TS = now
-            _PS_OFFLINE_CACHE_DATA = res_dict
-            return res_dict
-    except Exception as e:
-        logger.debug("Ошибка опроса статусов Get-Printer: %s", e)
-    return dict(_PS_OFFLINE_CACHE_DATA)
-
-
-_USB_PNP_CACHE_TS: float = 0.0
-_USB_PNP_CACHE_HAS: bool = False
-_USB_PNP_CACHE_NAMES: List[str] = []
-
-def _get_present_usb_printers_windows(force: bool = False) -> Tuple[bool, List[str]]:
-    """
-    Кэшированный (30 сек) опрос физических USBPRINT-устройств.
-    Исключает запуск тяжелого PowerShell при переключении вкладок.
-    """
-    global _USB_PNP_CACHE_TS, _USB_PNP_CACHE_HAS, _USB_PNP_CACHE_NAMES
-    if platform.system() != "Windows":
-        return False, []
-
-    now = time.time()
-    if not force and (now - _USB_PNP_CACHE_TS) < _CACHE_TTL_SEC:
-        return _USB_PNP_CACHE_HAS, list(_USB_PNP_CACHE_NAMES)
-
-    try:
-        ps_script = (
-            "Get-PnpDevice -PresentOnly -Status OK -ErrorAction SilentlyContinue | "
-            "Where-Object { $_.Class -in @('Printer', 'PrinterQueue') -or "
-            "$_.InstanceId -like 'USBPRINT*' -or $_.Service -eq 'usbprint' } | "
-            "Select-Object -Property FriendlyName, InstanceId, Class, Service | ConvertTo-Json -Compress"
-        )
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         res = subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps_script],
             capture_output=True,
             text=True,
-            timeout=1.5,
-            creationflags=creationflags
+            timeout=2.2,
+            creationflags=creationflags,
         )
         if res.returncode != 0 or not res.stdout.strip():
-            _USB_PNP_CACHE_TS = now
-            _USB_PNP_CACHE_HAS = False
-            _USB_PNP_CACHE_NAMES = []
-            return False, []
+            _PS_SNAPSHOT_TS = now
+            return
 
-        raw = json.loads(res.stdout.strip())
-        if isinstance(raw, dict):
-            raw = [raw]
+        payload = json.loads(res.stdout.strip())
+        if not isinstance(payload, dict):
+            _PS_SNAPSHOT_TS = now
+            return
+
+        pr_raw = payload.get("printers") or []
+        if isinstance(pr_raw, dict):
+            pr_raw = [pr_raw]
+
+        offline_map: Dict[str, bool] = {}
+        for item in pr_raw:
+            if not isinstance(item, dict):
+                continue
+            p_name = str(item.get("Name") or "").strip().lower()
+            is_off = bool(item.get("WorkOffline", False)) or str(item.get("PrinterStatus", "")).lower() in (
+                "offline", "error", "not available", "5", "7"
+            )
+            if p_name:
+                offline_map[p_name] = is_off
+
+        pnp_raw = payload.get("pnp") or []
+        if isinstance(pnp_raw, dict):
+            pnp_raw = [pnp_raw]
 
         has_usbprint = False
-        names: List[str] = []
-        for item in raw:
-            inst = str(item.get("InstanceId") or "").upper()
-            srv = str(item.get("Service") or "").lower()
-            cls_name = str(item.get("Class") or "").lower()
+        usb_names: List[str] = []
+        hid_items: List[Dict[str, Any]] = []
+
+        for item in pnp_raw:
+            if not isinstance(item, dict):
+                continue
+            inst = str(item.get("InstanceId") or "").strip()
+            inst_up = inst.upper()
+            srv = str(item.get("Service") or "").strip().lower()
+            cls_name = str(item.get("Class") or "").strip().lower()
             fname = str(item.get("FriendlyName") or "").strip()
 
-            if inst.startswith("SWD\\PRINTENUM\\") and is_virtual_printer(fname):
+            if inst_up.startswith("SWD\\PRINTENUM\\") and is_virtual_printer(fname):
                 continue
 
-            if inst.startswith("USBPRINT\\") or srv == "usbprint" or (cls_name == "printer" and "usb" in inst.lower()):
+            if (
+                inst_up.startswith("USBPRINT\\")
+                or "DOT4" in inst_up
+                or srv in ("usbprint", "dot4", "dot4prt")
+                or (cls_name in ("printer", "printerqueue") and "usb" in inst_up.lower())
+            ):
                 has_usbprint = True
                 if fname:
-                    names.append(fname.lower())
-                # В InstanceId вида USBPRINT\ZEBRA_TECHNOLOGIES_ZTC_ZD421\... также закодирована модель
-                parts = inst.split("\\")
+                    usb_names.append(fname.lower())
+                parts = inst_up.split("\\")
                 if len(parts) >= 2:
-                    names.append(parts[1].lower().replace("_", " "))
+                    usb_names.append(parts[1].lower().replace("_", " "))
 
-        _USB_PNP_CACHE_TS = now
-        _USB_PNP_CACHE_HAS = has_usbprint
-        _USB_PNP_CACHE_NAMES = names
-        return has_usbprint, names
+            if cls_name in ("hidclass", "keyboard", "posbarcodescanner") and "vid_" in inst.lower():
+                hid_items.append({
+                    "FriendlyName": fname,
+                    "InstanceId": inst,
+                    "Class": cls_name,
+                })
+
+        with _DISCOVERY_LOCK:
+            _PS_OFFLINE_CACHE_DATA = offline_map
+            _USB_PNP_CACHE_HAS = has_usbprint
+            _USB_PNP_CACHE_NAMES = usb_names
+            _HID_PNP_CACHE_ITEMS = hid_items
+            _PS_SNAPSHOT_TS = now
     except Exception as e:
-        logger.debug("Ошибка проверки физического подключения USB-принтеров: %s", e)
-        return False, []
+        logger.debug("Ошибка единого снимка PnP/Get-Printer: %s", e)
+        _PS_SNAPSHOT_TS = now
+
+
+def _get_windows_printer_offline_statuses(force: bool = False) -> Dict[str, bool]:
+    _refresh_ps_hardware_snapshot(force=force)
+    with _DISCOVERY_LOCK:
+        return dict(_PS_OFFLINE_CACHE_DATA)
+
+
+def _get_present_usb_printers_windows(force: bool = False) -> Tuple[bool, List[str]]:
+    _refresh_ps_hardware_snapshot(force=force)
+    with _DISCOVERY_LOCK:
+        return _USB_PNP_CACHE_HAS, list(_USB_PNP_CACHE_NAMES)
 
 
 def _is_printer_name_matching_pnp(printer_name: str, present_pnp_names: List[str]) -> bool:
@@ -204,7 +211,10 @@ def _is_printer_name_matching_pnp(printer_name: str, present_pnp_names: List[str
     if not present_pnp_names:
         return False
     p_low = printer_name.lower().strip()
-    p_tokens = [t for t in re.split(r"[\s\-_/()]+", p_low) if len(t) >= 3 and t not in ("usb", "copy", "копия", "series", "printer")]
+    p_tokens = [
+        t for t in re.split(r"[\s\-_/()]+", p_low)
+        if len(t) >= 3 and t not in ("usb", "copy", "копия", "series", "printer")
+    ]
     for pnp in present_pnp_names:
         if p_low in pnp or pnp in p_low:
             return True
@@ -213,22 +223,278 @@ def _is_printer_name_matching_pnp(printer_name: str, present_pnp_names: List[str
     return False
 
 
-# ---------------------------------------------------------------------------
-# 1. ОБНАРУЖЕНИЕ ТОЛЬКО ФИЗИЧЕСКИ ПОДКЛЮЧЕННЫХ В ДАННЫЙ МОМЕНТ ПРИНТЕРОВ
-# ---------------------------------------------------------------------------
+def _scan_printers_sync(force: bool = False) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Синхронно формирует списки (connected_printers, all_printers)."""
+    if platform.system() != "Windows":
+        return [], []
+
+    connected_list: List[Dict[str, Any]] = []
+    all_list: List[Dict[str, Any]] = []
+
+    try:
+        import win32print
+        default_name = ""
+        try:
+            default_name = win32print.GetDefaultPrinter()
+        except Exception:
+            pass
+
+        has_usbprint, present_pnp_printers = _get_present_usb_printers_windows(force=force)
+        offline_statuses = _get_windows_printer_offline_statuses(force=False)
+
+        flags = win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS
+        printer_info_list = win32print.EnumPrinters(flags, None, 2)
+
+        for p_info in printer_info_list:
+            name = (p_info.get("pPrinterName") or "").strip()
+            port = (p_info.get("pPortName") or "").strip()
+            driver = (p_info.get("pDriverName") or "").strip()
+            status_flags = p_info.get("Status", 0)
+            attributes = p_info.get("Attributes", 0)
+
+            if not name or is_virtual_printer(name):
+                continue
+
+            port_up = port.upper()
+            is_virtual_port = any(
+                port_up.startswith(prefix)
+                for prefix in ("PORTPROMPT", "FILE:", "NUL", "SHRFAX", "FAX", "LPT", "XPS")
+            )
+
+            is_offline_flag = bool(status_flags & win32print.PRINTER_STATUS_OFFLINE)
+            is_error_flag = bool(status_flags & (win32print.PRINTER_STATUS_ERROR | win32print.PRINTER_STATUS_NOT_AVAILABLE))
+            work_offline_attr = bool(attributes & getattr(win32print, "PRINTER_ATTRIBUTE_WORK_OFFLINE", 0))
+            ps_offline = offline_statuses.get(name.lower(), False)
+
+            physically_connected = False
+            if not is_virtual_port:
+                if port_up.startswith("USB") or port_up.startswith("DOT4"):
+                    if has_usbprint and (
+                        _is_printer_name_matching_pnp(name, present_pnp_printers)
+                        or _is_printer_name_matching_pnp(driver, present_pnp_printers)
+                    ):
+                        physically_connected = True
+                elif port_up.startswith("COM"):
+                    try:
+                        import serial.tools.list_ports
+                        active_coms = {cp.device.upper() for cp in serial.tools.list_ports.comports()}
+                        physically_connected = port_up.rstrip(":") in active_coms
+                    except Exception:
+                        physically_connected = False
+                else:
+                    m_ip = re.search(r"(\d{1,3}(?:\.\d{1,3}){3})", port)
+                    if m_ip:
+                        ip_addr = m_ip.group(1)
+                        try:
+                            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                            sock.settimeout(0.25)
+                            physically_connected = (sock.connect_ex((ip_addr, 9100)) == 0)
+                            sock.close()
+                        except Exception:
+                            physically_connected = False
+
+            if is_offline_flag or is_error_flag or work_offline_attr or ps_offline:
+                physically_connected = False
+
+            name_lower = name.lower() + " " + driver.lower()
+            if "zebra" in name_lower or "zpl" in name_lower:
+                lang = "zpl"
+            elif any(k in name_lower for k in ["tsc", "tspl", "xprinter", "gprinter", "atol", "атол"]):
+                lang = "tspl"
+            elif "godex" in name_lower or "ezpl" in name_lower:
+                lang = "ezpl"
+            else:
+                lang = "auto"
+
+            item_dict = {
+                "name": name,
+                "port": port or "—",
+                "driver": driver or "—",
+                "lang": lang,
+                "online": physically_connected,
+                "connected": physically_connected,
+                "status_text": "Готов к печати" if physically_connected else "Отключен",
+                "is_default": (name == default_name),
+            }
+            all_list.append(item_dict)
+            if physically_connected:
+                connected_list.append(item_dict)
+    except Exception as e:
+        logger.error("Ошибка опроса принтеров Windows: %s", e)
+
+    return connected_list, all_list
+
+
+def _scan_scanners_sync(force: bool = False) -> List[Dict[str, Any]]:
+    """Синхронно формирует список реально подключенных сканеров штрихкодов."""
+    if platform.system() != "Windows":
+        return []
+
+    scanners: List[Dict[str, Any]] = []
+    seen_identifiers = set()
+
+    # А. Последовательные сканеры (USB-COM / Bluetooth SPP)
+    try:
+        import serial.tools.list_ports
+        ports = serial.tools.list_ports.comports()
+
+        for port in ports:
+            dev = port.device
+            desc = port.description or ""
+            hwid = port.hwid or ""
+
+            desc_l = desc.lower()
+            hwid_l = hwid.lower()
+
+            if "pnp0501" in hwid_l or "communications port" in desc_l or "последовательный порт" in desc_l:
+                if "usb" not in hwid_l and "bluetooth" not in desc_l:
+                    continue
+
+            is_physical_usb = ("usb" in hwid_l or "usb" in desc_l or "vid_" in hwid_l) and "bthenum" not in hwid_l
+            is_bluetooth = ("bluetooth" in desc_l or "bthenum" in hwid_l)
+
+            if is_bluetooth and ("_localmfg" in hwid_l or "localmfg" in hwid_l):
+                continue
+
+            detected_vendor = None
+            for vid, vname in SCANNER_COM_VENDORS.items():
+                if f"vid_{vid}" in hwid_l:
+                    detected_vendor = vname
+                    break
+
+            is_connected = False
+            status_text = "Отключен"
+
+            if is_physical_usb:
+                is_connected = True
+                status_text = "Подключен по USB (COM-режим)"
+            elif is_bluetooth:
+                try:
+                    import serial
+                    s = serial.Serial(dev, timeout=0.08, write_timeout=0.08)
+                    has_carrier = getattr(s, "dsr", False) or getattr(s, "cd", False)
+                    s.close()
+                    if has_carrier:
+                        is_connected = True
+                        status_text = "Подключен по Bluetooth"
+                except Exception as e:
+                    err_str = str(e).lower()
+                    if "access is denied" in err_str or "permission" in err_str or "отказано в доступе" in err_str:
+                        is_connected = True
+                        status_text = "Активен (задействован)"
+
+            if not is_connected:
+                continue
+
+            if detected_vendor:
+                display_name = f"USB-сканер {detected_vendor} ({dev})"
+            elif is_physical_usb:
+                display_name = f"USB-сканер ({dev})"
+            else:
+                display_name = f"Bluetooth-сканер ({dev})"
+
+            scanners.append({
+                "name": display_name,
+                "device": dev,
+                "description": desc,
+                "connect_type": "USB-COM" if is_physical_usb else "BT-SPP",
+                "online": True,
+                "status_text": status_text,
+            })
+            seen_identifiers.add(dev)
+    except Exception as e:
+        logger.error("Ошибка опроса COM-сканеров: %s", e)
+
+    # Б. USB-HID сканеры из объединённого PnP-снимка (без повторного вызова PowerShell)
+    try:
+        _refresh_ps_hardware_snapshot(force=force)
+        with _DISCOVERY_LOCK:
+            hid_data = list(_HID_PNP_CACHE_ITEMS)
+
+        for item in hid_data:
+            inst = str(item.get("InstanceId") or "").lower()
+            fname = str(item.get("FriendlyName") or "").strip()
+            cls_name = str(item.get("Class") or "").lower()
+            combined_l = fname.lower()
+
+            if any(w in combined_l for w in ["mouse", "мышь", "audio", "headset", "consumer control", "system controller"]):
+                continue
+
+            vendor_name = None
+            for vid, vtitle in BARCODE_SCANNER_HID_VENDORS.items():
+                if f"vid_{vid}" in inst:
+                    vendor_name = vtitle
+                    break
+
+            is_named_scanner = (
+                cls_name == "posbarcodescanner"
+                or any(k in combined_l for k in SCANNER_NAME_KEYWORDS)
+            )
+
+            if vendor_name or is_named_scanner:
+                label_detail = vendor_name or fname or "HID"
+                title = f"USB-сканер ({label_detail})"
+                vid_pid_match = re.search(r"(vid_[0-9a-f]{4}&pid_[0-9a-f]{4})", inst)
+                dedup_key = vid_pid_match.group(1) if vid_pid_match else title
+
+                if dedup_key not in seen_identifiers:
+                    seen_identifiers.add(dedup_key)
+                    scanners.append({
+                        "name": title,
+                        "device": "USB-HID",
+                        "description": fname or "USB-HID сканер штрихкодов",
+                        "connect_type": "USB-HID",
+                        "online": True,
+                        "status_text": "Подключен (USB-HID)",
+                    })
+    except Exception as e:
+        logger.debug("Ошибка поиска USB-HID сканеров: %s", e)
+
+    return scanners
+
+
+def _refresh_all_caches_sync() -> None:
+    """Мгновенно и синхронно обновляет кэши принтеров и сканеров (используется при старте и по кнопке «Обновить»)."""
+    global _PRINTERS_CACHE_DATA, _PRINTERS_ALL_CACHE_DATA, _PRINTERS_CACHE_TS
+    global _SCANNERS_CACHE_DATA, _SCANNERS_CACHE_TS
+
+    _refresh_ps_hardware_snapshot(force=True)
+    conn_pr, all_pr = _scan_printers_sync(force=False)
+    conn_sc = _scan_scanners_sync(force=False)
+    now = time.time()
+    with _DISCOVERY_LOCK:
+        _PRINTERS_CACHE_DATA = conn_pr
+        _PRINTERS_ALL_CACHE_DATA = all_pr
+        _PRINTERS_CACHE_TS = now
+        _SCANNERS_CACHE_DATA = conn_sc
+        _SCANNERS_CACHE_TS = now
+
+
+def _trigger_bg_refresh() -> None:
+    """Неблокирующее обновление кэша оборудования в фоновом потоке, чтобы UI никогда не замирал."""
+    global _BG_WORKER_RUNNING
+    with _BG_WORKER_LOCK:
+        if _BG_WORKER_RUNNING:
+            return
+        _BG_WORKER_RUNNING = True
+
+    def _bg():
+        global _BG_WORKER_RUNNING
+        try:
+            _refresh_all_caches_sync()
+        except Exception as e:
+            logger.debug("Фоновое обновление оборудования: %s", e)
+        finally:
+            with _BG_WORKER_LOCK:
+                _BG_WORKER_RUNNING = False
+
+    threading.Thread(target=_bg, daemon=True).start()
+
 
 def get_currently_connected_printer(
     preferred_name: str = "",
     force_refresh: bool = False
 ) -> Optional[Dict[str, Any]]:
-    """
-    Динамически определяет РЕАЛЬНО ПОДКЛЮЧЕННЫЙ принтер в данный момент:
-    1. Не запоминает отключённый принтер: если настроенный принтер (например, Xerox)
-       в Windows отключён, функция НЕ считает его подключённым.
-    2. Если к ПК подключён другой принтер (TSC, Godex, Xprinter, Zebra) — автоматически
-       подтягивает его имя и язык управления.
-    3. Если ни одного принтера физически не подключено — возвращает None.
-    """
     live_printers = detect_local_printers(connected_only=True, force_refresh=force_refresh)
     if not live_printers:
         return None
@@ -240,19 +506,10 @@ def get_currently_connected_printer(
             if p_name == pref_low or pref_low in p_name or p_name in pref_low:
                 return p
 
-    # Если предпочтительный принтер отключён, но к ПК подключён другой принтер — подтягиваем его
     return live_printers[0]
 
 
 def check_printer_status(printer_name: str, force_refresh: bool = False) -> Dict[str, Any]:
-    """
-    Проверяет АКТУАЛЬНОЕ состояние конкретного принтера в данный момент.
-    Возвращает:
-      - 'connected': True, если принтер физически включён и доступен в системе
-      - 'status_text': Понятный статус («🟢 Подключён и готов» или «🔴 Принтер отключён / не найден»)
-      - 'port': Порт (USB001, COM3, 192.168.1.10 и т.д.)
-      - 'lang': Язык управления (zpl, tspl, ezpl, auto)
-    """
     target = (printer_name or "").strip()
     if not target:
         return {
@@ -274,308 +531,50 @@ def check_printer_status(printer_name: str, force_refresh: bool = False) -> Dict
                 "connected": is_online,
                 "status_text": "🟢 Подключён и готов" if is_online else "🔴 Принтер отключён (выключен или нет кабеля)",
                 "port": p.get("port", "—"),
+                "driver": p.get("driver", "—"),
                 "lang": p.get("lang", "auto"),
             }
 
     return {
         "name": target,
         "connected": False,
-        "status_text": "🔴 Принтер не найден в системе Windows",
+        "status_text": f"🔴 Принтер «{target}» не найден в системе",
         "port": "—",
         "lang": "auto",
     }
 
 
 def detect_local_printers(connected_only: bool = True, force_refresh: bool = False) -> List[Dict[str, Any]]:
-    global _PRINTERS_CACHE_TS, _PRINTERS_CACHE_DATA
+    """
+    Возвращает список принтеров за 0 мс из кэша в памяти.
+    Если кэш ещё пуст (первый запуск) или передан force_refresh=True — выполняет синхронный опрос.
+    Если кэш устарел — возвращает данные из кэша и запускает фоновое обновление без фриза UI.
+    """
     now = time.time()
-    if connected_only and not force_refresh and (now - _PRINTERS_CACHE_TS) < _CACHE_TTL_SEC:
-        return list(_PRINTERS_CACHE_DATA)
-    printers: List[Dict[str, Any]] = []
+    if _PRINTERS_CACHE_TS == 0.0 or force_refresh:
+        _refresh_all_caches_sync()
+    elif (now - _PRINTERS_CACHE_TS) >= _CACHE_TTL_SEC:
+        _trigger_bg_refresh()
 
-    if platform.system() != "Windows":
-        return []
+    with _DISCOVERY_LOCK:
+        if connected_only:
+            return list(_PRINTERS_CACHE_DATA)
+        return list(_PRINTERS_ALL_CACHE_DATA)
 
-    try:
-        import win32print
-        default_name = ""
-        try:
-            default_name = win32print.GetDefaultPrinter()
-        except Exception:
-            pass
-
-        has_usbprint, present_pnp_printers = _get_present_usb_printers_windows(force=force_refresh)
-        offline_statuses = _get_windows_printer_offline_statuses(force=force_refresh)
-
-        flags = win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS
-        printer_info_list = win32print.EnumPrinters(flags, None, 2)
-
-        for p_info in printer_info_list:
-            name = (p_info.get("pPrinterName") or "").strip()
-            port = (p_info.get("pPortName") or "").strip()
-            driver = (p_info.get("pDriverName") or "").strip()
-            status_flags = p_info.get("Status", 0)
-            attributes = p_info.get("Attributes", 0)
-
-            if not name or is_virtual_printer(name):
-                continue
-
-            port_up = port.upper()
-            # Отсекаем заведомо виртуальные и пустые порты
-            if connected_only and any(
-                port_up.startswith(prefix)
-                for prefix in ("PORTPROMPT", "FILE:", "NUL", "SHRFAX", "FAX", "LPT", "XPS")
-            ):
-                continue
-
-            is_offline_flag = bool(status_flags & win32print.PRINTER_STATUS_OFFLINE)
-            is_error_flag = bool(status_flags & (win32print.PRINTER_STATUS_ERROR | win32print.PRINTER_STATUS_NOT_AVAILABLE))
-            work_offline_attr = bool(attributes & getattr(win32print, "PRINTER_ATTRIBUTE_WORK_OFFLINE", 0))
-            ps_offline = offline_statuses.get(name.lower(), False)
-
-            # Проверяем реальное физическое подключение в данный момент
-            physically_connected = False
-
-            if port_up.startswith("USB") or port_up.startswith("DOT4"):
-                # Для USB-принтера: он подключён ТОЛЬКО если в системе сейчас есть живое USBPRINT-устройство
-                if has_usbprint and (
-                    _is_printer_name_matching_pnp(name, present_pnp_printers)
-                    or _is_printer_name_matching_pnp(driver, present_pnp_printers)
-                ):
-                    physically_connected = True
-                else:
-                    physically_connected = False
-            elif port_up.startswith("COM"):
-                # Последовательный принтер — проверяем наличие порта
-                try:
-                    import serial.tools.list_ports
-                    active_coms = {cp.device.upper() for cp in serial.tools.list_ports.comports()}
-                    physically_connected = port_up.rstrip(":") in active_coms
-                except Exception:
-                    physically_connected = False
-            else:
-                # Сетевой принтер по IP (например, 192.168.1.150 или IP_192.168.1.150)
-                m_ip = re.search(r"(\d{1,3}(?:\.\d{1,3}){3})", port)
-                if m_ip:
-                    ip_addr = m_ip.group(1)
-                    try:
-                        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                        sock.settimeout(0.35)
-                        physically_connected = (sock.connect_ex((ip_addr, 9100)) == 0)
-                        sock.close()
-                    except Exception:
-                        physically_connected = False
-
-            if is_offline_flag or is_error_flag or work_offline_attr or ps_offline:
-                physically_connected = False
-
-            if connected_only and not physically_connected:
-                continue
-
-            name_lower = name.lower() + " " + driver.lower()
-            if "zebra" in name_lower or "zpl" in name_lower:
-                lang = "zpl"
-            elif any(k in name_lower for k in ["tsc", "tspl", "xprinter", "gprinter", "atol", "атол"]):
-                lang = "tspl"
-            elif "godex" in name_lower or "ezpl" in name_lower:
-                lang = "ezpl"
-            else:
-                lang = "auto"
-
-            printers.append({
-                "name": name,
-                "port": port or "—",
-                "driver": driver or "—",
-                "lang": lang,
-                "online": physically_connected,
-                "status_text": "Готов к печати" if physically_connected else "Отключен",
-                "is_default": (name == default_name)
-            })
-
-    except Exception as e:
-        logger.error("Ошибка опроса принтеров Windows: %s", e)
-
-    if connected_only:
-        _PRINTERS_CACHE_DATA = list(printers)
-        _PRINTERS_CACHE_TS = time.time()
-    return printers
-
-
-# ---------------------------------------------------------------------------
-# 2. ОБНАРУЖЕНИЕ ТОЛЬКО ФИЗИЧЕСКИ ПОДКЛЮЧЕННЫХ В ДАННЫЙ МОМЕНТ СКАНЕРОВ
-# ---------------------------------------------------------------------------
 
 def detect_local_scanners(connected_only: bool = True, force_refresh: bool = False) -> List[Dict[str, Any]]:
-    global _SCANNERS_CACHE_TS, _SCANNERS_CACHE_DATA
+    """
+    Возвращает список сканеров за 0 мс из кэша в памяти.
+    При устаревании кэша запускает фоновое обновление в потоке-демоне.
+    """
     now = time.time()
-    if connected_only and not force_refresh and (now - _SCANNERS_CACHE_TS) < _CACHE_TTL_SEC:
+    if _SCANNERS_CACHE_TS == 0.0 or force_refresh:
+        _refresh_all_caches_sync()
+    elif (now - _SCANNERS_CACHE_TS) >= _CACHE_TTL_SEC:
+        _trigger_bg_refresh()
+
+    with _DISCOVERY_LOCK:
         return list(_SCANNERS_CACHE_DATA)
-    """
-    Возвращает список ТОЛЬКО реально подключенных в данный момент сканеров штрихкодов.
-    Если ни один сканер не подключен, возвращает пустой список [].
-    """
-    scanners: List[Dict[str, Any]] = []
-    seen_identifiers = set()
-
-    if platform.system() != "Windows":
-        return []
-
-    # -----------------------------------------------------------------------
-    # А. Поиск последовательных сканеров (USB-COM / Bluetooth SPP)
-    # -----------------------------------------------------------------------
-    try:
-        import serial.tools.list_ports
-        ports = serial.tools.list_ports.comports()
-
-        for port in ports:
-            dev = port.device
-            desc = port.description or ""
-            hwid = port.hwid or ""
-
-            desc_l = desc.lower()
-            hwid_l = hwid.lower()
-
-            # 1. Отсекаем системные порты материнской платы (ACPI\PNP0501)
-            if "pnp0501" in hwid_l or "communications port" in desc_l or "последовательный порт" in desc_l:
-                if "usb" not in hwid_l and "bluetooth" not in desc_l:
-                    continue
-
-            is_physical_usb = ("usb" in hwid_l or "usb" in desc_l or "vid_" in hwid_l) and "bthenum" not in hwid_l
-            is_bluetooth = ("bluetooth" in desc_l or "bthenum" in hwid_l)
-
-            # 2. Отсекаем пустые виртуальные входящие порты Bluetooth Windows
-            if is_bluetooth and ("_localmfg" in hwid_l or "localmfg" in hwid_l):
-                continue
-
-            detected_vendor = None
-            for vid, vname in SCANNER_COM_VENDORS.items():
-                if f"vid_{vid}" in hwid_l:
-                    detected_vendor = vname
-                    break
-
-            is_connected = False
-            status_text = "Отключен"
-
-            if is_physical_usb:
-                is_connected = True
-                status_text = "Подключен по USB (COM-режим)"
-            elif is_bluetooth:
-                try:
-                    import serial
-                    s = serial.Serial(dev, timeout=0.1, write_timeout=0.1)
-                    has_carrier = getattr(s, "dsr", False) or getattr(s, "cd", False)
-                    s.close()
-                    if has_carrier:
-                        is_connected = True
-                        status_text = "Подключен по Bluetooth"
-                except Exception as e:
-                    err_str = str(e).lower()
-                    if "access is denied" in err_str or "permission" in err_str or "отказано в доступе" in err_str:
-                        is_connected = True
-                        status_text = "Активен (задействован)"
-
-            if connected_only and not is_connected:
-                continue
-
-            if detected_vendor:
-                display_name = f"USB-сканер {detected_vendor} ({dev})"
-            elif is_physical_usb:
-                display_name = f"USB-сканер ({dev})"
-            else:
-                display_name = f"Bluetooth-сканер ({dev})"
-
-            scanners.append({
-                "name": display_name,
-                "device": dev,
-                "description": desc,
-                "connect_type": "USB-COM" if is_physical_usb else "BT-SPP",
-                "online": True,
-                "status_text": status_text
-            })
-            seen_identifiers.add(dev)
-
-    except Exception as e:
-        logger.error("Ошибка опроса COM-сканеров: %s", e)
-
-    # -----------------------------------------------------------------------
-    # Б. Поиск настоящих USB-HID сканеров штрихкодов (без обычных клавиатур и мышей)
-    # -----------------------------------------------------------------------
-    try:
-        ps_cmd = (
-            "Get-PnpDevice -PresentOnly -Status OK -ErrorAction SilentlyContinue | "
-            "Where-Object { $_.Class -in @('HIDClass', 'Keyboard', 'POSBarcodeScanner') -and $_.InstanceId -like '*VID_*' } | "
-            "ForEach-Object { "
-            "  $busDesc = (Get-PnpDeviceProperty -InstanceId $_.InstanceId -KeyName 'DEVPKEY_Device_BusReportedDeviceDesc' -ErrorAction SilentlyContinue).Data; "
-            "  [PSCustomObject]@{ FriendlyName = $_.FriendlyName; InstanceId = $_.InstanceId; Class = $_.Class; BusDesc = $busDesc } "
-            "} | ConvertTo-Json -Compress"
-        )
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        res = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", ps_cmd],
-            capture_output=True,
-            text=True,
-            timeout=3.0,
-            creationflags=creationflags
-        )
-        if res.returncode == 0 and res.stdout.strip():
-            hid_data = json.loads(res.stdout.strip())
-            if isinstance(hid_data, dict):
-                hid_data = [hid_data]
-
-            for item in hid_data:
-                inst = str(item.get("InstanceId") or "").lower()
-                fname = str(item.get("FriendlyName") or "").strip()
-                bdesc = str(item.get("BusDesc") or "").strip()
-                cls_name = str(item.get("Class") or "").lower()
-
-                combined_l = f"{fname} {bdesc}".lower()
-
-                # Игнорируем мыши, аудио, системные контроллеры
-                if any(w in combined_l for w in ["mouse", "мышь", "audio", "headset", "consumer control", "system controller"]):
-                    continue
-
-                # 1. Проверяем только строгий список VID производителей сканеров штрихкодов
-                vendor_name = None
-                for vid, vtitle in BARCODE_SCANNER_HID_VENDORS.items():
-                    if f"vid_{vid}" in inst:
-                        vendor_name = vtitle
-                        break
-
-                # 2. Или если устройство в USB BusReportedDeviceDesc / FriendlyName явно называет себя сканером
-                is_named_scanner = (
-                    cls_name == "posbarcodescanner"
-                    or any(k in combined_l for k in SCANNER_NAME_KEYWORDS)
-                )
-
-                if vendor_name or is_named_scanner:
-                    label_detail = bdesc or vendor_name or fname
-                    title = f"USB-сканер ({label_detail})"
-                    vid_pid_match = re.search(r"(vid_[0-9a-f]{4}&pid_[0-9a-f]{4})", inst)
-                    dedup_key = vid_pid_match.group(1) if vid_pid_match else title
-
-                    if dedup_key not in seen_identifiers:
-                        seen_identifiers.add(dedup_key)
-                        scanners.append({
-                            "name": title,
-                            "device": "USB-HID",
-                            "description": bdesc or fname or "USB-HID сканер штрихкодов",
-                            "connect_type": "USB-HID",
-                            "online": True,
-                            "status_text": "Подключен (USB-HID)"
-                        })
-
-    except Exception as e:
-        logger.debug("Ошибка поиска USB-HID сканеров: %s", e)
-
-    if connected_only:
-        _SCANNERS_CACHE_DATA = list(scanners)
-        _SCANNERS_CACHE_TS = time.time()
-    return scanners
-
-
-# ---------------------------------------------------------------------------
-# 3. СЕТЕВОЙ МОНИТОРИНГ КОМПЬЮТЕРОВ СКЛАДА (PING / TCP CHECK)
-# ---------------------------------------------------------------------------
 
 def check_computer_online(ip_or_host: str, timeout_ms: int = 600) -> Tuple[bool, str, Optional[float]]:
     ip = (ip_or_host or "").strip()

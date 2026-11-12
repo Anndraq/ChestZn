@@ -102,6 +102,7 @@ class OperatorWindow(QWidget):
         # ---------------- 1. ШАПКА (HEADER) ----------------
         self.header_card = QFrame()
         self.header_card.setObjectName("headerCard")
+        self.header_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         header_card = self.header_card
         header_card.setStyleSheet(
             f"QFrame#headerCard {{ background:{bg_subtle}; border-radius:10px; "
@@ -274,6 +275,7 @@ class OperatorWindow(QWidget):
         # ---------------- 3. СТАТУС-БАННЕР И ВВОД ШТРИХКОДА ----------------
         self.status_card = QFrame()
         self.status_card.setObjectName("statusCard")
+        self.status_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.status_card.setStyleSheet(
             f"QFrame#statusCard {{ background:{bg_card}; border-radius:12px; border:2px solid #3b6ea5; }}"
         )
@@ -342,6 +344,7 @@ class OperatorWindow(QWidget):
         # Карточка последней напечатанной позиции
         self.last_card = QFrame()
         self.last_card.setObjectName("lastCard")
+        self.last_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         last_card = self.last_card
         last_card.setStyleSheet(f"QFrame#lastCard {{ background:{bg_card}; border-radius:10px; border:1px solid {border_card}; }}")
         lc_lay = QVBoxLayout(last_card)
@@ -371,23 +374,27 @@ class OperatorWindow(QWidget):
         # Показатели смены (БЕЗ лимита!)
         self.kpi_card = QFrame()
         self.kpi_card.setObjectName("kpiCard")
+        self.kpi_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         kpi_card = self.kpi_card
         self.kpi_lbls = []
         kpi_card.setStyleSheet(f"QFrame#kpiCard {{ background:{bg_card}; border-radius:10px; border:1px solid {border_card}; }}")
         kc_lay = QHBoxLayout(kpi_card)
-        kc_lay.setContentsMargins(14, 10, 14, 10)
+        kc_lay.setContentsMargins(18, 12, 18, 12)
         kc_lay.setSpacing(16)
 
         def _make_kpi(label_text, color):
             box = QVBoxLayout()
             box.setSpacing(2)
+            box.setAlignment(Qt.AlignVCenter)
             lbl = QLabel(label_text)
             self.kpi_lbls.append(lbl)
-            lbl.setStyleSheet(f"color:{text_sub}; font-size:12px; font-weight:600;")
+            lbl.setStyleSheet(f"color:{text_sub}; font-size:12px; font-weight:600; background:transparent;")
             val = QLabel("0")
-            val.setStyleSheet(f"color:{color}; font-size:24px; font-weight:800; font-family:Consolas,monospace;")
+            val.setStyleSheet(f"color:{color}; font-size:24px; font-weight:800; font-family:Consolas,monospace; background:transparent;")
+            box.addStretch(1)
             box.addWidget(lbl)
             box.addWidget(val)
+            box.addStretch(1)
             kc_lay.addLayout(box)
             return val
 
@@ -421,12 +428,15 @@ class OperatorWindow(QWidget):
         self.history_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.history_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.history_table.setShowGrid(False)
-        self.history_table.setMaximumHeight(150)
+        self.history_table.setAlternatingRowColors(True)
+        self.history_table.verticalHeader().setDefaultSectionSize(34)
+        self.history_table.setMinimumHeight(170)
+        self.history_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.history_table.setStyleSheet(
-            f"QTableWidget {{ background:{bg_card}; border-radius:8px; border:1px solid {border_card}; color:{text_main}; font-size:13px; }} "
-            f"QHeaderView::section {{ background:{bg_subtle}; color:{text_sub}; font-weight:600; border:none; padding:4px 8px; }}"
+            f"QTableWidget {{ background:{bg_card}; border-radius:10px; border:1px solid {border_card}; color:{text_main}; font-size:13px; }} "
+            f"QHeaderView::section {{ background:{bg_subtle}; color:{text_sub}; font-weight:700; border:none; border-bottom:1px solid {border_card}; padding:7px 10px; }}"
         )
-        root.addWidget(self.history_table)
+        root.addWidget(self.history_table, stretch=1)
         self.apply_theme()
 
     # ==========================================================================
@@ -454,19 +464,22 @@ class OperatorWindow(QWidget):
 
             if hasattr(self, "lbl_op"):
                 self.lbl_op.setVisible(True)
-                if live_scanners:
-                    sc_name = live_scanners[0].get("name") or "Сканер: Готов"
-                    self.lbl_op.setText(f"📡 {sc_name}")
-                    self.lbl_op.setStyleSheet(
-                        f"background:{ok_bg}; color:{ok_fg}; font-size:13px; font-weight:700; "
-                        f"padding:0 12px; border-radius:8px; border:1px solid {ok_bd};"
-                    )
-                else:
-                    self.lbl_op.setText("Сканер отключён")
-                    self.lbl_op.setStyleSheet(
-                        f"background:{err_bg}; color:{err_fg}; font-size:13px; font-weight:700; "
-                        f"padding:0 12px; border-radius:8px; border:1px solid {err_bd};"
-                    )
+                sc_sig = (bool(live_scanners), live_scanners[0].get("name") if live_scanners else "", is_lt)
+                if getattr(self, "_last_sc_sig", None) != sc_sig:
+                    self._last_sc_sig = sc_sig
+                    if live_scanners:
+                        sc_name = live_scanners[0].get("name") or "Сканер: Готов"
+                        self.lbl_op.setText(f"📡 {sc_name}")
+                        self.lbl_op.setStyleSheet(
+                            f"background:{ok_bg}; color:{ok_fg}; font-size:13px; font-weight:700; "
+                            f"padding:0 12px; border-radius:8px; border:1px solid {ok_bd};"
+                        )
+                    else:
+                        self.lbl_op.setText("Сканер отключён")
+                        self.lbl_op.setStyleSheet(
+                            f"background:{err_bg}; color:{err_fg}; font-size:13px; font-weight:700; "
+                            f"padding:0 12px; border:1px solid {err_bd}; border-radius:8px;"
+                        )
 
             # 2. Проверка статуса принтера
             live = get_currently_connected_printer(force_refresh=False)
@@ -500,6 +513,8 @@ class OperatorWindow(QWidget):
         except Exception as e:
             log.debug("_refresh_header_route: %s", e)
     def _on_poll_tick(self):
+        if not self.isVisible():
+            return
         self._refresh_header_route()
         self._refresh_batch_progress()
 
@@ -1106,9 +1121,10 @@ class OperatorWindow(QWidget):
         if hasattr(self, "hist_title"):
             self.hist_title.setStyleSheet(f"color:{text_sub}; font-size:12px; font-weight:700; letter-spacing:1px; background:transparent;")
         if hasattr(self, "history_table"):
+            alt_bg = "#e1e6ed" if is_lt else "#131922"
             self.history_table.setStyleSheet(
-                f"QTableWidget {{ background:{bg_card}; border-radius:8px; border:1px solid {border_card}; color:{text_main}; font-size:13px; }} "
-                f"QHeaderView::section {{ background:{bg_subtle}; color:{text_sub}; font-weight:600; border:none; padding:4px 8px; }}"
+                f"QTableWidget {{ background:{bg_card}; alternate-background-color:{alt_bg}; border-radius:10px; border:1px solid {border_card}; color:{text_main}; font-size:13px; }} "
+                f"QHeaderView::section {{ background:{bg_subtle}; color:{text_sub}; font-weight:700; border:none; border-bottom:1px solid {border_card}; padding:7px 10px; }}"
             )
 
         if hasattr(self, "scan_input") and self.scan_input.isEnabled():

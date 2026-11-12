@@ -266,14 +266,22 @@ def _ensure_fast_sqlite_indexes(conn):
         pass
 
 
+_TABLE_COLUMNS_CACHE: Dict[str, List[str]] = {}
+
+
 def _get_table_columns(conn, table_name: str) -> List[str]:
-    """Безопасное получение списка колонок таблицы SQLite через PRAGMA table_info."""
+    """Мгновенное получение списка колонок таблицы SQLite с кэшированием в памяти."""
+    if table_name in _TABLE_COLUMNS_CACHE:
+        return _TABLE_COLUMNS_CACHE[table_name]
     try:
         rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
-        return [
+        cols = [
             (r["name"] if isinstance(r, dict) or hasattr(r, "keys") else r[1])
             for r in rows
         ]
+        if cols:
+            _TABLE_COLUMNS_CACHE[table_name] = cols
+        return cols
     except Exception:
         return []
 
@@ -357,15 +365,31 @@ def _match_barcode_against_all_cz_in_python(
     point: Optional[str]
 ) -> Tuple[int, int, Optional[str], Optional[Dict[str, Any]]]:
     """
-    Полное прямое сравнение отсканированного ШК со всеми записями ЧЗ в pool_codes:
-    проверяет как колонку gtin, так и встроенный в сам код ЧЗ (pool_codes.code) GTIN.
+    Быстрое целевое сравнение отсканированного ШК с кодами ЧЗ в pool_codes:
+    вместо выгрузки всех 100 000+ строк в Python выполняет быстрый SQL-фильтр по подстрокам кандидатов.
     """
     cand_set = {c.strip() for c in candidates if c.strip()}
     strip_set = {s.strip() for s in stripped_digits if s.strip()}
 
-    rows = conn.execute(
-        f"SELECT {id_expr}, code, gtin, {sn_expr}, used, {pt_expr} FROM pool_codes"
-    ).fetchall()
+    like_clauses: List[str] = []
+    like_params: List[str] = []
+    for token in sorted(cand_set.union(strip_set), key=len, reverse=True):
+        if len(token) >= 8:
+            like_clauses.append("code LIKE ?")
+            like_params.append(f"%{token}%")
+            like_clauses.append("gtin LIKE ?")
+            like_params.append(f"%{token}%")
+
+    if like_clauses:
+        where_sql = " WHERE " + " OR ".join(like_clauses[:16])
+        rows = conn.execute(
+            f"SELECT {id_expr}, code, gtin, {sn_expr}, used, {pt_expr} FROM pool_codes{where_sql} LIMIT 2000",
+            tuple(like_params[:16])
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            f"SELECT {id_expr}, code, gtin, {sn_expr}, used, {pt_expr} FROM pool_codes LIMIT 2000"
+        ).fetchall()
 
     total_matching = 0
     free_rows: List[Dict[str, Any]] = []
@@ -412,7 +436,6 @@ def _match_barcode_against_all_cz_in_python(
 
     free_rows.sort(key=_sort_key)
     return total_matching, len(free_rows), matched_gtin, free_rows[0]
-
 
 def resolve_and_claim_cz_code(
     raw_barcode: str,

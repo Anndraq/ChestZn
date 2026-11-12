@@ -39,32 +39,52 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 }
 
 
-def load_config() -> Dict[str, Any]:
-    """Загрузить общую конфигурацию принтеров из JSON."""
+_PRINTER_CFG_CACHE: Optional[Dict[str, Any]] = None
+_PRINTER_CFG_MTIME: float = -1.0
+
+
+def load_config(force_reload: bool = False) -> Dict[str, Any]:
+    """Мгновенно возвращает конфигурацию принтеров из кэша в памяти (перечитывает с диска только при изменении файла)."""
+    global _PRINTER_CFG_CACHE, _PRINTER_CFG_MTIME
     if not CONFIG_FILE.exists():
-        return dict(DEFAULT_CONFIG)
+        _PRINTER_CFG_CACHE = dict(DEFAULT_CONFIG)
+        _PRINTER_CFG_MTIME = 0.0
+        return dict(_PRINTER_CFG_CACHE)
     try:
+        mtime = CONFIG_FILE.stat().st_mtime
+        if not force_reload and _PRINTER_CFG_CACHE is not None and mtime == _PRINTER_CFG_MTIME:
+            return dict(_PRINTER_CFG_CACHE)
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
             merged = dict(DEFAULT_CONFIG)
-            merged.update(data)
-            return merged
+            if isinstance(data, dict):
+                merged.update(data)
+            _PRINTER_CFG_CACHE = merged
+            _PRINTER_CFG_MTIME = mtime
+            return dict(merged)
     except Exception as e:
         log.error("Ошибка загрузки %s: %s", CONFIG_FILE, e)
         return dict(DEFAULT_CONFIG)
 
 
 def save_config(cfg: Dict[str, Any]) -> bool:
-    """Сохранить конфигурацию принтеров в JSON."""
+    """Сохраняет конфигурацию принтеров в JSON и мгновенно обновляет кэш в памяти."""
+    global _PRINTER_CFG_CACHE, _PRINTER_CFG_MTIME
     try:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
+        merged = dict(DEFAULT_CONFIG)
+        merged.update(cfg)
+        _PRINTER_CFG_CACHE = merged
+        try:
+            _PRINTER_CFG_MTIME = CONFIG_FILE.stat().st_mtime
+        except Exception:
+            _PRINTER_CFG_MTIME = 0.0
         return True
     except Exception as e:
         log.error("Ошибка сохранения %s: %s", CONFIG_FILE, e)
         return False
-
 
 def detect_point(cfg: Optional[Dict[str, Any]] = None, store=None, *args, **kwargs) -> str:
     """
@@ -360,7 +380,7 @@ def print_code(code: str, cfg: Optional[Dict[str, Any]] = None, *args, **kwargs)
             finally:
                 win32print.ClosePrinter(h)
         else:
-            return {"ok": True, "info": f"[Mock] Отправлено на принтер «{pr_name}»"}
+            return {"ok": False, "info": f"Печать через Windows Spooler недоступна на этой ОС ({pr_name})"}
     except Exception as e:
         log.error("Ошибка печати на %s: %s", pr_name, e)
         return {"ok": False, "info": f"Сбой отправки на принтер: {e}"}

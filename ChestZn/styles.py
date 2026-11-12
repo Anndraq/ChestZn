@@ -74,6 +74,32 @@ QFrame#warningBanner {
     border-bottom: 1px solid #4a3b1c;
 }
 
+QLabel#bannerIcon, QLabel#bannerLabel {
+    background: transparent;
+    color: #f3d078;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+QPushButton#bannerButton {
+    background-color: #2c2619;
+    border: 1px solid #6b5428;
+    border-radius: 6px;
+    color: #f5deb3;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 4px 14px;
+    min-height: 20px;
+}
+QPushButton#bannerButton:hover {
+    background-color: #3d3320;
+    border-color: #9c7a38;
+    color: #ffffff;
+}
+QPushButton#bannerButton:pressed {
+    background-color: #211c12;
+}
+
 QFrame#sidebar {
     background-color: #131820;
     border-right: 1px solid #262c36;
@@ -587,6 +613,32 @@ QFrame#kpi {
 QFrame#warningBanner {
     background-color: #efe7d6;
     border-bottom: 1px solid #d6c5a3;
+}
+
+QLabel#bannerIcon, QLabel#bannerLabel {
+    background: transparent;
+    color: #5c4314;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+QPushButton#bannerButton {
+    background-color: #e4d8be;
+    border: 1px solid #c2ae84;
+    border-radius: 6px;
+    color: #3f2d0c;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 4px 14px;
+    min-height: 20px;
+}
+QPushButton#bannerButton:hover {
+    background-color: #d8c8a6;
+    border-color: #a68f60;
+    color: #1f1504;
+}
+QPushButton#bannerButton:pressed {
+    background-color: #cbb892;
 }
 
 QCheckBox {
