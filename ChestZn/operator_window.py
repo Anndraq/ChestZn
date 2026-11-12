@@ -89,11 +89,11 @@ class OperatorWindow(QWidget):
     # ==========================================================================
     def _init_ui(self):
         is_lt = self._is_light
-        bg_card = "#f3f5f8" if is_lt else "#0f172a"
-        border_card = "#cfd6e0" if is_lt else "#1e293b"
-        text_main = "#2d3748" if is_lt else "#f8fafc"
-        text_sub = "#5a6778" if is_lt else "#94a3b8"
-        bg_subtle = "#e6eaef" if is_lt else "#1e293b"
+        bg_card = "#e8ecf1" if is_lt else "#0f172a"
+        border_card = "#c2cbd6" if is_lt else "#1e293b"
+        text_main = "#1e293b" if is_lt else "#f8fafc"
+        text_sub = "#475569" if is_lt else "#94a3b8"
+        bg_subtle = "#dde3eb" if is_lt else "#1e293b"
 
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 16, 20, 16)
@@ -196,7 +196,7 @@ class OperatorWindow(QWidget):
         self.batch_progress_widget.setObjectName("batchProgressBox")
         self.batch_progress_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.batch_progress_widget.setMinimumWidth(360)
-        prog_bg = "#f8fafc" if is_lt else "#111827"
+        prog_bg = "#e1e7ef" if is_lt else "#131820"
         self.batch_progress_widget.setStyleSheet(
             f"QFrame#batchProgressBox {{ background:{prog_bg}; border:1px solid {border_card}; border-radius:10px; }}"
         )
@@ -312,7 +312,7 @@ class OperatorWindow(QWidget):
         self.btn_scan = QPushButton("🖨 Напечатать")
         self.btn_scan.setProperty("primary", True)
         self.btn_scan.setMinimumHeight(46)
-        self.btn_scan.setFixedWidth(140)
+        self.btn_scan.setMinimumWidth(160)
         self.btn_scan.setStyleSheet(
             "QPushButton { background:#2e856e; color:#ffffff; font-size:15px; font-weight:700; border-radius:8px; } "
             "QPushButton:hover { background:#246e53; }"
@@ -341,8 +341,9 @@ class OperatorWindow(QWidget):
 
         # Карточка последней напечатанной позиции
         self.last_card = QFrame()
+        self.last_card.setObjectName("lastCard")
         last_card = self.last_card
-        last_card.setStyleSheet(f"background:{bg_card}; border-radius:10px; border:1px solid {border_card};")
+        last_card.setStyleSheet(f"QFrame#lastCard {{ background:{bg_card}; border-radius:10px; border:1px solid {border_card}; }}")
         lc_lay = QVBoxLayout(last_card)
         lc_lay.setContentsMargins(14, 12, 14, 12)
         lc_lay.setSpacing(6)
@@ -369,9 +370,10 @@ class OperatorWindow(QWidget):
 
         # Показатели смены (БЕЗ лимита!)
         self.kpi_card = QFrame()
+        self.kpi_card.setObjectName("kpiCard")
         kpi_card = self.kpi_card
         self.kpi_lbls = []
-        kpi_card.setStyleSheet(f"background:{bg_card}; border-radius:10px; border:1px solid {border_card};")
+        kpi_card.setStyleSheet(f"QFrame#kpiCard {{ background:{bg_card}; border-radius:10px; border:1px solid {border_card}; }}")
         kc_lay = QHBoxLayout(kpi_card)
         kc_lay.setContentsMargins(14, 10, 14, 10)
         kc_lay.setSpacing(16)
@@ -434,13 +436,13 @@ class OperatorWindow(QWidget):
         """Проверяет реальный статус принтера и сканера: если принтер отключён — блокирует сканирование."""
         try:
             is_lt = self._is_light
-            ok_bg = "#eaf5f0" if is_lt else "#11241d"
+            ok_bg = "#dfece6" if is_lt else "#11241d"
             ok_fg = "#246e53" if is_lt else "#6ee7b7"
             ok_bd = "#b3d9c9" if is_lt else "#2b5c49"
 
-            err_bg = "#f9ecee" if is_lt else "#24171a"
+            err_bg = "#eedee0" if is_lt else "#24171a"
             err_fg = "#9f3a44" if is_lt else "#e5989b"
-            err_bd = "#e2b6bc" if is_lt else "#6b343b"
+            err_bd = "#d6b0b5" if is_lt else "#6b343b"
 
             # 1. Проверка статуса сканера
             live_scanners = []
@@ -880,8 +882,8 @@ class OperatorWindow(QWidget):
         """Встроенный цветовой статус без блокирующих диалогов (мягкая палитра)."""
         is_lt = self._is_light
         if kind == "error":
-            err_bg = "#fbf2f3" if is_lt else "#24171a"
-            err_bd = "#e2b6bc" if is_lt else "#6b343b"
+            err_bg = "#eedee0" if is_lt else "#24171a"
+            err_bd = "#d6b0b5" if is_lt else "#6b343b"
             err_fg = "#9f3a44" if is_lt else "#e5989b"
             err_sub = "#b05b63" if is_lt else "#c9888c"
             self.status_card.setStyleSheet(f"QFrame#statusCard {{ background:{err_bg}; border-radius:12px; border:1px solid {err_bd}; }}")
@@ -890,7 +892,7 @@ class OperatorWindow(QWidget):
             self.lbl_status_sub.setText(sub or "Отсканируйте следующий штрихкод для сброса ошибки")
             self.lbl_status_sub.setStyleSheet(f"color:{err_sub}; font-size:13px; background:transparent;")
         elif kind == "success":
-            ok_bg = "#edf7f2" if is_lt else "#11241d"
+            ok_bg = "#dfece6" if is_lt else "#11241d"
             ok_bd = "#b3d9c9" if is_lt else "#2b5c49"
             ok_fg = "#246e53" if is_lt else "#6ee7b7"
             ok_sub = "#3b8269" if is_lt else "#a7f3d0"
@@ -901,7 +903,7 @@ class OperatorWindow(QWidget):
             self.lbl_status_sub.setStyleSheet(f"color:{ok_sub}; font-size:13px; background:transparent;")
         else:
             border_c = "#3b6ea5"
-            bg_c = "#f3f5f8" if is_lt else "#161c24"
+            bg_c = "#e8ecf1" if is_lt else "#161b22"
             text_s = "#5a6778" if is_lt else "#8b97a6"
             self.status_card.setStyleSheet(f"QFrame#statusCard {{ background:{bg_c}; border-radius:12px; border:2px solid {border_c}; }}")
             self.lbl_status.setText(message)
@@ -997,31 +999,31 @@ class OperatorWindow(QWidget):
         self._is_light = is_lt
 
         if is_lt:
-            bg_main = "#eef1f5"
-            bg_card = "#f3f5f8"
-            bg_subtle = "#e6eaef"
-            border_card = "#cfd6e0"
-            text_main = "#2d3748"
-            text_sub = "#5a6778"
-            disabled_bg = "#e2e8f0"
+            bg_main = "#dce2ea"
+            bg_card = "#e8ecf1"
+            bg_subtle = "#dde3eb"
+            border_card = "#c2cbd6"
+            text_main = "#1e293b"
+            text_sub = "#475569"
+            disabled_bg = "#d4dbe4"
             disabled_fg = "#94a3b8"
             disabled_bd = "#cbd5e1"
             reprint_hover = "#cbd5e1"
             clear_bg = "#fef2f2"
             clear_bd = "#fecaca"
         else:
-            bg_main = "#0d1117"
-            bg_card = "#161c24"
-            bg_subtle = "#0f172a"
-            border_card = "#2a3542"
+            bg_main = "#0f1419"
+            bg_card = "#161b22"
+            bg_subtle = "#1c2129"
+            border_card = "#30363d"
             text_main = "#e6edf3"
-            text_sub = "#8b97a6"
-            disabled_bg = "#1e293b"
-            disabled_fg = "#64748b"
-            disabled_bd = "#334155"
-            reprint_hover = "#334155"
-            clear_bg = "#2a1215"
-            clear_bd = "#7f1d1d"
+            text_sub = "#8b949e"
+            disabled_bg = "#161b22"
+            disabled_fg = "#6e7681"
+            disabled_bd = "#30363d"
+            reprint_hover = "#30363d"
+            clear_bg = "#24171a"
+            clear_bd = "#6b343b"
 
         self.setStyleSheet(f"OperatorWindow {{ background:{bg_main}; }}")
 
@@ -1043,7 +1045,7 @@ class OperatorWindow(QWidget):
         if hasattr(self, "lbl_batch_sub"):
             self.lbl_batch_sub.setStyleSheet(f"color:{text_sub}; font-size:12px; background:transparent;")
         if hasattr(self, "batch_progress_widget"):
-            prog_bg = "#f8fafc" if is_lt else "#111827"
+            prog_bg = "#e1e7ef" if is_lt else "#131820"
             self.batch_progress_widget.setStyleSheet(
                 f"QFrame#batchProgressBox {{ background:{prog_bg}; border:1px solid {border_card}; border-radius:10px; }}"
             )
@@ -1086,7 +1088,7 @@ class OperatorWindow(QWidget):
             )
 
         if hasattr(self, "last_card"):
-            self.last_card.setStyleSheet(f"background:{bg_card}; border-radius:10px; border:1px solid {border_card};")
+            self.last_card.setStyleSheet(f"QFrame#lastCard {{ background:{bg_card}; border-radius:10px; border:1px solid {border_card}; }}")
         if hasattr(self, "lc_title"):
             self.lc_title.setStyleSheet(f"color:{text_sub}; font-size:12px; font-weight:700; letter-spacing:1px; background:transparent;")
         if hasattr(self, "lbl_last_product"):
@@ -1097,7 +1099,7 @@ class OperatorWindow(QWidget):
             self.lbl_last_dm.setStyleSheet("font-family:Consolas,monospace; color:#2e856e; font-size:12px; background:transparent;")
 
         if hasattr(self, "kpi_card"):
-            self.kpi_card.setStyleSheet(f"background:{bg_card}; border-radius:10px; border:1px solid {border_card};")
+            self.kpi_card.setStyleSheet(f"QFrame#kpiCard {{ background:{bg_card}; border-radius:10px; border:1px solid {border_card}; }}")
         for lbl in getattr(self, "kpi_lbls", []):
             lbl.setStyleSheet(f"color:{text_sub}; font-size:12px; font-weight:600; background:transparent;")
 

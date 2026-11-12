@@ -49,7 +49,8 @@ def table(headers: list) -> QTableWidget:
     t.setEditTriggers(QAbstractItemView.NoEditTriggers)
     t.setSelectionBehavior(QAbstractItemView.SelectRows)
     t.setShowGrid(False)
-    t.setAlternatingRowColors(False)
+    t.setAlternatingRowColors(True)
+    t.verticalHeader().setDefaultSectionSize(34)
     return t
 
 
@@ -419,7 +420,8 @@ class AdminWindow(QWidget):
         pts_head.addStretch(1)
 
         self.dash_route_lbl = QLabel("")
-        self.dash_route_lbl.setStyleSheet("color:#4ade80; font-family:Consolas,monospace; font-size:12px; font-weight:600;")
+        dr_col = "#216149" if _is_light_theme() else "#4ade80"
+        self.dash_route_lbl.setStyleSheet(f"color:{dr_col}; font-family:Consolas,monospace; font-size:12px; font-weight:600;")
         pts_head.addWidget(self.dash_route_lbl)
         pv.addLayout(pts_head)
 
@@ -659,8 +661,12 @@ class AdminWindow(QWidget):
                 for sc, pr, is_on in active_full_pairs:
                     status_icon = "🟢" if is_on else "🔴"
                     parts.append(f"📡 {sc} → 🖨 {pr} {status_icon}")
+                ok_col = "#216149" if _is_light_theme() else "#4ade80"
+                self.dash_route_lbl.setStyleSheet(f"color:{ok_col}; font-family:Consolas,monospace; font-size:12px; font-weight:600;")
                 self.dash_route_lbl.setText("  |  ".join(parts))
             else:
+                err_col = "#9f3a44" if _is_light_theme() else "#f87171"
+                self.dash_route_lbl.setStyleSheet(f"color:{err_col}; font-family:Consolas,monospace; font-size:12px; font-weight:600;")
                 self.dash_route_lbl.setText("🔴 Нет активных подключенных устройств")
 
         if hasattr(self, "dash_points_table"):
@@ -5243,12 +5249,14 @@ class AdminWindow(QWidget):
         tt.setStyleSheet("font-size:18px; font-weight:600;")
         v.addWidget(tt)
 
-        sub = QLabel(
+        self.backup_sub_lbl = QLabel(
             f"Папка: {BACKUP_DIR}  ·  "
             f"Автоматическое создание бэкапа: раз в {AUTO_BACKUP_INTERVAL_DAYS} дней (2 недели)  ·  "
             f"Автоматическое удаление старых копий: старше {BACKUP_RETENTION_DAYS} дней (6 месяцев)"
         )
-        sub.setStyleSheet("color:#34d399; font-size:12px; font-weight:500;")
+        sub = self.backup_sub_lbl
+        bkp_col = "#216149" if _is_light_theme() else "#34d399"
+        sub.setStyleSheet(f"color:{bkp_col}; font-size:12px; font-weight:600;")
         sub.setTextInteractionFlags(Qt.TextSelectableByMouse)
         sub.setWordWrap(True)
         v.addWidget(sub)
@@ -5295,6 +5303,8 @@ class AdminWindow(QWidget):
         self.backup_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.backup_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.backup_table.setShowGrid(False)
+        self.backup_table.setAlternatingRowColors(True)
+        self.backup_table.verticalHeader().setDefaultSectionSize(34)
         v.addWidget(self.backup_table, stretch=1)
 
         self.backup_status = QLabel("")
@@ -6225,7 +6235,7 @@ class AdminWindow(QWidget):
             }
             /* Поля ввода, спинбоксы и комбобоксы */
             QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {
-                background-color: #ebeff4;
+                background-color: #dde3eb;
                 color: #2d3748;
                 border: 1px solid #c4cdd8;
                 border-radius: 7px;
@@ -6249,7 +6259,7 @@ class AdminWindow(QWidget):
             }
             /* Кнопки (вторичные — спокойные матовые, основные — благородный джинсовый синий) */
             QPushButton {
-                background-color: #ebeff4;
+                background-color: #dde3eb;
                 color: #2d3748;
                 border: 1px solid #c4cdd8;
                 border-radius: 8px;
@@ -6305,7 +6315,7 @@ class AdminWindow(QWidget):
             /* Таблицы QTableWidget — приглушённый бумажный фон #f3f5f8 без слепящих пятен */
             QTableWidget {
                 background-color: #f3f5f8;
-                alternate-background-color: #ebeff4;
+                alternate-background-color: #dde3eb;
                 color: #2d3748;
                 border: 1px solid #cfd6e0;
                 border-radius: 10px;
@@ -6325,18 +6335,18 @@ class AdminWindow(QWidget):
                 font-weight: 600;
             }
             QHeaderView::section:horizontal {
-                background-color: #e4e9f0;
+                background-color: #dde3eb;
                 color: #4a5568;
                 font-size: 11px;
                 font-weight: 700;
                 padding: 8px 10px;
                 border: none;
-                border-bottom: 1px solid #cbd2dc;
+                border-bottom: 1px solid #c2cbd6;
                 border-right: 1px solid #d8dfe8;
             }
             QTableWidget QTableCornerButton::section,
             QHeaderView::section:vertical {
-                background-color: #e4e9f0;
+                background-color: #dde3eb;
                 color: #64748b;
                 border: none;
                 border-right: 1px solid #cbd2dc;
@@ -6462,15 +6472,15 @@ class AdminWindow(QWidget):
         if is_lt:
             tree_qss = """
                 QTreeWidget {
-                    background-color: #f3f5f8;
-                    border: 1px solid #cfd6e0;
+                    background-color: #e8ecf1;
+                    border: 1px solid #c2cbd6;
                     border-radius: 10px;
                     color: #1e293b;
                     outline: none;
                 }
                 QTreeWidget::item {
                     padding: 9px 6px;
-                    border-bottom: 1px solid #e2e8f0;
+                    border-bottom: 1px solid #d4dce6;
                     min-height: 26px;
                     color: #1e293b;
                 }
@@ -6480,15 +6490,15 @@ class AdminWindow(QWidget):
                     font-weight: 600;
                 }
                 QTreeWidget::item:hover:!selected {
-                    background-color: #ebeff4;
+                    background-color: #dde3eb;
                 }
                 QTreeWidget::branch { background: transparent; }
                 QHeaderView::section {
-                    background-color: #e4e9f0;
+                    background-color: #dde3eb;
                     color: #475569;
                     padding: 10px 10px;
                     border: none;
-                    border-bottom: 1px solid #cbd2dc;
+                    border-bottom: 1px solid #c2cbd6;
                     font-size: 11px;
                     font-weight: 700;
                     letter-spacing: .5px;
@@ -6540,7 +6550,7 @@ class AdminWindow(QWidget):
         if hasattr(self, "sync_log"):
             if is_lt:
                 self.sync_log.setStyleSheet(
-                    "background:#ebeff4; color:#2d3748; font-family:Consolas,monospace; font-size:12px; "
+                    "background:#e3e8ee; color:#1e293b; font-family:Consolas,monospace; font-size:12px; "
                     "border:1px solid #cfd6e0; border-radius:8px; padding:10px;"
                 )
             else:
@@ -6550,6 +6560,13 @@ class AdminWindow(QWidget):
                 )
 
         sec_col = "#2d3748" if is_lt else "#e6edf3"
+        if hasattr(self, "backup_sub_lbl"):
+            bkp_col = "#216149" if is_lt else "#34d399"
+            self.backup_sub_lbl.setStyleSheet(f"color:{bkp_col}; font-size:12px; font-weight:600;")
+        if hasattr(self, "dash_route_lbl"):
+            dr_col = "#216149" if is_lt else "#4ade80"
+            self.dash_route_lbl.setStyleSheet(f"color:{dr_col}; font-family:Consolas,monospace; font-size:12px; font-weight:600;")
+
         for lbl_s in (getattr(self, "sec_title1", None), getattr(self, "sec_title2", None)):
             if lbl_s is not None:
                 lbl_s.setStyleSheet(f"color:{sec_col}; font-size:14px; font-weight:700;")

@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout,
     QHBoxLayout, QLabel, QFrame, QMessageBox
 )
+from PySide6.QtGui import QIcon
 from PySide6.QtCore import Qt, QTimer
 
 import docs_helper
@@ -27,34 +28,46 @@ from security_question_window import SecurityQuestionWindow
 ADMIN_LOGIN = "admin"
 
 
+def _resolve_app_icon() -> QIcon:
+    base_dir = Path(__file__).resolve().parent
+    for name in ("app.ico", "logo.png"):
+        p = base_dir / name
+        if p.exists():
+            return QIcon(str(p))
+    return QIcon()
+
+
 class MainWindow(QMainWindow):
     def __init__(self, initial_problems: list = None, store: Optional[Store] = None):
         super().__init__()
-        self.setWindowTitle("ChestZn · Маркировка")
+        self.setWindowTitle("Dotmark · Маркировка")
+        icon = _resolve_app_icon()
+        if not icon.isNull():
+            self.setWindowIcon(icon)
         self.resize(1360, 900)
 
-        # ---------- Загрузка конфига ----------
+        # --------- Загрузка конфига ---------
         from printer import load_config, save_config, detect_point, autodetect
         cfg = load_config()
 
-        # ---------- Определение точки ----------
+        # --------- Определение точки ---------
         point = detect_point(cfg)
         if not point:
             point = "T-01"
-            print(f"[ChestZn] Точка не задана в config.json, используется по умолчанию: {point}")
+            print(f"[Dotmark] Точка не задана в config.json, используется по умолчанию: {point}")
         else:
-            print(f"[ChestZn] Точка определена: {point}")
+            print(f"[Dotmark] Точка определена: {point}")
 
-        # ---------- Создание / переиспользование Store ----------
+        # --------- Создание / переиспользование Store ---------
         self.store = store if store is not None else Store()
         self.store.current_point = point
 
-        # ---------- Оператор по точке ----------
+        # --------- Оператор по точке ---------
         operator = self._operator_for_point(point)
         self.store.current_operator = operator
-        print(f"[ChestZn] Оператор: {operator}")
+        print(f"[Dotmark] Оператор: {operator}")
 
-        # ---------- Автоопределение принтера ----------
+        # --------- Автоопределение принтера ---------
         if not cfg.get("printer_name") and not cfg.get("printer_ip"):
             result = autodetect()
             if result.get("suggested"):
@@ -64,33 +77,33 @@ class MainWindow(QMainWindow):
                 cfg["printer_name"] = p_name
                 cfg["printer_lang"] = p_lang
                 save_config(cfg)
-                print(f"[ChestZn] Принтер определён: {p_name} ({p_lang})")
+                print(f"[Dotmark] Принтер определён: {p_name} ({p_lang})")
             else:
-                print("[ChestZn] Принтеры не найдены — настройте вручную в админке")
+                print("[Dotmark] Принтеры не найдены — настройте вручную в админке")
         else:
-            print(f"[ChestZn] Общий принтер из настроек: {cfg.get('printer_name')} ({cfg.get('printer_lang')})")
+            print(f"[Dotmark] Общий принтер из настроек: {cfg.get('printer_name')} ({cfg.get('printer_lang')})")
 
         printers = cfg.get("printers") or {}
         if point in printers:
             p = printers[point]
-            print(f"[ChestZn] Принтер для точки {point}: {p.get('printer_name', '?')} ({p.get('printer_lang', 'auto')})")
+            print(f"[Dotmark] Принтер для точки {point}: {p.get('printer_name', '?')} ({p.get('printer_lang', 'auto')})")
 
-        # ---------- Флаг: админ авторизован? ----------
+        # --------- Флаг: админ авторизован? ---------
         self.admin_authenticated = False
 
-        # ---------- Оверлей для размытия ----------
-        self._overlay = None
+        # --------- Оверлей для размытия ---------
+        self.overlay = None
 
-        # ---------- Проблемы при старте ----------
+        # --------- Проблемы при старте ---------
         self._initial_problems = initial_problems or []
 
-        # ---------- Корневой виджет ----------
+        # --------- Корневой виджет ---------
         root = QWidget()
-        self._root_layout = QVBoxLayout(root)
-        self._root_layout.setContentsMargins(0, 0, 0, 0)
-        self._root_layout.setSpacing(0)
+        self.root_layout = QVBoxLayout(root)
+        self.root_layout.setContentsMargins(0, 0, 0, 0)
+        self.root_layout.setSpacing(0)
 
-        # ---------- Баннер предупреждений ----------
+        # --------- Баннер предупреждений ---------
         self.banner = None
         if self._initial_problems:
             warnings_only = [
@@ -100,9 +113,9 @@ class MainWindow(QMainWindow):
             if warnings_only:
                 self.banner = WarningBanner(warnings_only)
                 self.banner.details_clicked.connect(self.show_problems_window)
-                self._root_layout.addWidget(self.banner)
+                self.root_layout.addWidget(self.banner)
 
-        # ---------- Шапка ----------
+        # --------- Шапка ---------
         header = QFrame()
         header.setObjectName("header")
         header.setFixedHeight(50)
@@ -111,7 +124,7 @@ class MainWindow(QMainWindow):
         h.setContentsMargins(20, 8, 20, 8)
         h.setSpacing(12)
 
-        brand = QLabel("📦  CHESTZN · МАРКИРОВКА")
+        brand = QLabel("📦  DOTMARK · МАРКИРОВКА")
         brand.setObjectName("brand")
         h.addWidget(brand)
 
@@ -122,7 +135,7 @@ class MainWindow(QMainWindow):
         h.addSpacing(16)
 
         # Точка в шапке
-        point_badge = QLabel(f"● {point}")
+        point_badge = QLabel(f"• {point}")
         point_badge.setObjectName("pointBadge")
         h.addWidget(point_badge)
 
@@ -160,7 +173,7 @@ class MainWindow(QMainWindow):
         meta_online.setObjectName("meta")
         h.addWidget(meta_online)
 
-        ok = QLabel("● онлайн")
+        ok = QLabel("• онлайн")
         ok.setObjectName("okDot")
         h.addWidget(ok)
 
@@ -174,9 +187,9 @@ class MainWindow(QMainWindow):
         avatar.setAlignment(Qt.AlignCenter)
         h.addWidget(avatar)
 
-        self._root_layout.addWidget(header)
+        self.root_layout.addWidget(header)
 
-        # ---------- Вкладки ----------
+        # --------- Вкладки ---------
         self.tabs = QTabWidget()
         self.operator = OperatorWindow(self.store)
         self.admin    = AdminWindow(self.store)
@@ -186,7 +199,7 @@ class MainWindow(QMainWindow):
 
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
-        self._root_layout.addWidget(self.tabs, stretch=1)
+        self.root_layout.addWidget(self.tabs, stretch=1)
 
         self.setCentralWidget(root)
 
@@ -194,16 +207,16 @@ class MainWindow(QMainWindow):
         self._last_banner_sig = None
         self._device_poll_timer = QTimer(self)
         self._device_poll_timer.setInterval(3000)
-        self._device_poll_timer.timeout.connect(self._poll_devices_status)
+        self._device_poll_timer.timeout.connect(self.poll_devices_status)
         self._device_poll_timer.start()
 
-        QTimer.singleShot(150, self._poll_devices_status)
+        QTimer.singleShot(150, self.poll_devices_status)
 
-        print("[ChestZn] MainWindow создан, размер:", self.size())
-        print("[ChestZn] вкладок:", self.tabs.count())
-        print(f"[ChestZn] Точка работы: {point} · Оператор: {operator}")
+        print("[Dotmark] MainWindow создан, размер:", self.size())
+        print("[Dotmark] вкладок:", self.tabs.count())
+        print(f"[Dotmark] Точка работы: {point} · Оператор: {operator}")
 
-    # ------------------------------------------------------------------
+    # -----------------------------------------------------------------
     def _point_name(self, point_id: str) -> str:
         """Название точки по ID."""
         for p in self.store.points:
@@ -228,8 +241,8 @@ class MainWindow(QMainWindow):
             badge.style().unpolish(badge)
             badge.style().polish(badge)
 
-    # ------------------------------------------------------------------
-    def _poll_devices_status(self):
+    # -----------------------------------------------------------------
+    def poll_devices_status(self):
         """Неблокирующее обновление статусов принтера и сканера из асинхронного кэша."""
         try:
             from device_discovery import detect_local_printers, detect_local_scanners
@@ -286,7 +299,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-    # ------------------------------------------------------------------
+    # -----------------------------------------------------------------
     def show_problems_window(self):
         """Показать окно проблем."""
         win = StartupProblemsWindow(self.store, self)
@@ -294,7 +307,7 @@ class MainWindow(QMainWindow):
         win.exec()
         self.update_banner(win.problems)
 
-    # ------------------------------------------------------------------
+    # -----------------------------------------------------------------
     def update_banner(self, problems: list):
         """Обновить или скрыть баннер."""
         warnings_only = [p for p in problems if p.get("status") != "ok"]
@@ -303,7 +316,7 @@ class MainWindow(QMainWindow):
             if self.banner is None:
                 self.banner = WarningBanner(warnings_only)
                 self.banner.details_clicked.connect(self.show_problems_window)
-                self._root_layout.insertWidget(0, self.banner)
+                self.root_layout.insertWidget(0, self.banner)
             else:
                 self.banner.update_problems(warnings_only)
                 self.banner.show()
@@ -311,7 +324,7 @@ class MainWindow(QMainWindow):
             if self.banner is not None:
                 self.banner.hide()
 
-    # ------------------------------------------------------------------
+    # -----------------------------------------------------------------
     def _on_tab_changed(self, idx: int):
         """При клике на «Админ» — требуем пароль."""
         if idx != 1:
@@ -338,9 +351,9 @@ class MainWindow(QMainWindow):
             self._return_to_operator("Нет прав администратора")
             return
 
-        # ---------- Секретный вопрос ----------
+        # --------- Секретный вопрос ---------
         if not self.store.has_security_question(login.user["login"]):
-            print("[ChestZn] Секретный вопрос не настроен — принудительная настройка")
+            print("[Dotmark] Секретный вопрос не настроен — принудительная настройка")
 
             QApplication.processEvents()
             self._set_blur(True)
@@ -361,20 +374,20 @@ class MainWindow(QMainWindow):
                 self._return_to_operator("Настройка восстановления не завершена")
                 return
 
-        # ---------- Пускаем в админку ----------
+        # --------- Пускаем в админку ---------
         self.admin_authenticated = True
         self.admin.switch("dashboard")
-        print(f"[ChestZn] Админ авторизован: {login.user['fio']}")
+        print(f"[Dotmark] Админ авторизован: {login.user['fio']}")
 
-    # ------------------------------------------------------------------
+    # -----------------------------------------------------------------
     def _return_to_operator(self, message: str = ""):
         self.tabs.blockSignals(True)
         self.tabs.setCurrentIndex(0)
         self.tabs.blockSignals(False)
         if message:
-            print(f"[ChestZn] {message}")
+            print(f"[Dotmark] {message}")
 
-    # ------------------------------------------------------------------
+    # -----------------------------------------------------------------
     def _set_blur(self, enabled: bool):
         if enabled:
             self._overlay = self._create_blur_overlay()
@@ -431,47 +444,50 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
+    icon = _resolve_app_icon()
+    if not icon.isNull():
+        app.setWindowIcon(icon)
 
-    # ---------- Загрузка темы из настроек ----------
+    # --------- Загрузка темы из настроек ---------
     theme = get_current_theme(force_reload=True)
     app.setStyleSheet(get_qss(theme))
 
-    # ---------- 1. Скопировать руководства ----------
+    # --------- 1. Скопировать руководства ---------
     docs_helper.ensure_docs_copied()
 
-    # ---------- 2. Проверить состояние ----------
+    # --------- 2. Проверить состояние ---------
     problems = check_all()
 
     critical = has_critical(problems)
     warnings = has_warnings(problems)
 
-    print(f"[ChestZn] Проверка при запуске: критических={critical}, предупреждений={warnings}")
+    print(f"[Dotmark] Проверка при запуске: критических={critical}, предупреждений={warnings}")
 
-    # ---------- 3. Показать окно проблем ВСЕГДА ----------
+    # --------- 3. Показать окно проблем ВСЕГДА ---------
     try:
         store_for_dialog = Store()
     except Exception as e:
         store_for_dialog = None
-        print(f"[ChestZn] Store не создан: {e}")
+        print(f"[Dotmark] Store не создан: {e}")
 
     dlg = StartupProblemsWindow(store_for_dialog, parent=None)
     result = dlg.exec()
 
     # Если критические — не пускаем
     if has_critical(dlg.problems):
-        print("[ChestZn] Критические проблемы — выход")
+        print("[Dotmark] Критические проблемы — выход")
         sys.exit(1)
 
     # Если оператор закрыл окно без «Продолжить» — выход
     if result != StartupProblemsWindow.Accepted:
-        print("[ChestZn] Оператор закрыл окно проблем — выход")
+        print("[Dotmark] Оператор закрыл окно проблем — выход")
         sys.exit(0)
 
-    # ---------- 4. Открыть главное окно ----------
+    # --------- 4. Открыть главное окно ---------
     win = MainWindow(initial_problems=dlg.problems, store=store_for_dialog)
     win.show()
 
-    print("[ChestZn] Окно показано, visible:", win.isVisible())
+    print(f"[Dotmark] Окно показано, visible:", win.isVisible())
     sys.exit(app.exec())
 
 

@@ -1,8 +1,7 @@
 """
-Окно сводки проблем при запуске.
-Показывает состояние ключа, БД, принтера, Ghostscript.
-Кнопки действий: открыть руководство, скачать GS, открыть папку,
-обновить, сохранить отчёт, скопировать текст, перезапустить.
+Окно сводки проблем при запуске (startup_problems_window.py).
+Показывает состояние ключа, БД, принтера, сканера, Ghostscript.
+Полностью адаптировано под мягкую светлую и тёмную темы Dotmark.
 """
 import os
 import sys
@@ -14,7 +13,7 @@ from PySide6.QtWidgets import (
     QPushButton, QScrollArea, QWidget, QApplication, QMessageBox
 )
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QShortcut, QKeySequence, QGuiApplication
+from PySide6.QtGui import QShortcut, QKeySequence, QGuiApplication, QIcon
 
 import docs_helper
 import admin_guard
@@ -22,10 +21,9 @@ from startup_check import (
     check_all, has_critical, has_warnings, CRITICAL, WARNING
 )
 
-
 ICONS = {
-    "ok":      ("✓",  "#22c55e"),
-    "warning": ("⚠",  "#f59e0b"),
+    "ok":      ("✓", "#22c55e"),
+    "warning": ("⚠️", "#d97706"),
     "error":   ("❌", "#ef4444"),
 }
 
@@ -37,7 +35,6 @@ class StartupProblemsWindow(QDialog):
     reject() — «Закрыть приложение».
     """
 
-    # Сигнал: проблемы обновились (эмитится при «Обновить список»)
     problems_changed = Signal(list)
 
     def __init__(self, store, parent=None):
@@ -45,17 +42,24 @@ class StartupProblemsWindow(QDialog):
         self.store = store
         self.problems = []
 
-        self.setWindowTitle("ChestZn · Проверка при запуске")
+        self.setWindowTitle("Dotmark · Проверка при запуске")
+        base_dir = Path(__file__).resolve().parent
+        for icon_name in ("app.ico", "logo.png"):
+            ip = base_dir / icon_name
+            if ip.exists():
+                self.setWindowIcon(QIcon(str(ip)))
+                break
+
         self.setModal(True)
-        self.setMinimumSize(620, 620)
+        self.setMinimumSize(640, 620)
         self.setObjectName("startupWindow")
 
-        # ---------- Корневой layout ----------
+        # --------- Корневой layout ---------
         root = QVBoxLayout(self)
         root.setContentsMargins(28, 24, 28, 24)
         root.setSpacing(14)
 
-        # ---------- Заголовок ----------
+        # --------- Заголовок ---------
         self.title = QLabel("")
         self.title.setObjectName("startupTitle")
         self.title.setAlignment(Qt.AlignCenter)
@@ -69,7 +73,7 @@ class StartupProblemsWindow(QDialog):
 
         root.addSpacing(4)
 
-        # ---------- Область скролла ----------
+        # --------- Область скролла ---------
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.NoFrame)
@@ -77,15 +81,14 @@ class StartupProblemsWindow(QDialog):
         self.scroll_content = QWidget()
         self.scroll_content.setObjectName("scrollContent")
         self.scroll_layout = QVBoxLayout(self.scroll_content)
-        self.scroll_layout.setContentsMargins(0, 0, 0, 0)
-        self.scroll_layout.setSpacing(8)
+        self.scroll_layout.setContentsMargins(0, 0, 4, 0)
+        self.scroll_layout.setSpacing(10)
         self.scroll_layout.addStretch(1)
 
         self.scroll.setWidget(self.scroll_content)
         root.addWidget(self.scroll, stretch=1)
 
-        # ---------- Кнопки внизу ----------
-        # Ряд 1: вспомогательные
+        # --------- Кнопки внизу ---------
         aux_row = QHBoxLayout()
         aux_row.setSpacing(8)
 
@@ -111,14 +114,12 @@ class StartupProblemsWindow(QDialog):
         aux_row.addWidget(self.btn_docs, stretch=1)
         root.addLayout(aux_row)
 
-        # Ряд 2: перезапуск
         self.btn_restart = QPushButton("🔁 Перезапустить приложение")
         self.btn_restart.setObjectName("restartButton")
         self.btn_restart.setMinimumHeight(36)
         self.btn_restart.clicked.connect(self.restart_app)
         root.addWidget(self.btn_restart)
 
-        # Ряд 3: основные кнопки
         buttons = QHBoxLayout()
         buttons.setSpacing(10)
 
@@ -130,6 +131,7 @@ class StartupProblemsWindow(QDialog):
 
         self.btn_continue = QPushButton("Продолжить")
         self.btn_continue.setObjectName("continueButton")
+        self.btn_continue.setProperty("primary", True)
         self.btn_continue.setMinimumHeight(42)
         self.btn_continue.setDefault(True)
         self.btn_continue.clicked.connect(self.accept)
@@ -138,12 +140,117 @@ class StartupProblemsWindow(QDialog):
         buttons.addWidget(self.btn_continue, stretch=2)
         root.addLayout(buttons)
 
-        # ---------- Горячие клавиши ----------
+        # --------- Тема окна ---------
+        self._apply_theme()
+
+        # --------- Горячие клавиши ---------
         QShortcut(QKeySequence("Escape"), self, self.reject)
         QShortcut(QKeySequence("F5"),     self, self.refresh_problems)
 
-        # ---------- Первичная отрисовка ----------
+        # --------- Первичная отрисовка ---------
         self.refresh_problems()
+
+    # ------------------------------------------------------------------
+    def _apply_theme(self):
+        try:
+            from styles import is_light_theme
+            is_lt = is_light_theme()
+        except Exception:
+            is_lt = False
+
+        if is_lt:
+            win_bg = "#dce2ea"
+            card_bg = "#e8ecf1"
+            card_bd = "#c2cbd6"
+            text_main = "#1e293b"
+            text_sub = "#475569"
+            title_warn = "#9a5b13"
+            title_crit = "#9f3a44"
+            title_ok = "#216149"
+            msg_ok = "#216149"
+            msg_warn = "#9a5b13"
+            msg_err = "#9f3a44"
+        else:
+            win_bg = "#0f1419"
+            card_bg = "#161b22"
+            card_bd = "#30363d"
+            text_main = "#e6edf3"
+            text_sub = "#8b949e"
+            title_warn = "#f59e0b"
+            title_crit = "#f87171"
+            title_ok = "#4ade80"
+            msg_ok = "#4ade80"
+            msg_warn = "#fbbf24"
+            msg_err = "#f87171"
+
+        self.setStyleSheet(f"""
+            QDialog#startupWindow {{
+                background-color: {win_bg};
+                color: {text_main};
+            }}
+            QScrollArea {{
+                background-color: transparent;
+                border: none;
+            }}
+            QScrollArea > QWidget > QWidget {{
+                background-color: transparent;
+            }}
+            QWidget#scrollContent {{
+                background-color: transparent;
+            }}
+            QLabel#startupTitle {{
+                font-size: 18px;
+                font-weight: 700;
+                background: transparent;
+                color: {text_main};
+            }}
+            QLabel#startupTitle[state="warning"] {{
+                color: {title_warn};
+            }}
+            QLabel#startupTitle[state="critical"] {{
+                color: {title_crit};
+            }}
+            QLabel#startupTitle[state="ok"] {{
+                color: {title_ok};
+            }}
+            QLabel#startupSubtitle {{
+                font-size: 13px;
+                color: {text_sub};
+                background: transparent;
+            }}
+            QFrame#problemCard {{
+                background-color: {card_bg};
+                border: 1px solid {card_bd};
+                border-radius: 10px;
+            }}
+            QLabel#problemIcon {{
+                font-size: 15px;
+                font-weight: 700;
+                background: transparent;
+            }}
+            QLabel#problemIcon[color="ok"] {{ color: {msg_ok}; }}
+            QLabel#problemIcon[color="warning"] {{ color: {msg_warn}; }}
+            QLabel#problemIcon[color="error"] {{ color: {msg_err}; }}
+            QLabel#problemName {{
+                font-size: 14px;
+                font-weight: 700;
+                color: {text_main};
+                background: transparent;
+            }}
+            QLabel#problemMessage {{
+                font-size: 13px;
+                font-weight: 600;
+                background: transparent;
+            }}
+            QLabel#problemMessage[color="ok"] {{ color: {msg_ok}; }}
+            QLabel#problemMessage[color="warning"] {{ color: {msg_warn}; }}
+            QLabel#problemMessage[color="error"] {{ color: {msg_err}; }}
+            QLabel#problemHint {{
+                font-size: 12px;
+                color: {text_sub};
+                background: transparent;
+            }}
+        """)
 
     # ------------------------------------------------------------------
     def refresh_problems(self):
@@ -165,22 +272,19 @@ class StartupProblemsWindow(QDialog):
         self._critical = has_critical(problems)
         self._warnings = has_warnings(problems)
 
-        # Заголовок
         if self._critical:
             self.title.setText("❌  КРИТИЧЕСКИЕ ПРОБЛЕМЫ")
             self.title.setProperty("state", "critical")
         elif self._warnings:
-            self.title.setText("⚠  ОБНАРУЖЕНЫ ПРОБЛЕМЫ")
+            self.title.setText("⚠️  ОБНАРУЖЕНЫ ПРОБЛЕМЫ")
             self.title.setProperty("state", "warning")
         else:
             self.title.setText("✓  ВСЁ В ПОРЯДКЕ")
             self.title.setProperty("state", "ok")
 
-        # Переприменить стиль после изменения property
         self.title.style().unpolish(self.title)
         self.title.style().polish(self.title)
 
-        # Subtitle
         if self._critical:
             self.subtitle.setText(
                 "Запуск заблокирован. Обратитесь к администратору."
@@ -192,19 +296,16 @@ class StartupProblemsWindow(QDialog):
         else:
             self.subtitle.setText("Можно продолжать работу.")
 
-        # Очистить старые карточки
         while self.scroll_layout.count() > 1:
             item = self.scroll_layout.takeAt(0)
             w = item.widget()
             if w:
                 w.deleteLater()
 
-        # Добавить новые
         for p in problems:
             card = self._make_problem_card(p)
             self.scroll_layout.insertWidget(self.scroll_layout.count() - 1, card)
 
-        # Кнопка «Продолжить» — блокируется при критических
         self.btn_continue.setEnabled(not self._critical)
         if self._critical:
             self.btn_continue.setToolTip(
@@ -219,11 +320,10 @@ class StartupProblemsWindow(QDialog):
 
         v = QVBoxLayout(card)
         v.setContentsMargins(16, 12, 16, 12)
-        v.setSpacing(8)
+        v.setSpacing(6)
 
-        icon, color = ICONS.get(p["status"], ("?", "#8b97a6"))
+        icon, _color = ICONS.get(p["status"], ("?", "#8b97a6"))
 
-        # --- Заголовок: иконка + название ---
         head = QHBoxLayout()
         head.setSpacing(8)
 
@@ -238,21 +338,18 @@ class StartupProblemsWindow(QDialog):
         head.addStretch(1)
         v.addLayout(head)
 
-        # --- Сообщение ---
         msg = QLabel(p["message"])
         msg.setObjectName("problemMessage")
         msg.setProperty("color", p["status"])
         msg.setWordWrap(True)
         v.addWidget(msg)
 
-        # --- Подсказка ---
         if p.get("hint"):
             hint = QLabel(p["hint"])
             hint.setObjectName("problemHint")
             hint.setWordWrap(True)
             v.addWidget(hint)
 
-        # --- Кнопки действий ---
         actions = self._build_actions(p)
         if actions:
             actions_row = QHBoxLayout()
@@ -328,10 +425,10 @@ class StartupProblemsWindow(QDialog):
                 desktop = Path.home()
 
             ts = datetime.now().strftime("%Y-%m-%d-%H%M")
-            path = desktop / f"chestzn-problems-{ts}.txt"
+            path = desktop / f"dotmark-problems-{ts}.txt"
 
             lines = []
-            lines.append("ChestZn — Отчёт о проблемах при запуске")
+            lines.append("Dotmark — Отчёт о проблемах при запуске")
             lines.append(f"Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             lines.append(f"Компьютер: {os.environ.get('COMPUTERNAME', '?')}")
             lines.append(f"Пользователь: {os.environ.get('USERNAME', '?')}")
@@ -344,9 +441,9 @@ class StartupProblemsWindow(QDialog):
                 lines.append(f"{icon} {p['name']}: {p['message']}")
                 if p.get("hint"):
                     for l in p["hint"].splitlines():
-                        lines.append(f"      {l}")
+                        lines.append(f"    {l}")
                 if p.get("doc"):
-                    lines.append(f"      [руководство: {p['doc']}]")
+                    lines.append(f"    [руководство: {p['doc']}]")
                 lines.append("")
 
             path.write_text("\n".join(lines), encoding="utf-8")
@@ -364,13 +461,15 @@ class StartupProblemsWindow(QDialog):
     def copy_text(self):
         """Скопировать текст проблем в буфер обмена."""
         try:
-            lines = ["ChestZn — Проблемы при запуске", ""]
+            lines = ["Dotmark — Проблемы при запуске", ""]
             for p in self.problems:
                 icon = {"ok": "[OK]", "warning": "[!]", "error": "[X]"}.get(p["status"], "[?]")
                 lines.append(f"{icon} {p['name']}: {p['message']}")
                 if p.get("hint"):
                     for l in p["hint"].splitlines():
                         lines.append(f"    {l}")
+                if p.get("doc"):
+                    lines.append(f"    [руководство: {p['doc']}]")
                 lines.append("")
             QGuiApplication.clipboard().setText("\n".join(lines))
             QMessageBox.information(self, "Скопировано", "Текст проблем скопирован в буфер обмена.")
@@ -394,7 +493,6 @@ class StartupProblemsWindow(QDialog):
         try:
             from PySide6.QtCore import QProcess
             QProcess.startDetached(sys.executable, sys.argv)
-            # Явно закрыть окно и выйти из приложения
             self.accept()
             QApplication.quit()
             sys.exit(0)
