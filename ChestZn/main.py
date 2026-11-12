@@ -189,13 +189,14 @@ class MainWindow(QMainWindow):
 
         self.root_layout.addWidget(header)
 
-        # --------- Вкладки ---------
+        # --------- Вкладки (вкладка «Админ» создаётся лениво при входе для мгновенного запуска) ---------
         self.tabs = QTabWidget()
         self.operator = OperatorWindow(self.store)
-        self.admin    = AdminWindow(self.store)
+        self.admin: Optional[AdminWindow] = None
+        self._admin_placeholder = QWidget()
 
         self.tabs.addTab(self.operator, "Оператор")
-        self.tabs.addTab(self.admin,    "Админ")
+        self.tabs.addTab(self._admin_placeholder, "Админ")
 
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
@@ -331,6 +332,7 @@ class MainWindow(QMainWindow):
             return
 
         if self.admin_authenticated:
+            self._ensure_admin_tab()
             self.admin.switch("dashboard")
             return
 
@@ -339,6 +341,12 @@ class MainWindow(QMainWindow):
         QApplication.processEvents()
 
         login = LoginWindow(self.store, self)
+        if "ChestZn" in login.windowTitle() or not login.windowTitle():
+            login.setWindowTitle(
+                login.windowTitle().replace("ChestZn", "Dotmark")
+                if login.windowTitle()
+                else "Dotmark · Вход администратора"
+            )
         result = login.exec()
 
         self._set_blur(False)
@@ -362,6 +370,10 @@ class MainWindow(QMainWindow):
             question_window = SecurityQuestionWindow(
                 self.store, login.user["login"], self
             )
+            if "ChestZn" in question_window.windowTitle():
+                question_window.setWindowTitle(
+                    question_window.windowTitle().replace("ChestZn", "Dotmark")
+                )
             q_result = question_window.exec()
 
             self._set_blur(False)
@@ -376,8 +388,25 @@ class MainWindow(QMainWindow):
 
         # --------- Пускаем в админку ---------
         self.admin_authenticated = True
+        self._ensure_admin_tab()
         self.admin.switch("dashboard")
         print(f"[Dotmark] Админ авторизован: {login.user['fio']}")
+
+    def _ensure_admin_tab(self):
+        """Создаёт AdminWindow при первом входе администратора, не нагружая старт приложения."""
+        if self.admin is not None:
+            return
+        self.admin = AdminWindow(self.store)
+        self.tabs.blockSignals(True)
+        idx = self.tabs.indexOf(self._admin_placeholder)
+        if idx != -1:
+            self.tabs.removeTab(idx)
+            self._admin_placeholder.deleteLater()
+            self.tabs.insertTab(idx, self.admin, "Админ")
+            self.tabs.setCurrentIndex(idx)
+        else:
+            self.tabs.addTab(self.admin, "Админ")
+        self.tabs.blockSignals(False)
 
     # -----------------------------------------------------------------
     def _return_to_operator(self, message: str = ""):
@@ -452,25 +481,26 @@ def main():
     theme = get_current_theme(force_reload=True)
     app.setStyleSheet(get_qss(theme))
 
-    # --------- 1. Скопировать руководства ---------
-    docs_helper.ensure_docs_copied()
+    # --------- 1. Скопировать руководства в фоне (не задерживая запуск) ---------
+    import threading
+    threading.Thread(target=docs_helper.ensure_docs_copied, daemon=True).start()
 
-    # --------- 2. Проверить состояние ---------
-    problems = check_all()
+    # --------- 2. Быстрая проверка состояния без блокировки PowerShell ---------
+    problems = check_all(force_refresh=False)
 
     critical = has_critical(problems)
     warnings = has_warnings(problems)
 
     print(f"[Dotmark] Проверка при запуске: критических={critical}, предупреждений={warnings}")
 
-    # --------- 3. Показать окно проблем ВСЕГДА ---------
+    # --------- 3. Создаём единый Store и показываем окно проверки (передавая уже собранные problems) ---------
     try:
         store_for_dialog = Store()
     except Exception as e:
         store_for_dialog = None
         print(f"[Dotmark] Store не создан: {e}")
 
-    dlg = StartupProblemsWindow(store_for_dialog, parent=None)
+    dlg = StartupProblemsWindow(store_for_dialog, parent=None, initial_problems=problems)
     result = dlg.exec()
 
     # Если критические — не пускаем

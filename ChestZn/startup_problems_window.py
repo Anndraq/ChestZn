@@ -37,10 +37,10 @@ class StartupProblemsWindow(QDialog):
 
     problems_changed = Signal(list)
 
-    def __init__(self, store, parent=None):
+    def __init__(self, store, parent=None, initial_problems=None):
         super().__init__(parent)
         self.store = store
-        self.problems = []
+        self.problems = list(initial_problems) if initial_problems is not None else []
 
         self.setWindowTitle("Dotmark · Проверка при запуске")
         base_dir = Path(__file__).resolve().parent
@@ -147,8 +147,14 @@ class StartupProblemsWindow(QDialog):
         QShortcut(QKeySequence("Escape"), self, self.reject)
         QShortcut(QKeySequence("F5"),     self, self.refresh_problems)
 
-        # --------- Первичная отрисовка ---------
-        self.refresh_problems()
+        # --------- Первичная отрисовка без блокировки UI ---------
+        if self.problems:
+            self._render()
+        else:
+            self.problems = check_all(force_refresh=False)
+            self._render()
+        # Запускаем точный аппаратный опрос в фоне и обновляем карточки по готовности
+        self._trigger_async_hardware_check()
 
     # ------------------------------------------------------------------
     def _apply_theme(self):
@@ -253,17 +259,60 @@ class StartupProblemsWindow(QDialog):
         """)
 
     # ------------------------------------------------------------------
-    def refresh_problems(self):
-        """Перепроверить состояние и обновить окно с принудительным опросом оборудования."""
+    def _trigger_async_hardware_check(self):
+        """Фоновое обновление статуса оборудования без зависания окна при старте."""
+        import threading
+        from PySide6.QtCore import QTimer
+
+        def _bg():
+            try:
+                from device_discovery import _refresh_all_caches_sync
+                _refresh_all_caches_sync()
+            except Exception:
+                pass
+
+        threading.Thread(target=_bg, daemon=True).start()
+        QTimer.singleShot(450, self._apply_cached_check)
+        QTimer.singleShot(1400, self._apply_cached_check)
+
+    def _apply_cached_check(self):
+        if not self.isVisible():
+            return
         try:
-            from device_discovery import _refresh_all_caches_sync
-            _refresh_all_caches_sync()
+            new_probs = check_all(force_refresh=False)
+            if new_probs != self.problems:
+                self.problems = new_probs
+                self._render()
+                self.problems_changed.emit(self.problems)
         except Exception:
             pass
-        self.problems = check_all(force_refresh=True)
-        self._render()
-        self.problems_changed.emit(self.problems)
-        print("[startup] проверка обновлена")
+
+    def refresh_problems(self):
+        """Перепроверить состояние и обновить окно в фоновом потоке без зависания UI."""
+        import threading
+        from PySide6.QtCore import QTimer
+
+        self.btn_refresh.setEnabled(False)
+        self.btn_refresh.setText("⏳ Проверка...")
+
+        def _bg():
+            try:
+                from device_discovery import _refresh_all_caches_sync
+                _refresh_all_caches_sync()
+            except Exception:
+                pass
+
+            def _done():
+                self.problems = check_all(force_refresh=False)
+                self._render()
+                self.problems_changed.emit(self.problems)
+                self.btn_refresh.setEnabled(True)
+                self.btn_refresh.setText("🔄 Обновить список")
+                print("[startup] проверка обновлена")
+
+            QTimer.singleShot(0, _done)
+
+        threading.Thread(target=_bg, daemon=True).start()
 
     # ------------------------------------------------------------------
     def _render(self):

@@ -544,15 +544,45 @@ def check_printer_status(printer_name: str, force_refresh: bool = False) -> Dict
     }
 
 
+def _fast_seed_caches_if_empty() -> None:
+    """
+    Мгновенная первичная инициализация кэша при старте приложения (< 10 мс, без запуска PowerShell)
+    с одновременным стартом фонового PnP-потока. Полностью устраняет задержку 1–2 с при холодном запуске.
+    """
+    global _PRINTERS_CACHE_DATA, _PRINTERS_ALL_CACHE_DATA, _PRINTERS_CACHE_TS
+    global _SCANNERS_CACHE_DATA, _SCANNERS_CACHE_TS, _PS_SNAPSHOT_TS
+    now = time.time()
+    with _DISCOVERY_LOCK:
+        if _PRINTERS_CACHE_TS > 0.0 and _SCANNERS_CACHE_TS > 0.0:
+            return
+        # Помечаем _PS_SNAPSHOT_TS текущим временем, чтобы _scan_printers_sync/_scan_scanners_sync
+        # не вызывали блокирующий PowerShell в UI-потоке во время холодного старта
+        if _PS_SNAPSHOT_TS == 0.0:
+            _PS_SNAPSHOT_TS = now
+
+    conn_pr, all_pr = _scan_printers_sync(force=False)
+    conn_sc = _scan_scanners_sync(force=False)
+    with _DISCOVERY_LOCK:
+        _PRINTERS_CACHE_DATA = conn_pr
+        _PRINTERS_ALL_CACHE_DATA = all_pr
+        _PRINTERS_CACHE_TS = now
+        _SCANNERS_CACHE_DATA = conn_sc
+        _SCANNERS_CACHE_TS = now
+
+    # Запускаем полноценный PowerShell PnP-снимок асинхронно в фоне
+    _trigger_bg_refresh()
+
+
 def detect_local_printers(connected_only: bool = True, force_refresh: bool = False) -> List[Dict[str, Any]]:
     """
     Возвращает список принтеров за 0 мс из кэша в памяти.
-    Если кэш ещё пуст (первый запуск) или передан force_refresh=True — выполняет синхронный опрос.
-    Если кэш устарел — возвращает данные из кэша и запускает фоновое обновление без фриза UI.
+    При первом вызове выполняет быстрый Win32-опрос (< 10 мс) и запускает PowerShell PnP в фоне.
     """
     now = time.time()
-    if _PRINTERS_CACHE_TS == 0.0 or force_refresh:
+    if force_refresh:
         _refresh_all_caches_sync()
+    elif _PRINTERS_CACHE_TS == 0.0:
+        _fast_seed_caches_if_empty()
     elif (now - _PRINTERS_CACHE_TS) >= _CACHE_TTL_SEC:
         _trigger_bg_refresh()
 
@@ -565,11 +595,13 @@ def detect_local_printers(connected_only: bool = True, force_refresh: bool = Fal
 def detect_local_scanners(connected_only: bool = True, force_refresh: bool = False) -> List[Dict[str, Any]]:
     """
     Возвращает список сканеров за 0 мс из кэша в памяти.
-    При устаревании кэша запускает фоновое обновление в потоке-демоне.
+    При первом вызове выполняет быстрый COM-опрос и запускает PowerShell PnP в фоне.
     """
     now = time.time()
-    if _SCANNERS_CACHE_TS == 0.0 or force_refresh:
+    if force_refresh:
         _refresh_all_caches_sync()
+    elif _SCANNERS_CACHE_TS == 0.0:
+        _fast_seed_caches_if_empty()
     elif (now - _SCANNERS_CACHE_TS) >= _CACHE_TTL_SEC:
         _trigger_bg_refresh()
 

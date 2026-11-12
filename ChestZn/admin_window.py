@@ -167,26 +167,28 @@ class AdminWindow(QWidget):
         self.btn_theme.clicked.connect(self._toggle_theme)
         sb.addWidget(self.btn_theme)
 
-        # ============ STACK ============
+        # ============ STACK (ленивая инициализация вкладок для мгновенного старта) ============
         self.stack = QStackedWidget()
-        self.stack.addWidget(self._page_dashboard())      # 0
-        self.stack.addWidget(self._page_queue())          # 1
-        self.stack.addWidget(self._page_points())         # 2
-        self.stack.addWidget(self._page_devices())        # 3
-        self.stack.addWidget(self._page_templates())      # 4
-        self.stack.addWidget(self._page_pool())           # 5
-        self.stack.addWidget(QWidget())                   # 6 (перенесено во вкладку Склада кодов ЧЗ)
-        self.stack.addWidget(self._page_printer())        # 7
-        self.stack.addWidget(self._page_journal())        # 8
-        self.stack.addWidget(self._page_logs())           # 9
-        self.stack.addWidget(self._page_backup())         # 10
-        self.stack.addWidget(self._page_security())       # 11
-        self.stack.addWidget(self._page_discrepancies())  # 12
-        self.stack.addWidget(self._page_sync())           # 13
-        # Создание страницы SQL Server и добавление в стек страниц
-        self.sql_server_page = SQLServerAdminPage(config_store=self.store, parent=self)
-        self.stack.addWidget(self.sql_server_page)  # 14
-        self.sql_server_page.sync_requested.connect(self._handle_sql_sync)
+        self._built_pages = set()
+        self._page_builders = {
+            0: self._page_dashboard,
+            1: self._page_queue,
+            2: self._page_points,
+            3: self._page_devices,
+            4: self._page_templates,
+            5: self._page_pool,
+            6: lambda: QWidget(),
+            7: self._page_printer,
+            8: self._page_journal,
+            9: self._page_logs,
+            10: self._page_backup,
+            11: self._page_security,
+            12: self._page_discrepancies,
+            13: self._page_sync,
+            14: self._build_sql_page,
+        }
+        for i in range(15):
+            self.stack.addWidget(QWidget())
 
         root.addWidget(sidebar)
         root.addWidget(self.stack, stretch=1)
@@ -194,10 +196,31 @@ class AdminWindow(QWidget):
         self._journal_page = 0
         self._journal_total = 0
 
+        self._ensure_page_built(0)
         self._apply_pc_role_ui()
         self.apply_theme(refresh_data=False)
         QTimer.singleShot(2000, self._run_auto_backup_on_startup)
         self.switch("dashboard")
+
+    def _build_sql_page(self) -> QWidget:
+        self.sql_server_page = SQLServerAdminPage(config_store=self.store, parent=self)
+        self.sql_server_page.sync_requested.connect(self._handle_sql_sync)
+        return self.sql_server_page
+
+    def _ensure_page_built(self, idx: int) -> None:
+        if idx in self._built_pages:
+            return
+        builder = self._page_builders.get(idx)
+        if not builder:
+            return
+        old_w = self.stack.widget(idx)
+        new_w = builder()
+        self.stack.insertWidget(idx, new_w)
+        if old_w is not None:
+            self.stack.removeWidget(old_w)
+            old_w.deleteLater()
+        self._built_pages.add(idx)
+        self.apply_theme(refresh_data=False)
 
     # ------------------------------------------------------------------
     def switch(self, page_id: str):
@@ -209,6 +232,7 @@ class AdminWindow(QWidget):
             "discrepancies": 12, "sync": 13, "sql": 14,
         }
         idx = pages.get(page_id, 0)
+        self._ensure_page_built(idx)
         self.stack.setCurrentIndex(idx)
         for btn in [self.nav_dashboard, self.nav_queue, self.nav_points,
                     self.nav_devices, self.nav_templates, self.nav_pool,
