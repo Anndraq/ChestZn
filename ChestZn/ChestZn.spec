@@ -87,4 +87,5 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     uac_admin=False,  # Запуск от имени обычного пользователя (без вымогательства UAC)
+    icon='app.ico',   # Фирменная иконка Dotmark (D-куб из точек DataMatrix)
 )

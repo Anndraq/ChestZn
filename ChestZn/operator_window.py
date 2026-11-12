@@ -42,12 +42,15 @@ log = get_logger("operator")
 
 
 def get_current_theme() -> str:
-    """Возвращает текущую тему ('dark' или 'light') из кэша в памяти styles.py (0 мс)."""
+    """Возвращает текущую тему ('dark' или 'light') из config.json."""
     try:
-        from styles import get_current_theme as _get_cached_theme
-        return _get_cached_theme()
+        cfg_path = Path(os.environ.get("APPDATA", Path.home())) / "ChestZn" / "config.json"
+        if cfg_path.exists():
+            data = json.loads(cfg_path.read_text(encoding="utf-8"))
+            return data.get("app_theme", "dark")
     except Exception:
-        return "dark"
+        pass
+    return "dark"
 
 
 class OperatorWindow(QWidget):
@@ -86,8 +89,6 @@ class OperatorWindow(QWidget):
     # ==========================================================================
     def _init_ui(self):
         is_lt = self._is_light
-        bg_win = "#e6eaef" if is_lt else "#0b0f14"
-        self.setStyleSheet(f"OperatorWindow {{ background-color: {bg_win}; }}")
         bg_card = "#f3f5f8" if is_lt else "#0f172a"
         border_card = "#cfd6e0" if is_lt else "#1e293b"
         text_main = "#2d3748" if is_lt else "#f8fafc"
@@ -100,8 +101,8 @@ class OperatorWindow(QWidget):
 
         # ---------------- 1. ШАПКА (HEADER) ----------------
         self.header_card = QFrame()
+        self.header_card.setObjectName("headerCard")
         header_card = self.header_card
-        header_card.setObjectName("headerCard")
         header_card.setStyleSheet(
             f"QFrame#headerCard {{ background:{bg_subtle}; border-radius:10px; "
             f"border:1px solid {border_card}; padding:4px; }}"
@@ -119,21 +120,17 @@ class OperatorWindow(QWidget):
 
         # Индикатор сканера
         self.lbl_op = QLabel("📡 Сканер: Готов")
-        self.lbl_op.setFixedHeight(28)
-        self.lbl_op.setAlignment(Qt.AlignCenter)
         self.lbl_op.setStyleSheet(
             "background:#3b6ea5; color:#ffffff; font-size:13px; font-weight:600; "
-            "padding:4px 12px; border-radius:6px;"
+            "padding:4px 10px; border-radius:6px;"
         )
         h_lay.addWidget(self.lbl_op)
 
         # Живой индикатор принтера (динамический зеленый / красный)
         self.lbl_printer = QLabel("🖨 Принтер поста: Опрос...")
-        self.lbl_printer.setFixedHeight(28)
-        self.lbl_printer.setAlignment(Qt.AlignCenter)
         self.lbl_printer.setStyleSheet(
             f"background:{bg_card}; color:{text_sub}; font-size:13px; font-weight:600; "
-            f"padding:4px 12px; border-radius:6px; border:1px solid {border_card};"
+            f"padding:4px 10px; border-radius:6px; border:1px solid {border_card};"
         )
         h_lay.addWidget(self.lbl_printer)
 
@@ -148,57 +145,82 @@ class OperatorWindow(QWidget):
 
         # ---------------- 2. ПАНЕЛЬ ВЫБОРА И ПРОГРЕССА ПАРТИИ (СИНХРОНИЗАЦИЯ) ----------------
         self.batch_card = QFrame()
+        self.batch_card.setObjectName("batchCard")
         batch_card = self.batch_card
-        batch_card.setObjectName("batchCard")
+        batch_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         batch_card.setStyleSheet(
             f"QFrame#batchCard {{ background:{bg_card}; border-radius:10px; border:1px solid {border_card}; }}"
         )
         b_lay = QHBoxLayout(batch_card)
         b_lay.setContentsMargins(16, 12, 16, 12)
         b_lay.setSpacing(14)
+        b_lay.setAlignment(Qt.AlignVCenter)
 
-        self.btn_select_batch = QPushButton("📦 Выбрать заказ / партию с сервера...")
+        self.btn_select_batch = QPushButton("📦 Выбрать заказ с сервера")
         self.btn_select_batch.setProperty("primary", True)
-        self.btn_select_batch.setMinimumHeight(40)
+        self.btn_select_batch.setFixedHeight(38)
         self.btn_select_batch.setCursor(Qt.PointingHandCursor)
         self.btn_select_batch.setStyleSheet(
-            "QPushButton { background:#3b6ea5; color:#ffffff; font-weight:700; font-size:14px; "
-            "padding:6px 16px; border-radius:8px; } "
+            "QPushButton { background:#3b6ea5; color:#ffffff; font-weight:700; font-size:13px; "
+            "padding:0 16px; border-radius:8px; border:none; } "
             "QPushButton:hover { background:#2e5988; }"
         )
         self.btn_select_batch.clicked.connect(self._open_batch_picker)
-        b_lay.addWidget(self.btn_select_batch)
+        b_lay.addWidget(self.btn_select_batch, alignment=Qt.AlignVCenter)
 
-        batch_info_col = QVBoxLayout()
+        # Вертикальный разделитель
+        self.sep_batch = QFrame()
+        self.sep_batch.setFixedWidth(1)
+        sep_batch = self.sep_batch
+        sep_batch.setFixedHeight(34)
+        sep_batch.setStyleSheet(f"background:{border_card}; border:none;")
+        b_lay.addWidget(sep_batch, alignment=Qt.AlignVCenter)
+
+        # Информация о заказе в компактном контейнере (без растягивания по высоте)
+        batch_info_w = QWidget()
+        batch_info_w.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        batch_info_w.setStyleSheet("background:transparent;")
+        batch_info_col = QVBoxLayout(batch_info_w)
+        batch_info_col.setContentsMargins(0, 0, 0, 0)
         batch_info_col.setSpacing(3)
-        self.lbl_batch_title = QLabel("Партия кодов не выбрана. Нажмите кнопку слева для загрузки партии с сервера.")
+
+        self.lbl_batch_title = QLabel("Заказ / партия не выбрана")
         self.lbl_batch_title.setStyleSheet(f"color:{text_main}; font-size:15px; font-weight:700;")
         batch_info_col.addWidget(self.lbl_batch_title)
 
-        self.lbl_batch_sub = QLabel("Все коды (ШК и ДМ) подтягиваются с центрального сервера через Мастер-ПК.")
-        self.lbl_batch_sub.setStyleSheet(f"color:{text_sub}; font-size:13px;")
+        self.lbl_batch_sub = QLabel("Нажмите «Выбрать заказ с сервера», чтобы загрузить марки")
+        self.lbl_batch_sub.setStyleSheet(f"color:{text_sub}; font-size:12px;")
         batch_info_col.addWidget(self.lbl_batch_sub)
-        b_lay.addLayout(batch_info_col, stretch=1)
+        b_lay.addWidget(batch_info_w, stretch=1, alignment=Qt.AlignVCenter)
 
-        # Кнопка сброса/смены партии
-        self.btn_clear_batch = QPushButton("✕")
-        self.btn_clear_batch.setFixedSize(30, 30)
-        self.btn_clear_batch.setToolTip("Очистить выбранную партию")
+        # Кнопка снятия выбранной партии
+        self.btn_clear_batch = QPushButton("✕ Снять")
+        self.btn_clear_batch.setFixedHeight(34)
+        self.btn_clear_batch.setToolTip("Снять выбранную партию и очистить активный заказ")
         self.btn_clear_batch.setCursor(Qt.PointingHandCursor)
+        clear_bg = "#fef2f2" if is_lt else "#2a1215"
+        clear_bd = "#fecaca" if is_lt else "#7f1d1d"
         self.btn_clear_batch.setStyleSheet(
-            f"QPushButton {{ background:{bg_subtle}; color:{text_sub}; border:1px solid {border_card}; "
-            f"border-radius:6px; font-weight:700; }} QPushButton:hover {{ background:#ef4444; color:#ffffff; }}"
+            f"QPushButton {{ background:{clear_bg}; color:#dc2626; border:1px solid {clear_bd}; "
+            f"border-radius:8px; font-weight:600; font-size:12px; padding:0 12px; }} "
+            f"QPushButton:hover {{ background:#ef4444; color:#ffffff; border-color:#ef4444; }}"
         )
         self.btn_clear_batch.clicked.connect(self._clear_active_batch)
-        b_lay.addWidget(self.btn_clear_batch)
+        self.btn_clear_batch.setVisible(False)
+        b_lay.addWidget(self.btn_clear_batch, alignment=Qt.AlignVCenter)
 
-        # Прогресс-бар остатка кодов в партии
-        self.batch_progress_col = QVBoxLayout()
-        self.batch_progress_col.setSpacing(3)
-        self.lbl_batch_counter = QLabel("0 / 0 шт.")
-        self.lbl_batch_counter.setAlignment(Qt.AlignRight)
+        # Компактный блок прогресса остатка кодов (виден только когда заказ выбран)
+        self.batch_progress_widget = QWidget()
+        self.batch_progress_widget.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.batch_progress_widget.setStyleSheet("background:transparent;")
+        self.batch_progress_col = QVBoxLayout(self.batch_progress_widget)
+        self.batch_progress_col.setContentsMargins(6, 0, 0, 0)
+        self.batch_progress_col.setSpacing(5)
+
+        self.lbl_batch_counter = QLabel("0 / 0 шт. (0%)")
+        self.lbl_batch_counter.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.lbl_batch_counter.setStyleSheet(
-            "color:#3b6ea5; font-size:14px; font-weight:700; font-family:Consolas,monospace;"
+            "color:#3b6ea5; font-size:13px; font-weight:700; font-family:Consolas,monospace;"
         )
         self.batch_progress_col.addWidget(self.lbl_batch_counter)
 
@@ -206,14 +228,15 @@ class OperatorWindow(QWidget):
         self.batch_progress_bar.setRange(0, 100)
         self.batch_progress_bar.setValue(0)
         self.batch_progress_bar.setTextVisible(False)
-        self.batch_progress_bar.setFixedWidth(160)
+        self.batch_progress_bar.setFixedWidth(180)
         self.batch_progress_bar.setFixedHeight(8)
         self.batch_progress_bar.setStyleSheet(
             f"QProgressBar {{ background:{bg_subtle}; border-radius:4px; border:none; }} "
             f"QProgressBar::chunk {{ background:#3b6ea5; border-radius:4px; }}"
         )
         self.batch_progress_col.addWidget(self.batch_progress_bar)
-        b_lay.addLayout(self.batch_progress_col)
+        self.batch_progress_widget.setVisible(False)
+        b_lay.addWidget(self.batch_progress_widget, alignment=Qt.AlignVCenter)
 
         root.addWidget(batch_card)
 
@@ -316,18 +339,18 @@ class OperatorWindow(QWidget):
         # Показатели смены (БЕЗ лимита!)
         self.kpi_card = QFrame()
         kpi_card = self.kpi_card
+        self.kpi_lbls = []
         kpi_card.setStyleSheet(f"background:{bg_card}; border-radius:10px; border:1px solid {border_card};")
         kc_lay = QHBoxLayout(kpi_card)
         kc_lay.setContentsMargins(14, 10, 14, 10)
         kc_lay.setSpacing(16)
 
-        self._kpi_title_labels = []
         def _make_kpi(label_text, color):
             box = QVBoxLayout()
             box.setSpacing(2)
             lbl = QLabel(label_text)
+            self.kpi_lbls.append(lbl)
             lbl.setStyleSheet(f"color:{text_sub}; font-size:12px; font-weight:600;")
-            self._kpi_title_labels.append(lbl)
             val = QLabel("0")
             val.setStyleSheet(f"color:{color}; font-size:24px; font-weight:800; font-family:Consolas,monospace;")
             box.addWidget(lbl)
@@ -377,71 +400,53 @@ class OperatorWindow(QWidget):
     # ДИНАМИЧЕСКИЙ СТАТУС ПРИНТЕРА И АВТО-БЛОКИРОВКА
     # ==========================================================================
     def _refresh_header_route(self):
-        """Проверяет реальный статус принтера: если отключён — блокирует сканирование."""
-        if hasattr(self, "lbl_op"):
+        """Проверяет реальный статус принтера и сканера: если принтер отключён — блокирует сканирование."""
+        try:
+            # 1. Проверка статуса сканера
+            live_scanners = []
             try:
                 from device_discovery import detect_local_scanners
-                scs = detect_local_scanners(connected_only=True, force_refresh=False)
-                if scs:
-                    sc_name = scs[0].get("name", "Сканер ШК")
-                    self.lbl_op.setText(f"🟢 📡 {sc_name}")
-                    if self._is_light:
-                        self.lbl_op.setStyleSheet(
-                            "background:#dcfce7; color:#246e53; font-size:13px; font-weight:700; "
-                            "padding:4px 12px; border-radius:6px; border:1px solid #2e856e;"
-                        )
-                    else:
-                        self.lbl_op.setStyleSheet(
-                            "background:#0f291e; color:#4ade80; font-size:13px; font-weight:700; "
-                            "padding:4px 12px; border-radius:6px; border:1px solid #2e856e;"
-                        )
-                else:
-                    self.lbl_op.setText("🔴 📡 Сканер отключён / не отвечает")
-                    if self._is_light:
-                        self.lbl_op.setStyleSheet(
-                            "background:#fee2e2; color:#b91c1c; font-size:13px; font-weight:700; "
-                            "padding:4px 12px; border-radius:6px; border:1px solid #ef4444;"
-                        )
-                    else:
-                        self.lbl_op.setStyleSheet(
-                            "background:#2a1215; color:#f87171; font-size:13px; font-weight:700; "
-                            "padding:4px 12px; border-radius:6px; border:1px solid #c04d53;"
-                        )
+                live_scanners = detect_local_scanners(connected_only=True, force_refresh=False) or []
             except Exception:
-                self.lbl_op.setText("🔴 📡 Сканер не отвечает")
-        try:
+                live_scanners = []
+
+            if hasattr(self, "lbl_op"):
+                self.lbl_op.setVisible(True)
+                if live_scanners:
+                    sc_name = live_scanners[0].get("name") or "Сканер: Готов"
+                    self.lbl_op.setText(f"📡 {sc_name}")
+                    self.lbl_op.setStyleSheet(
+                        "background:#0f291e; color:#4ade80; font-size:13px; font-weight:700; "
+                        "padding:4px 10px; border-radius:6px; border:1px solid #2e856e;"
+                    )
+                else:
+                    self.lbl_op.setText("🔴 Сканер отключён")
+                    self.lbl_op.setStyleSheet(
+                        "background:#2a1215; color:#f87171; font-size:13px; font-weight:700; "
+                        "padding:4px 10px; border-radius:6px; border:1px solid #c04d53;"
+                    )
+
+            # 2. Проверка статуса принтера
             live = get_currently_connected_printer(force_refresh=False)
-            is_conn = bool(live and live.get("connected"))
+            is_conn = bool(live and (live.get("connected") or live.get("online")))
             pr_name = live["name"] if is_conn else ""
 
             if is_conn:
                 self.lbl_printer.setText(f"🟢 {pr_name}")
-                if self._is_light:
-                    self.lbl_printer.setStyleSheet(
-                        "background:#dcfce7; color:#246e53; font-size:13px; font-weight:700; "
-                        "padding:4px 12px; border-radius:6px; border:1px solid #2e856e;"
-                    )
-                else:
-                    self.lbl_printer.setStyleSheet(
-                        "background:#0f291e; color:#4ade80; font-size:13px; font-weight:700; "
-                        "padding:4px 12px; border-radius:6px; border:1px solid #2e856e;"
-                    )
+                self.lbl_printer.setStyleSheet(
+                    "background:#0f291e; color:#4ade80; font-size:13px; font-weight:700; "
+                    "padding:4px 10px; border-radius:6px; border:1px solid #2e856e;"
+                )
                 if not self.scan_input.isEnabled():
                     self.scan_input.setEnabled(True)
                     self.scan_input.setPlaceholderText("Ожидание сканирования / ручного ввода...")
                     self._show_status("ready", "🟢 Ожидание сканирования / ручного ввода", sub="Поднесите штрихкод товара к сканеру или введите цифры вручную")
             else:
                 self.lbl_printer.setText("🔴 Принтер отключён")
-                if self._is_light:
-                    self.lbl_printer.setStyleSheet(
-                        "background:#fee2e2; color:#b91c1c; font-size:13px; font-weight:700; "
-                        "padding:4px 12px; border-radius:6px; border:1px solid #ef4444;"
-                    )
-                else:
-                    self.lbl_printer.setStyleSheet(
-                        "background:#2a1215; color:#f87171; font-size:13px; font-weight:700; "
-                        "padding:4px 12px; border-radius:6px; border:1px solid #c04d53;"
-                    )
+                self.lbl_printer.setStyleSheet(
+                    "background:#2a1215; color:#f87171; font-size:13px; font-weight:700; "
+                    "padding:4px 10px; border-radius:6px; border:1px solid #c04d53;"
+                )
                 if self.scan_input.isEnabled():
                     self.scan_input.setEnabled(False)
                     self.scan_input.setPlaceholderText("🔴 Сканирование заблокировано: подключите принтер")
@@ -452,35 +457,6 @@ class OperatorWindow(QWidget):
                 )
         except Exception as e:
             log.debug("_refresh_header_route: %s", e)
-
-    def set_scanner_status(self, is_connected: bool, scanner_name: str = ""):
-        """Установить актуальный статус сканера из фонового мониторинга MainWindow."""
-        if hasattr(self, "lbl_op"):
-            if is_connected:
-                title = f"🟢 📡 {scanner_name or 'Сканер ШК'}"
-                self.lbl_op.setText(title)
-                if getattr(self, "_is_light", False):
-                    self.lbl_op.setStyleSheet(
-                        "background:#dcfce7; color:#246e53; font-size:13px; font-weight:700; "
-                        "padding:4px 12px; border-radius:6px; border:1px solid #2e856e;"
-                    )
-                else:
-                    self.lbl_op.setStyleSheet(
-                        "background:#0f291e; color:#4ade80; font-size:13px; font-weight:700; "
-                        "padding:4px 12px; border-radius:6px; border:1px solid #2e856e;"
-                    )
-            else:
-                self.lbl_op.setText("🔴 📡 Сканер отключён / не отвечает")
-                if getattr(self, "_is_light", False):
-                    self.lbl_op.setStyleSheet(
-                        "background:#fee2e2; color:#b91c1c; font-size:13px; font-weight:700; "
-                        "padding:4px 12px; border-radius:6px; border:1px solid #ef4444;"
-                    )
-                else:
-                    self.lbl_op.setStyleSheet(
-                        "background:#2a1215; color:#f87171; font-size:13px; font-weight:700; "
-                        "padding:4px 12px; border-radius:6px; border:1px solid #c04d53;"
-                    )
 
     def _on_poll_tick(self):
         self._refresh_header_route()
@@ -522,7 +498,27 @@ class OperatorWindow(QWidget):
         t.setEditTriggers(QAbstractItemView.NoEditTriggers)
         lay.addWidget(t, stretch=1)
 
-        raw_pkgs = sync_mod.list_available_json_packages(self.store, include_outbox=True, auto_query_server=False)
+        import socket
+        all_pkgs = sync_mod.list_available_json_packages(self.store, include_outbox=False, auto_query_server=False)
+        if not all_pkgs:
+            all_pkgs = sync_mod.list_available_json_packages(self.store, include_outbox=True, auto_query_server=False)
+
+        # Убираем дубликаты по (название партии, ШК), отдавая приоритет свежим
+        seen_keys = set()
+        raw_pkgs = []
+        for p in sorted(all_pkgs, key=lambda x: x.get("mtime") or 0, reverse=True):
+            key = (str(p.get("batch_title") or p.get("filename")), str(p.get("shk") or ""))
+            if key not in seen_keys:
+                seen_keys.add(key)
+                raw_pkgs.append(p)
+        raw_pkgs.sort(key=lambda x: (x.get("batch_title") or "", x.get("shk") or ""))
+
+        try:
+            my_pc_name = sync_mod.get_pc_node_name(self.store).strip().lower()
+        except Exception:
+            my_pc_name = ""
+        my_host = socket.gethostname().strip().lower()
+        active_title = ((self._active_batch_info or {}).get("title") or (self.store.get_setting("active_batch_name") or "")).strip()
 
         def _populate_table():
             q = search_edit.text().strip().lower()
@@ -537,13 +533,37 @@ class OperatorWindow(QWidget):
                 ]
             for p in pkgs:
                 r = t.rowCount(); t.insertRow(r)
-                t.setItem(r, 0, QTableWidgetItem(p.get("batch_title") or p.get("filename")))
+                b_title = p.get("batch_title") or p.get("filename")
+                it_title = QTableWidgetItem(b_title)
+                it_title.setData(Qt.UserRole, p)
+                t.setItem(r, 0, it_title)
                 t.setItem(r, 1, QTableWidgetItem(p.get("shk") or "—"))
                 t.setItem(r, 2, QTableWidgetItem(p.get("gtin") or "—"))
                 t.setItem(r, 3, QTableWidgetItem(f"{p.get('total_codes', 0)} шт."))
-                st_text = "Готов" if not p.get("claimed_by") else f"Выдан ({p['claimed_by']})"
+
+                claimed_by = str(p.get("claimed_by") or "").strip()
+                claimed_low = claimed_by.lower()
+                is_claimed_by_me = bool(claimed_by) and (
+                    (my_pc_name and my_pc_name in claimed_low)
+                    or (my_host and my_host in claimed_low)
+                )
+
+                # Если партия помечена нашим ПК, но сейчас не выбрана — это устаревшая пометка, считаем её свободной ("Готов")
+                if is_claimed_by_me and b_title != active_title:
+                    claimed_by = ""
+
+                if active_title and b_title == active_title:
+                    st_text = "Выбрана сейчас"
+                    st_color = QColor("#2563eb")
+                elif not claimed_by:
+                    st_text = "Готов"
+                    st_color = QColor("#2e856e")
+                else:
+                    st_text = f"Выдан ({claimed_by})"
+                    st_color = QColor("#dc2626")
+
                 st_item = QTableWidgetItem(st_text)
-                st_item.setForeground(QBrush(QColor("#2e856e" if not p.get("claimed_by") else "#f59e0b")))
+                st_item.setForeground(QBrush(st_color))
                 t.setItem(r, 4, st_item)
             if t.rowCount() > 0:
                 t.selectRow(0)
@@ -568,8 +588,7 @@ class OperatorWindow(QWidget):
             if not sel:
                 return
             idx = sel[0].row()
-            title = t.item(idx, 0).text() if t.item(idx, 0) else ""
-            chosen = next((p for p in raw_pkgs if (p.get("batch_title") or p.get("filename")) == title), None)
+            chosen = t.item(idx, 0).data(Qt.UserRole) if t.item(idx, 0) else None
             if not chosen:
                 return
             pt = self.store.current_point or "T-01"
@@ -594,10 +613,36 @@ class OperatorWindow(QWidget):
         dlg.exec()
 
     def _clear_active_batch(self):
-        """Очищает привязку активной партии."""
+        """Очищает привязку активной партии и снимает отметку 'Выдан' в JSON-файле для текущего ПК."""
+        prev_info = self._active_batch_info or {}
+        prev_title = prev_info.get("title") or (self.store.get_setting("active_batch_name") or "")
         self._active_batch_info = None
         self.store.set_setting("active_batch_name", "")
         self.store.set_setting("active_batch_shk", "")
+
+        try:
+            import json
+            my_pc = sync_mod.get_pc_node_name(self.store).strip().lower()
+            folder = sync_mod.get_sync_folder(self.store)
+            for sub in (sync_mod.packages_dir(folder), folder / "master" / "outbox"):
+                if not sub.exists():
+                    continue
+                for jf in sub.glob("*.json"):
+                    try:
+                        data = json.loads(jf.read_text(encoding="utf-8"))
+                        if not isinstance(data, dict):
+                            continue
+                        claimed = str(data.get("claimed_by") or "").strip().lower()
+                        b_title = str(data.get("package_title") or "").strip()
+                        if claimed and (my_pc in claimed or (prev_title and b_title == prev_title)):
+                            data["claimed_by"] = ""
+                            data["claimed_at"] = ""
+                            jf.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
         self._refresh_batch_progress()
         self.toast.show_message("Выбор партии сброшен", "ok")
 
@@ -609,30 +654,23 @@ class OperatorWindow(QWidget):
         self._refresh_batch_progress()
 
     def _refresh_batch_progress(self):
-        """Обновляет остатки по текущей партии."""
+        """Обновляет остатки по текущей партии или показывает, что партия не выбрана."""
         import db
-        if not self._active_batch_info:
-            try:
-                with db.get_conn() as conn:
-                    r = conn.execute(
-                        "SELECT import_batch, gtin, COUNT(*) as cnt, "
-                        "SUM(CASE WHEN used=0 THEN 1 ELSE 0 END) as free "
-                        "FROM pool_codes GROUP BY import_batch ORDER BY id DESC LIMIT 1"
-                    ).fetchone()
-                    if r and r["import_batch"]:
-                        self._active_batch_info = {
-                            "title": r["import_batch"],
-                            "gtin": r["gtin"],
-                            "shk": "",
-                        }
-            except Exception:
-                pass
+
+        def _set_empty_state():
+            self.lbl_batch_title.setText("Заказ / партия не выбрана")
+            self.lbl_batch_sub.setText("Нажмите «Выбрать заказ с сервера», чтобы загрузить марки")
+            self.lbl_batch_counter.setText("0 / 0 шт. (0%)")
+            self.batch_progress_bar.setValue(0)
+            if hasattr(self, "btn_select_batch"):
+                self.btn_select_batch.setText("📦 Выбрать заказ с сервера")
+            if hasattr(self, "btn_clear_batch"):
+                self.btn_clear_batch.setVisible(False)
+            if hasattr(self, "batch_progress_widget"):
+                self.batch_progress_widget.setVisible(False)
 
         if not self._active_batch_info:
-            self.lbl_batch_title.setText("Партия кодов не выбрана. Нажмите «Выбрать заказ», чтобы загрузить коды с сервера.")
-            self.lbl_batch_sub.setText("Без выбранной партии печать марок не производится.")
-            self.lbl_batch_counter.setText("0 / 0 шт.")
-            self.batch_progress_bar.setValue(0)
+            _set_empty_state()
             return
 
         title = self._active_batch_info.get("title", "Партия")
@@ -653,15 +691,33 @@ class OperatorWindow(QWidget):
         except Exception:
             pass
 
+        if total_cnt == 0:
+            self._active_batch_info = None
+            try:
+                self.store.set_setting("active_batch_name", "")
+                self.store.set_setting("active_batch_shk", "")
+            except Exception:
+                pass
+            _set_empty_state()
+            return
+
         used_cnt = total_cnt - free_cnt
         percent = int((used_cnt / total_cnt) * 100) if total_cnt > 0 else 0
 
-        shk_label = f"  ·  ШК: {shk}" if shk else ""
-        self.lbl_batch_title.setText(f"Активная партия: {title}{shk_label}")
-        self.lbl_batch_sub.setText(f"Обработано {used_cnt} из {total_cnt} шт.  ·  Осталось свободных марок: {free_cnt} шт.")
+        self.lbl_batch_title.setText(f"Активная партия: {title}")
+        shk_part = f"ШК: {shk}  ·  " if shk else ""
+        self.lbl_batch_sub.setText(
+            f"{shk_part}Обработано {used_cnt} из {total_cnt} шт.  ·  Осталось: {free_cnt} шт."
+        )
         self.lbl_batch_counter.setText(f"{used_cnt} / {total_cnt} шт. ({percent}%)")
         self.batch_progress_bar.setValue(percent)
 
+        if hasattr(self, "btn_select_batch"):
+            self.btn_select_batch.setText("📦 Сменить заказ")
+        if hasattr(self, "btn_clear_batch"):
+            self.btn_clear_batch.setVisible(True)
+        if hasattr(self, "batch_progress_widget"):
+            self.batch_progress_widget.setVisible(True)
     # ==========================================================================
     # СКАНИРОВАНИЕ И ОБРАБОТКА КОДОВ (БЕЗ МОДАЛЬНЫХ ОКОН ОШИБОК)
     # ==========================================================================
@@ -759,41 +815,28 @@ class OperatorWindow(QWidget):
         self._refresh_batch_progress()
 
     def _show_status(self, kind: str, message: str, sub: str = ""):
-        """Встроенный цветовой статус без блокирующих диалогов (адаптивный под светлую/тёмную тему)."""
-        self._last_status_kind = kind
-        self._last_status_msg = message
-        self._last_status_sub = sub
-        is_lt = self._is_light
-
+        """Встроенный цветовой статус без блокирующих диалогов."""
         if kind == "error":
-            bg_err = "#f9ebeb" if is_lt else "#2a1215"
-            bd_err = "#dca7a9" if is_lt else "#c04d53"
-            fg_err = "#9b2c2c" if is_lt else "#f87171"
-            sub_err = "#742a2a" if is_lt else "#fca5a5"
-            self.status_card.setStyleSheet(f"QFrame#statusCard {{ background:{bg_err}; border-radius:12px; border:2px solid {bd_err}; }}")
+            self.status_card.setStyleSheet("QFrame#statusCard { background:#2a1215; border-radius:12px; border:2px solid #ef4444; }")
             self.lbl_status.setText(message)
-            self.lbl_status.setStyleSheet(f"color:{fg_err}; font-size:18px; font-weight:800; background:transparent; border:none;")
+            self.lbl_status.setStyleSheet("color:#f87171; font-size:18px; font-weight:800;")
             self.lbl_status_sub.setText(sub or "Отсканируйте следующий штрихкод для сброса ошибки")
-            self.lbl_status_sub.setStyleSheet(f"color:{sub_err}; font-size:13px; background:transparent; border:none;")
+            self.lbl_status_sub.setStyleSheet("color:#fca5a5; font-size:13px;")
         elif kind == "success":
-            bg_ok = "#e6f2ed" if is_lt else "#092e20"
-            bd_ok = "#9cc5b3" if is_lt else "#10b981"
-            fg_ok = "#276749" if is_lt else "#34d399"
-            sub_ok = "#22543d" if is_lt else "#a7f3d0"
-            self.status_card.setStyleSheet(f"QFrame#statusCard {{ background:{bg_ok}; border-radius:12px; border:2px solid {bd_ok}; }}")
+            self.status_card.setStyleSheet("QFrame#statusCard { background:#092e20; border-radius:12px; border:2px solid #10b981; }")
             self.lbl_status.setText(message)
-            self.lbl_status.setStyleSheet(f"color:{fg_ok}; font-size:18px; font-weight:800; background:transparent; border:none;")
+            self.lbl_status.setStyleSheet("color:#34d399; font-size:18px; font-weight:800;")
             self.lbl_status_sub.setText(sub or "Готово к сканированию следующего товара")
-            self.lbl_status_sub.setStyleSheet(f"color:{sub_ok}; font-size:13px; background:transparent; border:none;")
+            self.lbl_status_sub.setStyleSheet("color:#a7f3d0; font-size:13px;")
         else:
-            bg_c = "#f8fafc" if is_lt else "#0f172a"
-            bd_c = "#7dd3fc" if is_lt else "#3b6ea5"
-            text_s = "#64748b" if is_lt else "#94a3b8"
-            self.status_card.setStyleSheet(f"QFrame#statusCard {{ background:{bg_c}; border-radius:12px; border:2px solid {bd_c}; }}")
+            border_c = "#e2e8f0" if self._is_light else "#1e293b"
+            bg_c = "#ffffff" if self._is_light else "#0f172a"
+            text_s = "#64748b" if self._is_light else "#94a3b8"
+            self.status_card.setStyleSheet(f"QFrame#statusCard {{ background:{bg_c}; border-radius:12px; border:2px solid #3b6ea5; }}")
             self.lbl_status.setText(message)
-            self.lbl_status.setStyleSheet("color:#3b6ea5; font-size:18px; font-weight:800; background:transparent; border:none;")
+            self.lbl_status.setStyleSheet("color:#3b6ea5; font-size:18px; font-weight:800;")
             self.lbl_status_sub.setText(sub or "Поднесите штрихкод товара к сканеру")
-            self.lbl_status_sub.setStyleSheet(f"color:{text_s}; font-size:13px; background:transparent; border:none;")
+            self.lbl_status_sub.setStyleSheet(f"color:{text_s}; font-size:13px;")
 
     # ==========================================================================
     # ПОВТОР ПЕЧАТИ (1 / 3 / 5)
@@ -801,18 +844,11 @@ class OperatorWindow(QWidget):
     def _show_reprint_menu(self):
         """Меню повтора последних напечатанных этикеток."""
         menu = QMenu(self)
-        if self._is_light:
-            menu.setStyleSheet(
-                "QMenu { background:#ffffff; color:#0f172a; border:1px solid #cbd5e1; padding:4px; border-radius:6px; } "
-                "QMenu::item { padding:8px 18px; border-radius:4px; font-size:14px; font-weight:600; } "
-                "QMenu::item:selected { background:#3b6ea5; color:#ffffff; }"
-            )
-        else:
-            menu.setStyleSheet(
-                "QMenu { background:#1e293b; color:#f8fafc; border:1px solid #475569; padding:4px; border-radius:6px; } "
-                "QMenu::item { padding:8px 18px; border-radius:4px; font-size:14px; font-weight:600; } "
-                "QMenu::item:selected { background:#3b6ea5; color:#ffffff; }"
-            )
+        menu.setStyleSheet(
+            "QMenu { background:#1e293b; color:#f8fafc; border:1px solid #475569; padding:4px; border-radius:6px; } "
+            "QMenu::item { padding:8px 18px; border-radius:4px; font-size:14px; font-weight:600; } "
+            "QMenu::item:selected { background:#3b6ea5; }"
+        )
         act1 = menu.addAction("🖨 1 последняя этикетка")
         act3 = menu.addAction("🖨 3 последних этикетки")
         act5 = menu.addAction("🖨 5 последних этикеток")
@@ -876,109 +912,121 @@ class OperatorWindow(QWidget):
         self.kpi_scans.setText(str(c.get("scans", 0)))
         self.kpi_errors.setText(str(c.get("errors", 0)))
 
-    def apply_theme(self, theme_name: Optional[str] = None):
-        """Мгновенно перекрашивает все карточки, тексты и таблицы окна оператора под активную тему."""
-        t_name = theme_name or get_current_theme()
-        self._is_light = (t_name == "light")
-        is_lt = self._is_light
+    def showEvent(self, event):
+        super().showEvent(event)
+        try:
+            cur_lt = (get_current_theme() == "light")
+            if cur_lt != self._is_light:
+                self.apply_theme("light" if cur_lt else "dark")
+        except Exception:
+            pass
 
-        bg_card = "#f3f5f8" if is_lt else "#0f172a"
-        border_card = "#cfd6e0" if is_lt else "#1e293b"
-        text_main = "#2d3748" if is_lt else "#f8fafc"
-        text_sub = "#5a6778" if is_lt else "#94a3b8"
-        bg_subtle = "#e6eaef" if is_lt else "#1e293b"
+    def apply_theme(self, theme_name: str = ""):
+        """Динамически применяет светлую или тёмную тему ко всем карточкам и элементам окна оператора."""
+        is_lt = (theme_name == "light") if theme_name else (get_current_theme() == "light")
+        self._is_light = is_lt
+
+        if is_lt:
+            bg_main = "#eef1f5"
+            bg_card = "#f3f5f8"
+            bg_subtle = "#e6eaef"
+            border_card = "#cfd6e0"
+            text_main = "#2d3748"
+            text_sub = "#5a6778"
+            disabled_bg = "#e2e8f0"
+            disabled_fg = "#94a3b8"
+            disabled_bd = "#cbd5e1"
+            reprint_hover = "#cbd5e1"
+            clear_bg = "#fef2f2"
+            clear_bd = "#fecaca"
+        else:
+            bg_main = "#0d1117"
+            bg_card = "#161c24"
+            bg_subtle = "#0f172a"
+            border_card = "#2a3542"
+            text_main = "#e6edf3"
+            text_sub = "#8b97a6"
+            disabled_bg = "#1e293b"
+            disabled_fg = "#64748b"
+            disabled_bd = "#334155"
+            reprint_hover = "#334155"
+            clear_bg = "#2a1215"
+            clear_bd = "#7f1d1d"
+
+        self.setStyleSheet(f"OperatorWindow {{ background:{bg_main}; }}")
 
         if hasattr(self, "header_card"):
             self.header_card.setStyleSheet(
-                f"QFrame#headerCard {{ background:{bg_card}; border-radius:10px; "
-                f"border:1px solid {border_card}; padding:4px; }}"
+                f"QFrame#headerCard {{ background:{bg_subtle}; border-radius:10px; border:1px solid {border_card}; padding:4px; }}"
             )
         if hasattr(self, "lbl_point"):
-            self.lbl_point.setStyleSheet(f"font-size:15px; font-weight:700; color:{text_main}; background:transparent; border:none;")
+            self.lbl_point.setStyleSheet(f"font-size:15px; font-weight:700; color:{text_main}; background:transparent;")
         if hasattr(self, "lbl_operator_name"):
-            self.lbl_operator_name.setStyleSheet(f"color:{text_sub}; font-size:14px; font-weight:500; background:transparent; border:none;")
+            self.lbl_operator_name.setStyleSheet(f"color:{text_sub}; font-size:14px; font-weight:500; background:transparent;")
 
         if hasattr(self, "batch_card"):
             self.batch_card.setStyleSheet(
                 f"QFrame#batchCard {{ background:{bg_card}; border-radius:10px; border:1px solid {border_card}; }}"
             )
+        if hasattr(self, "sep_batch"):
+            self.sep_batch.setStyleSheet(f"background:{border_card}; border:none;")
         if hasattr(self, "lbl_batch_title"):
-            self.lbl_batch_title.setStyleSheet(f"color:{text_main}; font-size:15px; font-weight:700; background:transparent; border:none;")
+            self.lbl_batch_title.setStyleSheet(f"color:{text_main}; font-size:15px; font-weight:700; background:transparent;")
         if hasattr(self, "lbl_batch_sub"):
-            self.lbl_batch_sub.setStyleSheet(f"color:{text_sub}; font-size:13px; background:transparent; border:none;")
+            self.lbl_batch_sub.setStyleSheet(f"color:{text_sub}; font-size:12px; background:transparent;")
         if hasattr(self, "btn_clear_batch"):
             self.btn_clear_batch.setStyleSheet(
-                f"QPushButton {{ background:{bg_subtle}; color:{text_sub}; border:1px solid {border_card}; "
-                f"border-radius:6px; font-weight:700; }} QPushButton:hover {{ background:#ef4444; color:#ffffff; }}"
+                f"QPushButton {{ background:{clear_bg}; color:#dc2626; border:1px solid {clear_bd}; "
+                f"border-radius:8px; font-weight:600; font-size:12px; padding:0 12px; }} "
+                f"QPushButton:hover {{ background:#ef4444; color:#ffffff; border-color:#ef4444; }}"
             )
         if hasattr(self, "batch_progress_bar"):
             self.batch_progress_bar.setStyleSheet(
-                f"QProgressBar {{ background:{bg_subtle}; border-radius:4px; border:1px solid {border_card}; }} "
-                f"QProgressBar::chunk {{ background:#3b6ea5; border-radius:3px; }}"
+                f"QProgressBar {{ background:{bg_subtle}; border-radius:4px; border:none; }} "
+                f"QProgressBar::chunk {{ background:#3b6ea5; border-radius:4px; }}"
             )
 
         if hasattr(self, "scan_input"):
-            dis_bg = "#f1f5f9" if is_lt else "#1e293b"
-            dis_fg = "#64748b" if is_lt else "#94a3b8"
             self.scan_input.setStyleSheet(
                 f"QLineEdit#scanInput {{ background:{bg_subtle}; color:{text_main}; font-size:16px; font-weight:600; "
                 f"padding:8px 14px; border:1px solid {border_card}; border-radius:8px; font-family:Consolas,monospace; }} "
                 f"QLineEdit#scanInput:focus {{ border:2px solid #3b6ea5; background:{bg_card}; }} "
-                f"QLineEdit#scanInput:disabled {{ background:{dis_bg}; color:{dis_fg}; border:1px solid {border_card}; }}"
+                f"QLineEdit#scanInput:disabled {{ background:{disabled_bg}; color:{disabled_fg}; border:1px solid {disabled_bd}; }}"
             )
-
         if hasattr(self, "btn_reprint"):
-            hov_bg = "#e2e8f0" if is_lt else "#334155"
             self.btn_reprint.setStyleSheet(
                 f"QPushButton {{ background:{bg_subtle}; color:{text_main}; font-size:14px; font-weight:600; "
                 f"padding:6px 14px; border-radius:8px; border:1px solid {border_card}; }} "
-                f"QPushButton:hover {{ background:{hov_bg}; }}"
+                f"QPushButton:hover {{ background:{reprint_hover}; }}"
             )
 
         if hasattr(self, "last_card"):
-            self.last_card.setStyleSheet(f"QFrame {{ background:{bg_card}; border-radius:10px; border:1px solid {border_card}; }}")
+            self.last_card.setStyleSheet(f"background:{bg_card}; border-radius:10px; border:1px solid {border_card};")
         if hasattr(self, "lc_title"):
-            self.lc_title.setStyleSheet(f"color:{text_sub}; font-size:12px; font-weight:700; letter-spacing:1px; background:transparent; border:none;")
+            self.lc_title.setStyleSheet(f"color:{text_sub}; font-size:12px; font-weight:700; letter-spacing:1px; background:transparent;")
         if hasattr(self, "lbl_last_product"):
-            self.lbl_last_product.setStyleSheet(f"font-size:15px; font-weight:700; color:{text_main}; background:transparent; border:none;")
+            self.lbl_last_product.setStyleSheet(f"font-size:15px; font-weight:700; color:{text_main}; background:transparent;")
         if hasattr(self, "lbl_last_details"):
-            self.lbl_last_details.setStyleSheet(f"font-family:Consolas,monospace; color:{text_sub}; font-size:13px; background:transparent; border:none;")
+            self.lbl_last_details.setStyleSheet(f"font-family:Consolas,monospace; color:{text_sub}; font-size:13px; background:transparent;")
         if hasattr(self, "lbl_last_dm"):
-            self.lbl_last_dm.setStyleSheet("font-family:Consolas,monospace; color:#2e856e; font-size:12px; background:transparent; border:none;")
+            self.lbl_last_dm.setStyleSheet("font-family:Consolas,monospace; color:#2e856e; font-size:12px; background:transparent;")
 
         if hasattr(self, "kpi_card"):
-            self.kpi_card.setStyleSheet(f"QFrame {{ background:{bg_card}; border-radius:10px; border:1px solid {border_card}; }}")
-        for k_lbl in getattr(self, "_kpi_title_labels", []):
-            k_lbl.setStyleSheet(f"color:{text_sub}; font-size:12px; font-weight:600; background:transparent; border:none;")
-        if hasattr(self, "kpi_prints"):
-            self.kpi_prints.setStyleSheet("color:#2e856e; font-size:24px; font-weight:800; font-family:Consolas,monospace; background:transparent; border:none;")
-        if hasattr(self, "kpi_scans"):
-            self.kpi_scans.setStyleSheet("color:#3b6ea5; font-size:24px; font-weight:800; font-family:Consolas,monospace; background:transparent; border:none;")
-        if hasattr(self, "kpi_errors"):
-            self.kpi_errors.setStyleSheet("color:#c04d53; font-size:24px; font-weight:800; font-family:Consolas,monospace; background:transparent; border:none;")
+            self.kpi_card.setStyleSheet(f"background:{bg_card}; border-radius:10px; border:1px solid {border_card};")
+        for lbl in getattr(self, "kpi_lbls", []):
+            lbl.setStyleSheet(f"color:{text_sub}; font-size:12px; font-weight:600; background:transparent;")
 
         if hasattr(self, "hist_title"):
-            self.hist_title.setStyleSheet(f"color:{text_sub}; font-size:12px; font-weight:700; letter-spacing:1px; background:transparent; border:none;")
+            self.hist_title.setStyleSheet(f"color:{text_sub}; font-size:12px; font-weight:700; letter-spacing:1px; background:transparent;")
         if hasattr(self, "history_table"):
             self.history_table.setStyleSheet(
                 f"QTableWidget {{ background:{bg_card}; border-radius:8px; border:1px solid {border_card}; color:{text_main}; font-size:13px; }} "
-                f"QHeaderView::section {{ background:{bg_subtle}; color:{text_sub}; font-weight:600; border:none; border-bottom:1px solid {border_card}; padding:6px 8px; }}"
+                f"QHeaderView::section {{ background:{bg_subtle}; color:{text_sub}; font-weight:600; border:none; padding:4px 8px; }}"
             )
 
-        # Перекрашиваем текущий статус-баннер и плашку принтера
-        kind = getattr(self, "_last_status_kind", "ready")
-        msg = getattr(self, "_last_status_msg", self.lbl_status.text() if hasattr(self, "lbl_status") else "")
-        sub = getattr(self, "_last_status_sub", self.lbl_status_sub.text() if hasattr(self, "lbl_status_sub") else "")
-        self._show_status(kind, msg, sub)
-        self._refresh_header_route()
-
-    def showEvent(self, event):
-        """Мгновенно синхронизирует тему (только при её изменении) и статус оборудования при открытии вкладки оператора."""
-        super().showEvent(event)
-        cur_is_light = (get_current_theme() == "light")
-        if getattr(self, "_is_light", None) != cur_is_light:
-            self.apply_theme("light" if cur_is_light else "dark")
-        else:
-            self._refresh_header_route()
         if hasattr(self, "scan_input") and self.scan_input.isEnabled():
-            self.scan_input.setFocus()
+            self._show_status(
+                "ready",
+                self.lbl_status.text() if hasattr(self, "lbl_status") else "🟢 Ожидание сканирования / ручного ввода",
+                sub=self.lbl_status_sub.text() if hasattr(self, "lbl_status_sub") else "Поднесите штрихкод товара к сканеру"
+            )

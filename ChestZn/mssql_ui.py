@@ -9,20 +9,6 @@ ChestZn — Пользовательский интерфейс настройк
 
 from typing import Dict, Any, Optional
 from PySide6.QtCore import Qt, Signal
-import os
-import json
-from pathlib import Path
-
-def _is_light_theme() -> bool:
-    try:
-        cfg_path = Path(os.environ.get("APPDATA", Path.home())) / "ChestZn" / "config.json"
-        if cfg_path.exists():
-            data = json.loads(cfg_path.read_text(encoding="utf-8"))
-            return data.get("app_theme", "dark") == "light"
-    except Exception:
-        pass
-    return False
-
 from PySide6.QtWidgets import (
     QWidget, QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QGridLayout,
     QLabel, QLineEdit, QPushButton, QComboBox, QCheckBox, QTabWidget,
@@ -268,14 +254,9 @@ class SQLServerConfigDialog(QDialog):
 
         self.txt_preview_sql = QTextEdit()
         self.txt_preview_sql.setReadOnly(True)
-        if _is_light_theme():
-            self.txt_preview_sql.setStyleSheet(
-                "font-family: Consolas, monospace; font-size: 13px; background-color: #f8fafc; color: #0f172a; border: 1px solid #cbd5e1; border-radius: 6px; padding: 8px;"
-            )
-        else:
-            self.txt_preview_sql.setStyleSheet(
-                "font-family: Consolas, monospace; font-size: 13px; background-color: #1e1e1e; color: #d4d4d4; border: 1px solid #334155; border-radius: 6px; padding: 8px;"
-            )
+        self.txt_preview_sql.setStyleSheet(
+            "font-family: Consolas, monospace; font-size: 13px; background-color: #1e1e1e; color: #d4d4d4;"
+        )
         layout.addWidget(self.txt_preview_sql)
 
     def _on_mock_mode_toggled(self, checked: bool):
@@ -523,8 +504,7 @@ class SQLServerAdminPage(QWidget):
         header_layout.addWidget(self.btn_open_settings)
         layout.addLayout(header_layout)
 
-        self.status_box = QGroupBox("Состояние соединения с MS SQL Server")
-        status_box = self.status_box
+        status_box = QGroupBox("Состояние соединения с MS SQL Server")
         status_layout = QGridLayout(status_box)
 
         status_layout.addWidget(QLabel("Сервер:"), 0, 0)
@@ -548,8 +528,7 @@ class SQLServerAdminPage(QWidget):
 
         layout.addWidget(status_box)
 
-        self.actions_box = QGroupBox("Операции обмена с MS SQL Server")
-        actions_box = self.actions_box
+        actions_box = QGroupBox("Операции обмена с MS SQL Server")
         actions_layout = QVBoxLayout(actions_box)
         actions_layout.setSpacing(12)
 
@@ -572,7 +551,7 @@ class SQLServerAdminPage(QWidget):
 
         self.btn_full_sync = QPushButton("⚡ Полный цикл обмена")
         self.btn_full_sync.setStyleSheet(
-            "background-color: #1976d2; color: white; font-weight: bold; padding: 10px 18px; font-size: 13px;"
+            "background-color: #3b6ea5; color: white; font-weight: bold; padding: 10px 18px; font-size: 13px;"
         )
         self.btn_full_sync.clicked.connect(lambda: self.sync_requested.emit("all"))
         btns_row.addWidget(self.btn_full_sync)
@@ -592,8 +571,7 @@ class SQLServerAdminPage(QWidget):
 
         layout.addWidget(actions_box)
 
-        self.log_box = QGroupBox("Лог операций обмена с MS SQL Server")
-        log_box = self.log_box
+        log_box = QGroupBox("Лог операций обмена с MS SQL Server")
         log_layout = QVBoxLayout(log_box)
         self.txt_log = QTextEdit()
         self.txt_log.setReadOnly(True)
@@ -604,40 +582,6 @@ class SQLServerAdminPage(QWidget):
         )
         log_layout.addWidget(self.txt_log)
         layout.addWidget(log_box)
-        self.apply_theme()
-
-    def apply_theme(self, theme_name: str = ""):
-        is_lt = (theme_name == "light") if theme_name else _is_light_theme()
-        gb_bg = "#ffffff" if is_lt else "#0f172a"
-        gb_border = "#cbd5e1" if is_lt else "#1e293b"
-        gb_title = "#334155" if is_lt else "#94a3b8"
-        txt_col = "#0f172a" if is_lt else "#f8fafc"
-
-        gb_qss = (
-            f"QGroupBox {{ background-color: {gb_bg}; border: 1px solid {gb_border}; border-radius: 10px; "
-            f"margin-top: 10px; padding: 14px; font-weight: 700; color: {txt_col}; }} "
-            f"QGroupBox::title {{ subcontrol-origin: margin; subcontrol-position: top left; "
-            f"left: 12px; padding: 0 6px; color: {gb_title}; font-size: 12px; font-weight: 700; }}"
-        )
-        for box in (getattr(self, "status_box", None), getattr(self, "actions_box", None), getattr(self, "log_box", None)):
-            if box is not None:
-                box.setStyleSheet(gb_qss)
-
-        if hasattr(self, "txt_log"):
-            if is_lt:
-                self.txt_log.setStyleSheet(
-                    "background-color: #f8fafc; color: #0f172a; border: 1px solid #cbd5e1; "
-                    "border-radius: 8px; padding: 8px; font-family: Consolas, monospace; font-size: 12px;"
-                )
-            else:
-                self.txt_log.setStyleSheet(
-                    "background-color: #0d1117; color: #c9d1d9; border: 1px solid #1e293b; "
-                    "border-radius: 8px; padding: 8px; font-family: Consolas, monospace; font-size: 12px;"
-                )
-
-    def showEvent(self, event):
-        super().showEvent(event)
-        self.apply_theme()
 
     def _refresh_labels_from_cfg(self):
         cfg = load_mssql_config(self.store)

@@ -648,11 +648,8 @@ class AdminWindow(QWidget):
 
         try:
             win = self.window()
-            if hasattr(win, "operator") and hasattr(win.operator, "lbl_op"):
-                if live_rows and live_rows[0][0]:
-                    win.operator.lbl_op.setText(f"📡 {live_rows[0][0]}")
-                else:
-                    win.operator.lbl_op.setText("📡 Сканер: Готов")
+            if hasattr(win, "operator") and hasattr(win.operator, "_refresh_header_route"):
+                win.operator._refresh_header_route()
         except Exception:
             pass
 
@@ -829,51 +826,118 @@ class AdminWindow(QWidget):
         return w
 
     def _refresh_points(self):
+        import socket
         self.points_tree.clear()
+
+        if not hasattr(self, "_remote_pc_cache"):
+            self._remote_pc_cache = {}
+
+        try:
+            my_role = sync_mod.get_pc_role(self.store)
+            my_node = sync_mod.get_pc_node_name(self.store).strip()
+        except Exception:
+            my_role = "master"
+            my_node = socket.gethostname() or "PC-MAIN"
+
+        is_master = (my_role == "master")
+        real_hostname = socket.gethostname().strip()
+        real_ip = getattr(self, "_cached_real_ip", None)
+        if not real_ip:
+            real_ip = "127.0.0.1"
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.settimeout(0.05)
+                s.connect(("8.8.8.8", 80))
+                real_ip = s.getsockname()[0]
+                s.close()
+            except Exception:
+                try:
+                    real_ip = socket.gethostbyname(real_hostname)
+                except Exception:
+                    real_ip = "127.0.0.1"
+            self._cached_real_ip = real_ip
+
+        local_ips = {"127.0.0.1", "localhost", real_ip.lower()}
+        cur_pt_id = getattr(self.store, "current_point", "T-01") or "T-01"
 
         for p in self.store.points:
             item = QTreeWidgetItem(self.points_tree)
 
             item.setText(0, f"{p['id']} — {p['name']}")
             item.setText(1, p.get("address", "—"))
-
-            p_online = p.get("online", False)
-            item.setText(2, "🟢  онлайн" if p_online else "🟡  офлайн")
-            item.setText(3, p.get("ip", "—"))
+            item.setText(3, real_ip if p["id"] == cur_pt_id else p.get("ip", "—"))
 
             f = item.font(0)
             f.setBold(True)
             f.setPointSize(f.pointSize() + 1)
             item.setFont(0, f)
 
-            if p_online:
-                item.setForeground(2, QBrush(QColor("#22c55e")))
-            else:
-                item.setForeground(2, QBrush(QColor("#f59e0b")))
-
             computers = p.get("computers", [])
+            point_has_online_comp = False
+
+            explicit_match_found = any(
+                ((c.get("ip") or "").strip().lower() in local_ips)
+                or ((c.get("name") or "").strip().lower() in (my_node.lower(), real_hostname.lower()))
+                for c in computers
+            )
 
             if not computers:
                 child = QTreeWidgetItem(item)
                 child.setText(0, "    Нет подключённых компьютеров")
                 child.setForeground(0, QBrush(QColor("#64748b")))
             else:
-                for c in computers:
+                for idx_c, c in enumerate(computers):
                     ch = QTreeWidgetItem(item)
-                    ch.setText(0, f"    💻  {c.get('name', 'ПК')}")
-                    ch.setText(1, c.get("role", "Рабочее место"))
+                    c_name = c.get("name", "ПК")
+                    c_ip = (c.get("ip") or "").strip()
+                    c_ip_l = c_ip.lower()
+                    c_name_l = c_name.lower()
 
-                    c_online = c.get("online", False)
-                    ch.setText(2, "🟢  онлайн" if c_online else "🟡  офлайн")
-                    ch.setText(3, c.get("ip", "—"))
+                    is_local = (
+                        (c_ip_l in local_ips and c_ip_l != "")
+                        or (c_name_l in (my_node.lower(), real_hostname.lower()))
+                        or (
+                            not explicit_match_found
+                            and p["id"] == cur_pt_id
+                            and (c_name_l in ("пк-01", "pc-01", "master") or idx_c == 0)
+                        )
+                    )
 
-                    if c_online:
+                    if is_local:
+                        point_has_online_comp = True
+                        display_name = f"{c_name} ({real_hostname})" if real_hostname and real_hostname.lower() != c_name_l else c_name
+                        role_tag = "👑 Мастер-ПК" if is_master else "💻 Рабочий ПК"
+                        ch.setText(0, f"    💻  {display_name}")
+                        ch.setText(1, f"{role_tag} · {c.get('role', 'Основной оператор')}")
+                        ch.setText(2, "🟢  онлайн")
                         ch.setForeground(2, QBrush(QColor("#22c55e")))
+                        ch.setText(3, real_ip)
                     else:
-                        ch.setForeground(2, QBrush(QColor("#f59e0b")))
+                        cached = self._remote_pc_cache.get(c_ip)
+                        c_online = bool(cached[0]) if cached else False
+                        lat = cached[1] if cached else None
+                        if c_online:
+                            point_has_online_comp = True
+                            latency_str = f" ({int(lat) if lat else '<1'} мс)"
+                            ch.setText(0, f"    💻  {c_name}")
+                            ch.setText(1, f"{c.get('role', 'Рабочее место')} · подключён")
+                            ch.setText(2, f"🟢  онлайн{latency_str}")
+                            ch.setForeground(2, QBrush(QColor("#22c55e")))
+                        else:
+                            ch.setText(0, f"    💻  {c_name}")
+                            ch.setText(1, f"{c.get('role', 'Рабочее место')} · не в сети")
+                            ch.setText(2, "🔴  офлайн")
+                            ch.setForeground(2, QBrush(QColor("#ef4444")))
+                        ch.setText(3, c_ip or "—")
 
-            item.setExpanded(p_online)
+            if point_has_online_comp:
+                item.setText(2, "🟢  онлайн")
+                item.setForeground(2, QBrush(QColor("#22c55e")))
+            else:
+                item.setText(2, "🔴  офлайн")
+                item.setForeground(2, QBrush(QColor("#ef4444")))
 
+            item.setExpanded(point_has_online_comp)
     # ==========================================================
     # Редактирование точек и компьютеров
     # ==========================================================
@@ -1044,7 +1108,23 @@ class AdminWindow(QWidget):
         head.addWidget(btn_quick_bind)
 
         btn_refresh = QPushButton("🔄 Обновить")
-        btn_refresh.clicked.connect(self._refresh_devices)
+        def _on_manual_refresh():
+            btn_refresh.setEnabled(False)
+            btn_refresh.setText("Обновление...")
+            from PySide6.QtWidgets import QApplication
+            QApplication.processEvents()
+            try:
+                from device_discovery import detect_local_printers, detect_local_scanners
+                detect_local_printers(force_refresh=True)
+                detect_local_scanners(force_refresh=True)
+            except Exception:
+                pass
+            self._refresh_devices(force_probe=True)
+            btn_refresh.setEnabled(True)
+            btn_refresh.setText("🔄 Обновить")
+            if hasattr(self, "toast"):
+                self.toast.show_message("Статусы оборудования и ПК обновлены", "ok")
+        btn_refresh.clicked.connect(_on_manual_refresh)
         head.addWidget(btn_refresh)
 
         v.addLayout(head)
@@ -1103,40 +1183,129 @@ class AdminWindow(QWidget):
 
         return w
 
-    def _refresh_devices(self):
+    def _start_async_remote_pc_probe(self, ips_to_check: list, force: bool = False):
+        """Параллельно в фоне проверяет доступность удалённых ПК и сетевых принтеров без фриза UI."""
+        import threading
+        import time
+        from concurrent.futures import ThreadPoolExecutor
+        from PySide6.QtCore import QTimer
+
+        if not hasattr(self, "_remote_pc_cache"):
+            self._remote_pc_cache = {}
+        if getattr(self, "_probe_running", False):
+            return
+
+        now = time.time()
+        stale_ips = [
+            ip for ip in set(ips_to_check)
+            if ip and ip not in ("—", "") and (force or (now - self._remote_pc_cache.get(ip, (False, None, 0.0))[2]) > 15.0)
+        ]
+        if not stale_ips:
+            return
+
+        self._probe_running = True
+
+        def _worker():
+            changed = False
+            try:
+                from device_discovery import check_computer_online
+                def _ping_one(target_ip):
+                    try:
+                        alive, _, lat = check_computer_online(target_ip, timeout_ms=250)
+                        return target_ip, bool(alive), lat
+                    except Exception:
+                        return target_ip, False, None
+
+                with ThreadPoolExecutor(max_workers=min(8, len(stale_ips))) as pool:
+                    for tip, alive, lat in pool.map(_ping_one, stale_ips):
+                        old_val = self._remote_pc_cache.get(tip)
+                        self._remote_pc_cache[tip] = (alive, lat, time.time())
+                        if old_val is None or old_val[0] != alive:
+                            changed = True
+            except Exception as e:
+                log.debug("async remote probe: %s", e)
+            finally:
+                self._probe_running = False
+                if changed:
+                    try:
+                        QTimer.singleShot(0, self._refresh_devices)
+                    except Exception:
+                        pass
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _refresh_devices(self, force_probe: bool = False):
+        import socket
+        import time
+        from datetime import datetime
+
         self.devices_tree.clear()
 
-        import socket
-        try:
-            local_hostname = socket.gethostname().strip().lower()
-        except Exception:
-            local_hostname = ""
+        if not hasattr(self, "_remote_pc_cache"):
+            self._remote_pc_cache = {}
 
+        # 1. Быстрый кэшированный опрос локального оборудования
         try:
             from device_discovery import detect_local_printers, detect_local_scanners
-            live_printers_list = detect_local_printers(connected_only=True, force_refresh=False)
-            live_scanners_list = detect_local_scanners(connected_only=True, force_refresh=False)
-        except Exception:
-            live_printers_list = []
-            live_scanners_list = []
+            live_printers = detect_local_printers(connected_only=True, force_refresh=False) or []
+            live_scanners = detect_local_scanners(connected_only=True, force_refresh=False) or []
+        except Exception as e:
+            log.debug("Ошибка опроса локальных устройств: %s", e)
+            live_printers = []
+            live_scanners = []
 
-        live_pr_names = {p['name'].strip().lower() for p in live_printers_list if p.get('name')}
-        live_sc_devs = {str(s.get('device') or '').strip().lower() for s in live_scanners_list}
-        has_any_live_sc = bool(live_scanners_list)
-        cur_point_id = getattr(self.store, 'current_point', None) or 'T-01'
+        live_pr_names = {p["name"].strip().lower() for p in live_printers if p.get("online")}
+        live_sc_names = {str(s.get("device") or s.get("name") or "").strip().lower() for s in live_scanners}
+        has_live_hid = any(s.get("connect_type") == "USB-HID" for s in live_scanners)
+        active_coms = set()
+        try:
+            import serial.tools.list_ports
+            active_coms = {cp.device.upper().rstrip(":") for cp in serial.tools.list_ports.comports()}
+        except Exception:
+            pass
+
+        # 2. Роль и параметры запущенного ПК (с кэшированием IP)
+        try:
+            my_role = sync_mod.get_pc_role(self.store)
+            my_node = sync_mod.get_pc_node_name(self.store).strip()
+        except Exception:
+            my_role = "master"
+            my_node = socket.gethostname() or "PC-MAIN"
+
+        is_master = (my_role == "master")
+        real_hostname = socket.gethostname().strip()
+        real_ip = getattr(self, "_cached_real_ip", None)
+        if not real_ip:
+            real_ip = "127.0.0.1"
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.settimeout(0.05)
+                s.connect(("8.8.8.8", 80))
+                real_ip = s.getsockname()[0]
+                s.close()
+            except Exception:
+                try:
+                    real_ip = socket.gethostbyname(real_hostname)
+                except Exception:
+                    real_ip = "127.0.0.1"
+            self._cached_real_ip = real_ip
+
+        local_ips = {"127.0.0.1", "localhost", real_ip.lower()}
+        cur_pt_id = getattr(self.store, "current_point", "T-01") or "T-01"
+
+        sync_folder = None
+        try:
+            sync_folder = sync_mod.get_sync_folder(self.store)
+        except Exception:
+            pass
+
+        remote_ips_to_probe = []
 
         for point in self.store.points:
             point_item = QTreeWidgetItem(self.devices_tree)
-            is_active_point = (point["id"] == cur_point_id)
             point_item.setText(0, f"🏢  {point['id']} — {point['name']}")
             point_item.setText(1, point.get("address", "—"))
-            if is_active_point:
-                point_item.setText(2, "🟢  онлайн")
-                point_item.setForeground(2, QBrush(QColor("#16a34a" if _is_light_theme() else "#22c55e")))
-            else:
-                point_item.setText(2, "🟡  офлайн")
-                point_item.setForeground(2, QBrush(QColor("#d97706" if _is_light_theme() else "#f59e0b")))
-            point_item.setText(3, point.get("ip", "—"))
+            point_item.setText(3, real_ip if point["id"] == cur_pt_id else point.get("ip", "—"))
             point_item.setData(0, Qt.UserRole, ("point", point["id"]))
 
             f = point_item.font(0)
@@ -1147,104 +1316,229 @@ class AdminWindow(QWidget):
             computers = self.store.list_computers(point_id=point["id"])
 
             if not computers:
+                point_item.setText(2, "🔴  офлайн")
+                point_item.setForeground(2, QBrush(QColor("#ef4444")))
                 empty = QTreeWidgetItem(point_item)
                 empty.setText(0, "    Нет компьютеров")
                 empty.setForeground(0, QBrush(QColor("#64748b")))
                 continue
 
-            for comp in computers:
+            explicit_match_found = any(
+                ((c.get("ip") or "").strip().lower() in local_ips)
+                or ((c.get("name") or "").strip().lower() in (my_node.lower(), real_hostname.lower()))
+                or ((c.get("sync_node") or "").strip().lower() in (my_node.lower(), real_hostname.lower()))
+                for c in computers
+            )
+
+            point_has_online_comp = False
+
+            for idx_c, comp in enumerate(computers):
                 c_item = QTreeWidgetItem(point_item)
-                c_item.setText(0, f"    💻  {comp['name']}")
-                c_item.setText(1, comp.get("role", "—"))
-
-                comp_name_l = str(comp.get("name") or "").strip().lower()
-                sync_node_l = str(comp.get("sync_node") or "").strip().lower()
-                is_this_machine = bool(local_hostname and (local_hostname in comp_name_l or local_hostname in sync_node_l))
-                # Компьютер онлайн только если запущен на текущей активной точке
-                c_online = bool(is_active_point and (is_this_machine or comp.get("online", True)))
-                c_item.setText(2, "🟢  онлайн" if c_online else "🟡  офлайн")
-                c_item.setText(3, comp.get("ip") or "—")
-
-                sync_state = "обмен вкл" if comp.get("sync_enabled") else "обмен выкл"
-                c_item.setText(4, f"узел: {comp.get('sync_node', '—')} · {sync_state}")
-
                 c_item.setData(0, Qt.UserRole, ("computer", comp["id"]))
-
                 cf = c_item.font(0)
                 cf.setBold(True)
                 c_item.setFont(0, cf)
 
-                if c_online:
-                    c_item.setForeground(2, QBrush(QColor("#22c55e")))
-                else:
-                    c_item.setForeground(2, QBrush(QColor("#f59e0b")))
+                c_ip = (comp.get("ip") or "").strip()
+                c_name = (comp.get("name") or "").strip()
+                c_node = (comp.get("sync_node") or "").strip()
 
+                is_local = (
+                    (c_ip.lower() in local_ips and c_ip != "")
+                    or (c_name.lower() in (my_node.lower(), real_hostname.lower()))
+                    or (c_node.lower() in (my_node.lower(), real_hostname.lower()))
+                    or (
+                        not explicit_match_found
+                        and point["id"] == cur_pt_id
+                        and (c_name.lower() in ("пк-01", "pc-01", "master") or idx_c == 0)
+                    )
+                )
+
+                c_online = False
+
+                if is_local:
+                    c_online = True
+                    point_has_online_comp = True
+                    display_pc = f"{c_name} ({real_hostname})" if real_hostname and real_hostname.lower() != c_name.lower() else c_name
+                    role_badge = f"👑 Мастер-ПК · {comp.get('role', 'Основной оператор')}" if is_master else f"💻 Рабочий пост · {comp.get('role', 'Рабочее место')}"
+                    c_item.setText(0, f"    💻  {display_pc}")
+                    c_item.setText(1, role_badge)
+                    c_item.setText(2, "🟢  онлайн")
+                    c_item.setForeground(2, QBrush(QColor("#22c55e")))
+                    c_item.setText(3, real_ip)
+                    sync_state = "обмен вкл" if comp.get("sync_enabled", True) else "обмен выкл"
+                    c_item.setText(4, f"узел: {my_node} · {sync_state}")
+                else:
+                    if c_ip and c_ip not in ("—", ""):
+                        remote_ips_to_probe.append(c_ip)
+                    cached = self._remote_pc_cache.get(c_ip)
+                    c_online = bool(cached[0]) if cached else False
+                    lat = cached[1] if cached else None
+                    latency_info = f" ({int(lat) if lat else '<1'} мс)" if c_online and lat is not None else ""
+
+                    recent_sync_str = ""
+                    if sync_folder:
+                        inbox_file = sync_mod.inbox_path(sync_folder, point["id"])
+                        if inbox_file.exists():
+                            try:
+                                mtime = inbox_file.stat().st_mtime
+                                age_sec = time.time() - mtime
+                                if age_sec < 86400:
+                                    t_str = datetime.fromtimestamp(mtime).strftime("%H:%M")
+                                    recent_sync_str = f"обмен: {t_str}"
+                                    if not c_online and age_sec < 300:
+                                        c_online = True
+                            except Exception:
+                                pass
+
+                    if c_online:
+                        point_has_online_comp = True
+                        c_item.setText(0, f"    💻  {c_name}")
+                        c_item.setText(1, f"{comp.get('role', 'Рабочий пост')} · подключён")
+                        c_item.setText(2, f"🟢  онлайн{latency_info}")
+                        c_item.setForeground(2, QBrush(QColor("#22c55e")))
+                    else:
+                        c_item.setText(0, f"    💻  {c_name}")
+                        c_item.setText(1, f"{comp.get('role', 'Рабочий пост')} · не в сети")
+                        c_item.setText(2, "🔴  офлайн")
+                        c_item.setForeground(2, QBrush(QColor("#ef4444")))
+
+                    c_item.setText(3, c_ip or "—")
+                    extra_info = [f"узел: {comp.get('sync_node', '—')}"]
+                    if recent_sync_str:
+                        extra_info.append(recent_sync_str)
+                    elif comp.get("sync_enabled"):
+                        extra_info.append("обмен вкл")
+                    c_item.setText(4, " · ".join(extra_info))
+
+                # --- Принтеры ---
                 printers = self.store.list_printers_for_computer(comp["id"])
+                shown_pr_names = set()
                 for pr in printers:
                     p_item = QTreeWidgetItem(c_item)
-                    pr_name_clean = str(pr.get("name", "")).strip()
-                    p_item.setText(0, f"        🖨  {pr_name_clean}")
+                    p_name = (pr.get("name") or "").strip()
+                    shown_pr_names.add(p_name.lower())
+                    p_ip = (pr.get("ip") or "").strip()
+                    p_port = pr.get("port")
+                    p_online = False
+                    p_status_text = "🔴  офлайн"
+                    p_status_color = QColor("#ef4444")
+
+                    if is_local:
+                        if p_ip and p_ip != "—":
+                            remote_ips_to_probe.append(p_ip)
+                            p_cached = self._remote_pc_cache.get(p_ip)
+                            p_online = bool(p_cached[0]) if p_cached else False
+                            p_status_text = "🟢  онлайн" if p_online else "🔴  офлайн"
+                            p_status_color = QColor("#22c55e") if p_online else QColor("#ef4444")
+                        else:
+                            p_low = p_name.lower()
+                            p_online = (p_low in live_pr_names or any(lp in p_low or p_low in lp for lp in live_pr_names))
+                            p_status_text = "🟢  онлайн" if p_online else "🔴  офлайн"
+                            p_status_color = QColor("#22c55e") if p_online else QColor("#ef4444")
+                    else:
+                        if not c_online:
+                            p_status_text = "🔴  офлайн"
+                            p_status_color = QColor("#ef4444")
+                        elif p_ip and p_ip != "—":
+                            remote_ips_to_probe.append(p_ip)
+                            p_cached = self._remote_pc_cache.get(p_ip)
+                            p_online = bool(p_cached[0]) if p_cached else False
+                            p_status_text = "🟢  онлайн" if p_online else "🔴  офлайн"
+                            p_status_color = QColor("#22c55e") if p_online else QColor("#ef4444")
+                        else:
+                            p_online = bool(pr.get("online", True))
+                            p_status_text = "🟢  онлайн" if p_online else "🔴  офлайн"
+                            p_status_color = QColor("#22c55e") if p_online else QColor("#ef4444")
+
+                    p_item.setText(0, f"        🖨  {p_name}")
                     p_item.setText(1, f"язык: {pr.get('lang', 'auto')}")
+                    p_item.setText(2, p_status_text)
+                    p_item.setForeground(2, QBrush(p_status_color))
 
-                    # Живая проверка: принтер онлайн только если он реально подключен и включён
-                    is_local_point = bool(is_active_point and c_online)
-                    if is_local_point:
-                        pr_is_live = bool(pr_name_clean.lower() in live_pr_names or any(pr_name_clean.lower() in lp for lp in live_pr_names))
-                    else:
-                        pr_is_live = bool(pr.get("online", False))
-
-                    if pr_is_live:
-                        p_item.setText(2, "🟢  онлайн")
-                        p_item.setForeground(2, QBrush(QColor("#16a34a" if _is_light_theme() else "#22c55e")))
-                    else:
-                        p_item.setText(2, "🔴  отключён")
-                        p_item.setForeground(2, QBrush(QColor("#dc2626" if _is_light_theme() else "#ef4444")))
-
-                    target = pr.get("ip") or "USB"
-                    if pr.get("port") and pr.get("ip"):
-                        target = f"{pr['ip']}:{pr['port']}"
+                    target = p_ip or "USB"
+                    if p_port and p_ip:
+                        target = f"{p_ip}:{p_port}"
                     p_item.setText(3, target)
                     p_item.setText(4, f"{int(pr.get('width_mm', 58))}×{int(pr.get('height_mm', 40))} мм · {pr.get('dpi', 203)} DPI")
                     p_item.setData(0, Qt.UserRole, ("printer", pr["id"]))
 
+                if is_local:
+                    for lp in live_printers:
+                        lp_name = (lp.get("name") or "").strip()
+                        if lp_name and lp_name.lower() not in shown_pr_names and not any(
+                            lp_name.lower() in sn or sn in lp_name.lower() for sn in shown_pr_names
+                        ):
+                            p_item = QTreeWidgetItem(c_item)
+                            p_item.setText(0, f"        🖨  {lp_name}")
+                            p_item.setText(1, f"язык: {lp.get('lang', 'auto')} · найден на ПК")
+                            p_item.setText(2, "🟢  онлайн")
+                            p_item.setForeground(2, QBrush(QColor("#22c55e")))
+                            p_item.setText(3, lp.get("port", "USB"))
+                            p_item.setText(4, "подключён сейчас")
+
+                # --- Сканеры ---
                 scanners = self.store.list_scanners_for_computer(comp["id"])
+                shown_sc_names = set()
                 for sc in scanners:
                     s_item = QTreeWidgetItem(c_item)
-                    sc_name_clean = str(sc.get("name", "")).strip()
-                    s_item.setText(0, f"        📡  {sc_name_clean}")
-                    s_item.setText(1, f"Тип: {sc.get('connect_type', 'usb')}")
+                    sc_name = (sc.get("name") or "").strip()
+                    shown_sc_names.add(sc_name.lower())
+                    sc_enabled = bool(sc.get("enabled", True))
+                    sc_type = str(sc.get("connect_type") or "usb-hid").lower()
+                    com_port = (sc.get("com_port") or "").upper().rstrip(":")
+                    sc_ip = (sc.get("ip") or "").strip()
+                    sc_port = sc.get("port")
+                    s_status_text = "🔴  отключён"
+                    s_status_color = QColor("#ef4444")
 
-                    # Живая проверка: сканер онлайн только если он физически присутствует в системе
-                    c_type = str(sc.get("connect_type", "usb")).lower()
-                    com_port_val = str(sc.get("com_port", "")).strip().lower()
-                    is_local_point = bool(is_active_point and c_online)
-
-                    if not sc.get("enabled", True):
-                        sc_is_live = False
-                        status_str = "⚪  отключён"
-                    elif is_local_point:
-                        if c_type in ("usb-com", "bt-spp") and com_port_val:
-                            sc_is_live = bool(com_port_val in live_sc_devs)
+                    if not sc_enabled:
+                        s_status_text = "🔴  отключён"
+                        s_status_color = QColor("#ef4444")
+                    elif is_local:
+                        if sc_type in ("usb-com", "bt-spp"):
+                            if com_port and com_port in active_coms:
+                                s_status_text = f"🟢  активен ({com_port})"
+                                s_status_color = QColor("#22c55e")
+                            else:
+                                s_status_text = "🔴  отключён"
+                                s_status_color = QColor("#ef4444")
+                        elif sc_type == "tcp":
+                            remote_ips_to_probe.append(sc_ip)
+                            s_cached = self._remote_pc_cache.get(sc_ip)
+                            if sc_ip and s_cached and s_cached[0]:
+                                s_status_text = "🟢  активен"
+                                s_status_color = QColor("#22c55e")
+                            else:
+                                s_status_text = "🔴  отключён"
+                                s_status_color = QColor("#ef4444")
                         else:
-                            sc_is_live = has_any_live_sc
-                        status_str = "🟢  онлайн" if sc_is_live else "🔴  отключён"
+                            sc_dev_id = str(sc.get("device") or sc_name).lower()
+                            if has_live_hid or any(k in sc_dev_id for k in live_sc_names):
+                                s_status_text = "🟢  активен"
+                                s_status_color = QColor("#22c55e")
+                            else:
+                                s_status_text = "🔴  отключён"
+                                s_status_color = QColor("#ef4444")
                     else:
-                        sc_is_live = bool(sc.get("enabled", True))
-                        status_str = "🟢  активен" if sc_is_live else "🔴  отключён"
+                        if not c_online:
+                            s_status_text = "🔴  отключён"
+                            s_status_color = QColor("#ef4444")
+                        else:
+                            s_status_text = "🟢  активен"
+                            s_status_color = QColor("#22c55e")
 
-                    s_item.setText(2, status_str)
-                    if sc_is_live:
-                        s_item.setForeground(2, QBrush(QColor("#16a34a" if _is_light_theme() else "#22c55e")))
+                    s_item.setText(0, f"        📡  {sc_name}")
+                    s_item.setText(1, f"Тип подключения: {sc.get('connect_type', 'USB-HID')}")
+                    s_item.setText(2, s_status_text)
+                    s_item.setForeground(2, QBrush(s_status_color))
+
+                    if sc_type in ("usb-com", "bt-spp") and com_port:
+                        target = com_port
+                    elif sc_type == "tcp" and sc_ip:
+                        target = f"{sc_ip}:{sc_port or 9001}"
                     else:
-                        s_item.setForeground(2, QBrush(QColor("#dc2626" if _is_light_theme() else "#ef4444")))
-
-                    if c_type in ("usb-com", "bt-spp") and sc.get("com_port"):
-                        target = sc["com_port"]
-                    elif c_type == "tcp" and sc.get("ip"):
-                        target = f"{sc['ip']}:{sc['port']}"
-                    else:
-                        target = "USB-HID (сканер)"
-
+                        target = "USB-HID (клавиатура)"
                     s_item.setText(3, target)
 
                     if sc.get("printer_id"):
@@ -1259,6 +1553,32 @@ class AdminWindow(QWidget):
 
                     s_item.setData(0, Qt.UserRole, ("scanner", sc["id"]))
 
+                if is_local:
+                    for ls in live_scanners:
+                        ls_name = (ls.get("name") or "").strip()
+                        if ls_name and ls_name.lower() not in shown_sc_names and not any(
+                            ls_name.lower() in sn or sn in ls_name.lower() for sn in shown_sc_names
+                        ):
+                            s_item = QTreeWidgetItem(c_item)
+                            s_item.setText(0, f"        📡  {ls_name}")
+                            s_item.setText(1, f"Тип подключения: {ls.get('connect_type', 'USB-HID')} · найден на ПК")
+                            s_item.setText(2, "🟢  активен")
+                            s_item.setForeground(2, QBrush(QColor("#22c55e")))
+                            s_item.setText(3, ls.get("device") or "USB")
+                            s_item.setText(4, "подключён сейчас")
+
+            # Итоговый статус точки в дереве (только зелёный или красный)
+            if point_has_online_comp:
+                point_item.setText(2, "🟢  онлайн")
+                point_item.setForeground(2, QBrush(QColor("#22c55e")))
+                point_item.setExpanded(True)
+            else:
+                point_item.setText(2, "🔴  офлайн")
+                point_item.setForeground(2, QBrush(QColor("#ef4444")))
+
+        # Запускаем фоновый опрос удалённых ПК без блокировки интерфейса
+        if remote_ips_to_probe:
+            self._start_async_remote_pc_probe(remote_ips_to_probe, force=force_probe)
     def _devices_on_selection(self):
         items = self.devices_tree.selectedItems()
         if not items:
@@ -2567,7 +2887,7 @@ class AdminWindow(QWidget):
         else:
             self.toast.show_message(f"Ошибка: {result['info']}", "err")
 
-    def _tpl_bind_delete(self, binding_id: int):
+    def _tpl_bind_delete(self, binding_id: int):)
         result = self.store.delete_binding(binding_id)
         if result["ok"]:
             self.toast.show_message(result["info"], "ok")
