@@ -966,6 +966,7 @@ def render_template_section_to_qimage(
         sy = max(top_px, min(sy, bottom_px - box_h))
         ascent = fm.ascent()
 
+        box_h = max(box_h, fm.height() + 6)
         rect = QRect(sx, sy, box_w, box_h)
         painter.save()
         painter.setClipRect(rect, Qt.IntersectClip)
@@ -973,8 +974,8 @@ def render_template_section_to_qimage(
         painter.setPen(QPen(QColor(0, 0, 0)))
 
         cur_y = sy + ascent + 2
-        for line in wrapped_lines:
-            if cur_y + fm.descent() > (sy + box_h + 2):
+        for l_idx, line in enumerate(wrapped_lines):
+            if l_idx > 0 and (cur_y - ascent) >= (sy + box_h):
                 break
             painter.drawText(sx + 2, cur_y, line)
             cur_y += line_h
@@ -986,8 +987,9 @@ def render_template_section_to_qimage(
 
 def _qimage_to_mono_raster(img) -> Tuple[int, int, bytes, bool]:
     """Конвертирует QImage в 1-битный монохромный растр (bytes_per_row, height, raw_bytes, zero_is_white)."""
+    from PySide6.QtCore import Qt
     from PySide6.QtGui import QImage
-    mono = img.convertToFormat(QImage.Format_Mono)
+    mono = img.convertToFormat(QImage.Format_Mono, Qt.ThresholdDither | Qt.AvoidDither)
     w = mono.width()
     h = mono.height()
     bpr = (w + 7) // 8
@@ -1108,6 +1110,7 @@ def _print_sections_via_windows_gdi(
                 qprinter.newPage()
 
             img = render_template_section_to_qimage(code, sec, field_values)
+            painter.setRenderHint(QPainter.SmoothPixmapTransform, False)
             target_rect = painter.viewport()
             sec_w_mm = float(sec.get("w") or w_mm)
             sec_h_mm = float(sec.get("h") or h_mm)
