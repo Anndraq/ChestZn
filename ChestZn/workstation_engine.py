@@ -1329,6 +1329,12 @@ def install_global_print_router(config_path: str = "devices_config.json"):
                 bound_printer, cfg_copy.get("printer_lang")
             )
 
+        if store_ref is not None and "_store" not in cfg_copy:
+            cfg_copy["_store"] = store_ref
+        if resolved_info:
+            cfg_copy.setdefault("gtin", resolved_info.get("gtin", ""))
+            cfg_copy.setdefault("sn", resolved_info.get("sn", ""))
+            cfg_copy.setdefault("shk", resolved_info.get("barcode", ""))
         res = orig_print_code(code_str, cfg_copy, *args, **kwargs)
         ok = res.get("ok", False) if isinstance(res, dict) else bool(res)
 

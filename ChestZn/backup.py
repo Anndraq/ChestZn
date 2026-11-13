@@ -78,12 +78,28 @@ def create_backup(is_auto: bool = False) -> Dict[str, Any]:
     prefix = "chestzn_auto" if is_auto else "chestzn"
     target = make_backup_path(prefix=prefix)
     try:
-        src = sqlite3.connect(str(db_file), timeout=10.0)
-        dst = sqlite3.connect(str(target))
-        with dst:
-            src.backup(dst)
-        dst.close()
-        src.close()
+        # Сначала пробуем сбросить WAL-журнал через активное (в т.ч. SQLCipher) соединение db.get_conn()
+        # и безопасно скопировать файл БД, чтобы не падать с "file is not a database" на зашифрованной БД
+        copied_ok = False
+        try:
+            if hasattr(db, "get_conn"):
+                with db.get_conn() as conn:
+                    try:
+                        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    except Exception:
+                        pass
+                shutil.copy2(str(db_file), str(target))
+                copied_ok = target.exists() and target.stat().st_size > 0
+        except Exception:
+            copied_ok = False
+
+        if not copied_ok:
+            src = sqlite3.connect(str(db_file), timeout=10.0)
+            dst = sqlite3.connect(str(target))
+            with dst:
+                src.backup(dst)
+            dst.close()
+            src.close()
 
         size_kb = max(1, target.stat().st_size // 1024)
         kind_label = "Автобэкап (раз в 2 недели)" if is_auto else "Бэкап"
@@ -95,11 +111,16 @@ def create_backup(is_auto: bool = False) -> Dict[str, Any]:
         try:
             if hasattr(db, "get_conn"):
                 with db.get_conn() as conn:
-                    conn.execute(
-                        "INSERT OR REPLACE INTO settings (key, value) VALUES ('last_auto_backup', ?)",
-                        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),)
-                    )
-                    conn.commit()
+                    tbl_row = conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('settings', 'app_settings') LIMIT 1"
+                    ).fetchone()
+                    if tbl_row is not None:
+                        tbl_name = tbl_row[0] if isinstance(tbl_row, (list, tuple)) else tbl_row["name"]
+                        conn.execute(
+                            f"INSERT OR REPLACE INTO {tbl_name} (key, value) VALUES ('last_auto_backup', ?)",
+                            (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),)
+                        )
+                        conn.commit()
         except Exception:
             pass
 

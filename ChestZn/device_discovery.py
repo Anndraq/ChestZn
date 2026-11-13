@@ -269,11 +269,13 @@ def _scan_printers_sync(force: bool = False) -> Tuple[List[Dict[str, Any]], List
             physically_connected = False
             if not is_virtual_port:
                 if port_up.startswith("USB") or port_up.startswith("DOT4"):
-                    if has_usbprint and (
-                        _is_printer_name_matching_pnp(name, present_pnp_printers)
-                        or _is_printer_name_matching_pnp(driver, present_pnp_printers)
-                    ):
-                        physically_connected = True
+                    if has_usbprint:
+                        if (
+                            _is_printer_name_matching_pnp(name, present_pnp_printers)
+                            or _is_printer_name_matching_pnp(driver, present_pnp_printers)
+                            or (not is_offline_flag and not is_error_flag and not work_offline_attr and not ps_offline)
+                        ):
+                            physically_connected = True
                 elif port_up.startswith("COM"):
                     try:
                         import serial.tools.list_ports

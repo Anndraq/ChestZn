@@ -3,7 +3,7 @@
   "active_only_filter": false,
   "ping_timeout_ms": 600,
   "bindings": {
-    "USB-HID": "",
+    "USB-HID": "HP LaserJet Professional M1132 MFP",
     "COM3": "HP LaserJet Professional M1132 MFP"
   },
   "pairs": [

@@ -139,6 +139,18 @@ class OperatorWindow(QWidget):
 
         h_lay.addStretch(1)
 
+        # Кнопка привязки Сканер ↔ Принтер
+        self.btn_bind_hw = QPushButton("🔗 Привязка Сканер ↔ Принтер")
+        self.btn_bind_hw.setFixedHeight(32)
+        self.btn_bind_hw.setCursor(QCursor(Qt.PointingHandCursor))
+        self.btn_bind_hw.setStyleSheet(
+            f"QPushButton {{ background:{bg_card}; color:{text_main}; border:1px solid {border_card}; "
+            f"border-radius:6px; padding:4px 12px; font-size:13px; font-weight:600; }} "
+            f"QPushButton:hover {{ border-color:#3b82f6; color:#3b82f6; }}"
+        )
+        self.btn_bind_hw.clicked.connect(self._open_quick_bind_dialog)
+        h_lay.addWidget(self.btn_bind_hw)
+
         # Оператор смены
         self.lbl_operator_name = QLabel("👤 Оператор")
         self.lbl_operator_name.setStyleSheet(f"color:{text_sub}; font-size:14px; font-weight:500;")
@@ -555,9 +567,18 @@ class OperatorWindow(QWidget):
         lay.addWidget(t, stretch=1)
 
         import socket
-        all_pkgs = sync_mod.list_available_json_packages(self.store, include_outbox=False, auto_query_server=False)
-        if not all_pkgs:
-            all_pkgs = sync_mod.list_available_json_packages(self.store, include_outbox=True, auto_query_server=False)
+        m_host, _ = sync_mod.get_master_address(self.store) if hasattr(sync_mod, "get_master_address") else ("", 8765)
+        if m_host and sync_mod.get_pc_role(self.store) != "master" and hasattr(sync_mod, "fetch_packages_via_http"):
+            try:
+                all_pkgs = sync_mod.fetch_packages_via_http(self.store) or []
+            except Exception:
+                all_pkgs = []
+            if not all_pkgs:
+                all_pkgs = sync_mod.list_available_json_packages(self.store, include_outbox=True, auto_query_server=False)
+        else:
+            all_pkgs = sync_mod.list_available_json_packages(self.store, include_outbox=False, auto_query_server=False)
+            if not all_pkgs:
+                all_pkgs = sync_mod.list_available_json_packages(self.store, include_outbox=True, auto_query_server=False)
 
         # Убираем дубликаты по (название партии, ШК), отдавая приоритет свежим
         seen_keys = set()
@@ -648,17 +669,28 @@ class OperatorWindow(QWidget):
             if not chosen:
                 return
             pt = self.store.current_point or "T-01"
-            res = sync_mod.claim_and_import_json_package(self.store, Path(chosen["path"]), point_id=pt)
+            m_host, _ = sync_mod.get_master_address(self.store) if hasattr(sync_mod, "get_master_address") else ("", 8765)
+            if m_host and sync_mod.get_pc_role(self.store) != "master" and chosen.get("filename") and hasattr(sync_mod, "claim_package_via_http"):
+                res = sync_mod.claim_package_via_http(self.store, chosen.get("file_name") or chosen.get("filename"), point_id=pt)
+            else:
+                res = sync_mod.claim_and_import_json_package(self.store, Path(chosen["path"]), point_id=pt)
             if res.get("ok"):
-                self.toast.show_message(f"Партия «{chosen['batch_title']}» успешно загружена!", "ok")
+                tpl_code = str(res.get("template_code") or chosen.get("template_code") or "").strip()
+                tpl_name = str(res.get("template_name") or chosen.get("template_name") or "").strip()
+                msg_tpl = f" (шаблон: {tpl_name})" if tpl_name else ""
+                self.toast.show_message(f"Партия «{chosen['batch_title']}» загружена{msg_tpl}!", "ok")
                 self._active_batch_info = {
                     "title": chosen["batch_title"],
                     "shk": chosen["shk"],
                     "gtin": chosen["gtin"],
                     "path": chosen["path"],
+                    "template_code": tpl_code,
+                    "template_name": tpl_name,
                 }
                 self.store.set_setting("active_batch_name", chosen["batch_title"])
                 self.store.set_setting("active_batch_shk", chosen["shk"])
+                self.store.set_setting("active_batch_template_code", tpl_code)
+                self.store.set_setting("active_batch_template_name", tpl_name)
                 self._refresh_batch_progress()
                 dlg.accept()
             else:
@@ -675,6 +707,8 @@ class OperatorWindow(QWidget):
         self._active_batch_info = None
         self.store.set_setting("active_batch_name", "")
         self.store.set_setting("active_batch_shk", "")
+        self.store.set_setting("active_batch_template_code", "")
+        self.store.set_setting("active_batch_template_name", "")
 
         try:
             import json
@@ -853,6 +887,18 @@ class OperatorWindow(QWidget):
         sn_val = res.get("sn", "")
 
         cfg_print = get_printer_for_point(load_config(), self.store.current_point or "T-01")
+        cfg_print["_store"] = self.store
+        cfg_print["gtin"] = gtin_val
+        cfg_print["sn"] = sn_val
+        cfg_print["shk"] = raw_barcode
+        if self._active_batch_info and self._active_batch_info.get("title"):
+            cfg_print["product_name"] = self._active_batch_info.get("title")
+        tpl_code_active = (
+            (self._active_batch_info or {}).get("template_code")
+            or (self.store.get_setting("active_batch_template_code") or "")
+        )
+        if tpl_code_active:
+            cfg_print["template_code"] = str(tpl_code_active)
         print_res = print_code(cz_code, cfg_print)
 
         if not print_res.get("ok"):
@@ -892,6 +938,33 @@ class OperatorWindow(QWidget):
         self._add_history_row(item_data)
         self._record_kpi(is_scan=True, is_print=True)
         self._refresh_batch_progress()
+        self._auto_push_printed_async(cz_code, gtin_val, sn_val)
+
+    def _auto_push_printed_async(self, cz_code: str, gtin_val: str, sn_val: str):
+        """Автоматически в фоне отправляет отчёт о напечатанном коде на Мастер-ПК или в MS SQL Server."""
+        import threading
+        def _bg():
+            try:
+                role = sync_mod.get_pc_role(self.store)
+                pt = self.store.current_point or "T-01"
+                if role != "master":
+                    m_host, _ = sync_mod.get_master_address(self.store) if hasattr(sync_mod, "get_master_address") else ("", 8765)
+                    if m_host and hasattr(sync_mod, "send_report_via_http"):
+                        sync_mod.send_report_via_http(self.store, pt)
+                else:
+                    from mssql import MSSQLManager, load_mssql_config
+                    cfg = load_mssql_config(self.store)
+                    if not cfg.get("mock_mode") and cfg.get("server") not in ("", "MOCK"):
+                        mapping = cfg.get("mapping", {}).get("status", {})
+                        table_name = mapping.get("table", "dbo.ChestnyZnakCodes")
+                        mgr = MSSQLManager(cfg)
+                        mgr.export_code_statuses(mapping, table_name, [{
+                            "code": cz_code, "gtin": gtin_val, "sn": sn_val,
+                            "used": 1, "printed": 1, "used_point": pt,
+                        }])
+            except Exception:
+                pass
+        threading.Thread(target=_bg, daemon=True).start()
 
     def _show_status(self, kind: str, message: str, sub: str = ""):
         """Встроенный цветовой статус без блокирующих диалогов (мягкая палитра)."""
@@ -959,7 +1032,20 @@ class OperatorWindow(QWidget):
         for item in reversed(to_print):
             code_str = item.get("code")
             if code_str:
-                res = print_code(code_str, cfg_print)
+                item_cfg = dict(cfg_print)
+                item_cfg["_store"] = self.store
+                item_cfg["gtin"] = item.get("gtin", "")
+                item_cfg["sn"] = item.get("sn", "")
+                item_cfg["shk"] = item.get("barcode", "")
+                if self._active_batch_info and self._active_batch_info.get("title"):
+                    item_cfg["product_name"] = self._active_batch_info.get("title")
+                tpl_code_active = (
+                    (self._active_batch_info or {}).get("template_code")
+                    or (self.store.get_setting("active_batch_template_code") or "")
+                )
+                if tpl_code_active:
+                    item_cfg["template_code"] = str(tpl_code_active)
+                res = print_code(code_str, item_cfg)
                 if res.get("ok"):
                     reprinted += 1
 
@@ -1048,6 +1134,12 @@ class OperatorWindow(QWidget):
             )
         if hasattr(self, "lbl_point"):
             self.lbl_point.setStyleSheet(f"font-size:15px; font-weight:700; color:{text_main}; background:transparent;")
+        if hasattr(self, "btn_bind_hw"):
+            self.btn_bind_hw.setStyleSheet(
+                f"QPushButton {{ background:{bg_card}; color:{text_main}; border:1px solid {border_card}; "
+                f"border-radius:6px; padding:4px 12px; font-size:13px; font-weight:600; }} "
+                f"QPushButton:hover {{ border-color:#3b82f6; color:#3b82f6; }}"
+            )
         if hasattr(self, "lbl_operator_name"):
             self.lbl_operator_name.setStyleSheet(f"color:{text_sub}; font-size:14px; font-weight:500; background:transparent;")
 
@@ -1133,3 +1225,124 @@ class OperatorWindow(QWidget):
                 self.lbl_status.text() if hasattr(self, "lbl_status") else "🟢 Ожидание сканирования / ручного ввода",
                 sub=self.lbl_status_sub.text() if hasattr(self, "lbl_status_sub") else "Поднесите штрихкод товара к сканеру"
             )
+    def _open_quick_bind_dialog(self):
+        """Открывает диалог быстрой привязки «1 Сканер = 1 Принтер» для текущего ПК."""
+        from PySide6.QtWidgets import QGridLayout, QComboBox
+        from device_discovery import detect_local_scanners, detect_local_printers
+        from workstation_engine import _resolve_config_path
+
+        try:
+            import master_devices_window as mdw
+            if hasattr(mdw, "MasterDevicesWidget"):
+                dlg = QDialog(self)
+                dlg.setWindowTitle("Привязка оборудования (1 Сканер = 1 Принтер)")
+                dlg.resize(1080, 660)
+                lay = QVBoxLayout(dlg)
+                lay.setContentsMargins(0, 0, 0, 0)
+                widget = mdw.MasterDevicesWidget(dlg)
+                widget.store = self.store
+                lay.addWidget(widget)
+                dlg.exec()
+                if hasattr(self, "engine"):
+                    self.engine.start_all()
+                self._refresh_header_route()
+                return
+            elif hasattr(mdw, "MasterDevicesWindow"):
+                dlg = mdw.MasterDevicesWindow(store=self.store, parent=self)
+                dlg.exec()
+                if hasattr(self, "engine"):
+                    self.engine.start_all()
+                self._refresh_header_route()
+                return
+        except Exception:
+            pass
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Привязка Сканер ↔ Принтер (этот ПК)")
+        dlg.setMinimumWidth(620)
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(20, 18, 20, 18)
+        lay.setSpacing(12)
+
+        hdr = QLabel("Привязка «1 Сканер = 1 Принтер» для текущего компьютера")
+        hdr.setStyleSheet("font-size:16px; font-weight:700;")
+        lay.addWidget(hdr)
+
+        sub = QLabel(
+            "Если к компьютеру подключён 1 сканер и 1 принтер — печать работает автоматически. "
+            "Привязка нужна, если на одном ПК одновременно работают несколько сканеров и принтеров."
+        )
+        sub.setWordWrap(True)
+        sub.setStyleSheet("color:#8b97a6; font-size:12px;")
+        lay.addWidget(sub)
+
+        scanners = detect_local_scanners(connected_only=True, force_refresh=True) or []
+        printers = detect_local_printers(connected_only=False, force_refresh=True) or []
+
+        cfg_p = _resolve_config_path("devices_config.json")
+        cfg_data = {}
+        if cfg_p.exists():
+            try:
+                cfg_data = json.loads(cfg_p.read_text(encoding="utf-8"))
+            except Exception:
+                cfg_data = {}
+        bindings = dict(cfg_data.get("bindings") or {})
+
+        card = QFrame()
+        card.setObjectName("card")
+        fg = QGridLayout(card)
+        fg.setContentsMargins(16, 14, 16, 14)
+        fg.setSpacing(10)
+
+        cmb_sc = QComboBox()
+        for sc in scanners:
+            key = sc.get("device") or sc.get("name") or ""
+            cmb_sc.addItem(f"📡 {sc.get('name', key)} ({sc.get('connect_type', 'USB')})", key)
+        if cmb_sc.count() == 0:
+            cmb_sc.addItem("USB-HID (любой подключённый сканер)", "USB-HID")
+
+        cmb_pr = QComboBox()
+        for pr in printers:
+            st = "🟢" if pr.get("online") else "⚪"
+            cmb_pr.addItem(f"{st} {pr.get('name', 'Принтер')}", pr.get("name", ""))
+        if cmb_pr.count() == 0:
+            cmb_pr.addItem("Принтер не найден в системе", "")
+
+        fg.addWidget(QLabel("Сканер штрихкодов:"), 0, 0)
+        fg.addWidget(cmb_sc, 0, 1)
+        fg.addWidget(QLabel("Назначенный принтер:"), 1, 0)
+        fg.addWidget(cmb_pr, 1, 1)
+        lay.addWidget(card)
+
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        b_cancel = QPushButton("Закрыть")
+        b_cancel.clicked.connect(dlg.reject)
+        b_save = QPushButton("💾 Привязать пару")
+        b_save.setProperty("primary", True)
+        btns.addWidget(b_cancel)
+        btns.addWidget(b_save)
+        lay.addLayout(btns)
+
+        def _save_pair():
+            sc_key = str(cmb_sc.currentData() or "").strip()
+            pr_name = str(cmb_pr.currentData() or "").strip()
+            if not sc_key or not pr_name:
+                QMessageBox.warning(dlg, "Внимание", "Выберите и сканер, и принтер.")
+                return
+            bindings[sc_key] = pr_name
+            cfg_data["bindings"] = bindings
+            try:
+                cfg_p.parent.mkdir(parents=True, exist_ok=True)
+                cfg_p.write_text(json.dumps(cfg_data, ensure_ascii=False, indent=2), encoding="utf-8")
+                self.toast.show_message(f"Привязано: {sc_key} → {pr_name}", "ok")
+                dlg.accept()
+            except Exception as e:
+                QMessageBox.warning(dlg, "Ошибка", f"Не удалось сохранить привязку: {e}")
+
+        b_save.clicked.connect(_save_pair)
+        if dlg.exec() == QDialog.Accepted:
+            if hasattr(self, "engine"):
+                self.engine.start_all()
+            self._refresh_header_route()
+

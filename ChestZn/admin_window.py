@@ -364,16 +364,11 @@ class AdminWindow(QWidget):
         title.setStyleSheet("font-size:18px; font-weight:600;")
         title_col.addWidget(title)
 
-        sub = QLabel("Сводка выработки за смену, привязка «1 Сканер = 1 Принтер» и остатки кодов ЧЗ")
+        sub = QLabel("Сводка выработки за смену и остатки кодов ЧЗ")
         sub.setStyleSheet("color:#8b97a6; font-size:12px;")
         title_col.addWidget(sub)
         head.addLayout(title_col)
         head.addStretch(1)
-
-        btn_bind_hw = QPushButton("🔗 Привязка Сканер ↔ Принтер")
-        btn_bind_hw.setProperty("primary", True)
-        btn_bind_hw.clicked.connect(self._open_master_devices_window)
-        head.addWidget(btn_bind_hw)
 
         btn_refresh_dash = QPushButton("🔄 Обновить")
         btn_refresh_dash.clicked.connect(self._refresh_dashboard)
@@ -554,22 +549,29 @@ class AdminWindow(QWidget):
     def _open_master_devices_window(self):
         """Открывает окно быстрой привязки «1 Сканер = 1 Принтер» (MasterDevicesWidget из master_devices_window.py)."""
         try:
-            import master_devices_window as mdw
-            if hasattr(mdw, "MasterDevicesWidget"):
-                dlg = QDialog(self)
-                dlg.setWindowTitle("Привязка оборудования (1 Сканер = 1 Принтер)")
-                dlg.resize(1080, 660)
-                lay = QVBoxLayout(dlg)
-                lay.setContentsMargins(0, 0, 0, 0)
-                widget = mdw.MasterDevicesWidget(dlg)
-                widget.store = self.store
-                lay.addWidget(widget)
-                dlg.exec()
-            elif hasattr(mdw, "MasterDevicesWindow"):
-                dlg = mdw.MasterDevicesWindow(store=self.store, parent=self)
-                dlg.exec()
-            else:
-                raise RuntimeError("В master_devices_window не найден класс MasterDevicesWidget")
+            handled = False
+            try:
+                import master_devices_window as mdw
+                if hasattr(mdw, "MasterDevicesWidget"):
+                    dlg = QDialog(self)
+                    dlg.setWindowTitle("Привязка оборудования (1 Сканер = 1 Принтер)")
+                    dlg.resize(1080, 660)
+                    lay = QVBoxLayout(dlg)
+                    lay.setContentsMargins(0, 0, 0, 0)
+                    widget = mdw.MasterDevicesWidget(dlg)
+                    widget.store = self.store
+                    lay.addWidget(widget)
+                    dlg.exec()
+                    handled = True
+                elif hasattr(mdw, "MasterDevicesWindow"):
+                    dlg = mdw.MasterDevicesWindow(store=self.store, parent=self)
+                    dlg.exec()
+                    handled = True
+            except Exception:
+                handled = False
+
+            if not handled:
+                self._open_builtin_quick_bind_dialog()
 
             self._refresh_devices()
             self._refresh_dashboard()
@@ -583,6 +585,99 @@ class AdminWindow(QWidget):
                 pass
         except Exception as e:
             self.toast.show_message(f"Ошибка открытия окна привязки: {e}", "err")
+
+
+    def _open_builtin_quick_bind_dialog(self):
+        """Встроенный диалог быстрой привязки «1 Сканер = 1 Принтер» для этого ПК."""
+        import json
+        from device_discovery import detect_local_scanners, detect_local_printers
+        from workstation_engine import _resolve_config_path
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Быстрая привязка Сканер ↔ Принтер (этот ПК)")
+        dlg.setMinimumWidth(620)
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(20, 18, 20, 18)
+        lay.setSpacing(12)
+
+        hdr = QLabel("Привязка «1 Сканер = 1 Принтер» для текущего компьютера")
+        hdr.setStyleSheet("font-size:16px; font-weight:700;")
+        lay.addWidget(hdr)
+
+        sub = QLabel(
+            "Если к компьютеру подключён 1 сканер и 1 принтер — печать работает автоматически. "
+            "Привязка нужна, если на одном ПК одновременно работают несколько сканеров и принтеров."
+        )
+        sub.setWordWrap(True)
+        sub.setStyleSheet("color:#8b97a6; font-size:12px;")
+        lay.addWidget(sub)
+
+        scanners = detect_local_scanners(connected_only=True, force_refresh=True) or []
+        printers = detect_local_printers(connected_only=False, force_refresh=True) or []
+
+        cfg_p = _resolve_config_path("devices_config.json")
+        cfg_data = {}
+        if cfg_p.exists():
+            try:
+                cfg_data = json.loads(cfg_p.read_text(encoding="utf-8"))
+            except Exception:
+                cfg_data = {}
+        bindings = dict(cfg_data.get("bindings") or {})
+
+        card = QFrame()
+        card.setObjectName("card")
+        fg = QGridLayout(card)
+        fg.setContentsMargins(16, 14, 16, 14)
+        fg.setSpacing(10)
+
+        cmb_sc = QComboBox()
+        for sc in scanners:
+            key = sc.get("device") or sc.get("name") or ""
+            cmb_sc.addItem(f"📡 {sc.get('name', key)} ({sc.get('connect_type', 'USB')})", key)
+        if cmb_sc.count() == 0:
+            cmb_sc.addItem("USB-HID (любой подключённый сканер)", "USB-HID")
+
+        cmb_pr = QComboBox()
+        for pr in printers:
+            st = "🟢" if pr.get("online") else "⚪"
+            cmb_pr.addItem(f"{st} {pr.get('name', 'Принтер')}", pr.get("name", ""))
+        if cmb_pr.count() == 0:
+            cmb_pr.addItem("Принтер не найден в системе", "")
+
+        fg.addWidget(QLabel("Сканер штрихкодов:"), 0, 0)
+        fg.addWidget(cmb_sc, 0, 1)
+        fg.addWidget(QLabel("Назначенный принтер:"), 1, 0)
+        fg.addWidget(cmb_pr, 1, 1)
+        lay.addWidget(card)
+
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        b_cancel = QPushButton("Закрыть")
+        b_cancel.clicked.connect(dlg.reject)
+        b_save = QPushButton("💾 Привязать пару")
+        b_save.setProperty("primary", True)
+        btns.addWidget(b_cancel)
+        btns.addWidget(b_save)
+        lay.addLayout(btns)
+
+        def _save_pair():
+            sc_key = str(cmb_sc.currentData() or "").strip()
+            pr_name = str(cmb_pr.currentData() or "").strip()
+            if not sc_key or not pr_name:
+                QMessageBox.warning(dlg, "Внимание", "Выберите и сканер, и принтер.")
+                return
+            bindings[sc_key] = pr_name
+            cfg_data["bindings"] = bindings
+            try:
+                cfg_p.parent.mkdir(parents=True, exist_ok=True)
+                cfg_p.write_text(json.dumps(cfg_data, ensure_ascii=False, indent=2), encoding="utf-8")
+                self.toast.show_message(f"Привязано: {sc_key} → {pr_name}", "ok")
+                dlg.accept()
+            except Exception as e:
+                QMessageBox.warning(dlg, "Ошибка", f"Не удалось сохранить привязку: {e}")
+
+        b_save.clicked.connect(_save_pair)
+        dlg.exec()
 
     def _get_live_connected_devices(self):
         """
@@ -1189,6 +1284,10 @@ class AdminWindow(QWidget):
         actions = QHBoxLayout()
         actions.setSpacing(8)
 
+        btn_add_point = QPushButton("➕ Добавить точку")
+        btn_add_point.clicked.connect(self._devices_add_point)
+        actions.addWidget(btn_add_point)
+
         btn_add_pc = QPushButton("➕ Добавить ПК")
         btn_add_pc.setProperty("primary", True)
         btn_add_pc.clicked.connect(self._devices_add_computer)
@@ -1318,8 +1417,11 @@ class AdminWindow(QWidget):
         cur_pt_id = getattr(self.store, "current_point", "T-01") or "T-01"
 
         sync_folder = None
+        heartbeats = {}
         try:
             sync_folder = sync_mod.get_sync_folder(self.store)
+            if hasattr(sync_mod, "read_pc_heartbeats"):
+                heartbeats = sync_mod.read_pc_heartbeats(sync_folder)
         except Exception:
             pass
 
@@ -1390,8 +1492,8 @@ class AdminWindow(QWidget):
                     c_item.setText(2, "🟢  онлайн")
                     c_item.setForeground(2, QBrush(QColor("#22c55e")))
                     c_item.setText(3, real_ip)
-                    sync_state = "обмен вкл" if comp.get("sync_enabled", True) else "обмен выкл"
-                    c_item.setText(4, f"узел: {my_node} · {sync_state}")
+                    net_tag = f"HTTP :{sync_mod.DEFAULT_SYNC_PORT}" if is_master else "клиент HTTP"
+                    c_item.setText(4, f"узел: {my_node} · {net_tag}")
                 else:
                     if c_ip and c_ip not in ("—", ""):
                         remote_ips_to_probe.append(c_ip)
@@ -1401,7 +1503,15 @@ class AdminWindow(QWidget):
                     latency_info = f" ({int(lat) if lat else '<1'} мс)" if c_online and lat is not None else ""
 
                     recent_sync_str = ""
-                    if sync_folder:
+                    hb_match = (
+                        heartbeats.get(c_ip.lower())
+                        or heartbeats.get(c_node.lower())
+                        or heartbeats.get(c_name.lower())
+                    )
+                    if hb_match:
+                        c_online = True
+                        recent_sync_str = f"активен ({hb_match.get('_age_sec', 0):.0f}с назад)"
+                    elif sync_folder:
                         inbox_file = sync_mod.inbox_path(sync_folder, point["id"])
                         if inbox_file.exists():
                             try:
@@ -1410,7 +1520,7 @@ class AdminWindow(QWidget):
                                 if age_sec < 86400:
                                     t_str = datetime.fromtimestamp(mtime).strftime("%H:%M")
                                     recent_sync_str = f"обмен: {t_str}"
-                                    if not c_online and age_sec < 300:
+                                    if not c_online and age_sec < 90:
                                         c_online = True
                             except Exception:
                                 pass
@@ -1431,8 +1541,8 @@ class AdminWindow(QWidget):
                     extra_info = [f"узел: {comp.get('sync_node', '—')}"]
                     if recent_sync_str:
                         extra_info.append(recent_sync_str)
-                    elif comp.get("sync_enabled"):
-                        extra_info.append("обмен вкл")
+                    else:
+                        extra_info.append("ожидание связи" if not c_online else "в сети")
                     c_item.setText(4, " · ".join(extra_info))
 
                 # --- Принтеры ---
@@ -1471,9 +1581,19 @@ class AdminWindow(QWidget):
                             p_status_text = "🟢  онлайн" if p_online else "🔴  офлайн"
                             p_status_color = QColor("#22c55e") if p_online else QColor("#ef4444")
                         else:
-                            p_online = bool(pr.get("online", True))
-                            p_status_text = "🟢  онлайн" if p_online else "🔴  офлайн"
-                            p_status_color = QColor("#22c55e") if p_online else QColor("#ef4444")
+                            hb_pr_names = [str(x).lower() for x in (hb_match.get("printer_names") or [])] if hb_match else []
+                            if hb_match and (
+                                p_name.lower() in hb_pr_names
+                                or any(p_name.lower() in hpn or hpn in p_name.lower() for hpn in hb_pr_names)
+                                or (not hb_pr_names and int(hb_match.get("printers_online") or 0) > 0)
+                            ):
+                                p_online = True
+                                p_status_text = "🟢  онлайн"
+                                p_status_color = QColor("#22c55e")
+                            else:
+                                p_online = False
+                                p_status_text = "🔴  офлайн"
+                                p_status_color = QColor("#ef4444")
 
                     p_item.setText(0, f"        🖨  {p_name}")
                     p_item.setText(1, f"язык: {pr.get('lang', 'auto')}")
@@ -1484,7 +1604,12 @@ class AdminWindow(QWidget):
                     if p_port and p_ip:
                         target = f"{p_ip}:{p_port}"
                     p_item.setText(3, target)
-                    p_item.setText(4, f"{int(pr.get('width_mm', 58))}×{int(pr.get('height_mm', 40))} мм · {pr.get('dpi', 203)} DPI")
+                    try:
+                        from printer import get_active_template_spec
+                        tpl_s = get_active_template_spec(store=self.store)
+                        p_item.setText(4, f"шаблон: {tpl_s.get('template_name', 'По умолчанию')} ({int(tpl_s.get('w', 58))}×{int(tpl_s.get('h', 40))} мм · {tpl_s.get('dpi', 203)} DPI)")
+                    except Exception:
+                        p_item.setText(4, "макет из вкладки «Шаблоны»")
                     p_item.setData(0, Qt.UserRole, ("printer", pr["id"]))
 
                 if is_local:
@@ -1697,6 +1822,94 @@ class AdminWindow(QWidget):
         if not data:
             return (None, None)
         return data
+
+    def _devices_add_point(self):
+        """Добавление новой рабочей точки (склада / поста) в разделе «Точки и ПК»."""
+        existing_ids = {str(p.get("id") or "").upper() for p in (self.store.points or [])}
+        next_num = 1
+        while f"T-{next_num:02d}" in existing_ids:
+            next_num += 1
+        suggested_id = f"T-{next_num:02d}"
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Dotmark · Новая рабочая точка")
+        dlg.setMinimumWidth(420)
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(20, 18, 20, 18)
+        lay.setSpacing(12)
+
+        hdr = QLabel("Добавление новой точки / поста")
+        hdr.setStyleSheet("font-size: 16px; font-weight: 700;")
+        lay.addWidget(hdr)
+
+        form_card = QFrame()
+        form_card.setObjectName("card")
+        fg = QGridLayout(form_card)
+        fg.setContentsMargins(14, 12, 14, 12)
+        fg.setSpacing(10)
+
+        ed_id = QLineEdit(suggested_id)
+        ed_name = QLineEdit(f"Пост упаковки {next_num:02d}")
+        ed_addr = QLineEdit("")
+        ed_addr.setPlaceholderText("Например: Склад 2, Линия Б")
+
+        fg.addWidget(QLabel("Код точки (ID):"), 0, 0)
+        fg.addWidget(ed_id, 0, 1)
+        fg.addWidget(QLabel("Название:"), 1, 0)
+        fg.addWidget(ed_name, 1, 1)
+        fg.addWidget(QLabel("Расположение / адрес:"), 2, 0)
+        fg.addWidget(ed_addr, 2, 1)
+        lay.addWidget(form_card)
+
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        b_cancel = QPushButton("Отмена")
+        b_cancel.clicked.connect(dlg.reject)
+        b_ok = QPushButton("➕ Создать точку")
+        b_ok.setProperty("primary", True)
+        btns.addWidget(b_cancel)
+        btns.addWidget(b_ok)
+        lay.addLayout(btns)
+
+        def _create():
+            pid = ed_id.text().strip().upper()
+            pname = ed_name.text().strip()
+            paddr = ed_addr.text().strip()
+            if not pid or not pname:
+                QMessageBox.warning(dlg, "Внимание", "Укажите код точки и её название.")
+                return
+            if pid in existing_ids:
+                QMessageBox.warning(dlg, "Дубликат", f"Точка с кодом «{pid}» уже существует.")
+                return
+            try:
+                if hasattr(self.store, "create_point"):
+                    res = self.store.create_point(id=pid, name=pname, address=paddr)
+                    ok = res.get("ok", True) if isinstance(res, dict) else True
+                    err_info = res.get("info", "") if isinstance(res, dict) else ""
+                else:
+                    import db
+                    with db.get_conn() as conn:
+                        conn.execute(
+                            "INSERT INTO points (id, name, address) VALUES (?, ?, ?)",
+                            (pid, pname, paddr),
+                        )
+                        conn.commit()
+                    if hasattr(self.store, "reload"):
+                        self.store.reload()
+                    else:
+                        self.store.points.append({"id": pid, "name": pname, "address": paddr, "computers": []})
+                    ok, err_info = True, ""
+                if ok:
+                    self.toast.show_message(f"Точка «{pid} — {pname}» создана", "ok")
+                    self._refresh_devices()
+                    dlg.accept()
+                else:
+                    QMessageBox.warning(dlg, "Ошибка", err_info or "Не удалось создать точку")
+            except Exception as e:
+                QMessageBox.warning(dlg, "Ошибка", f"Не удалось создать точку: {e}")
+
+        b_ok.clicked.connect(_create)
+        dlg.exec()
 
     def _devices_add_computer(self):
         kind, obj_id = self._devices_get_selected()
@@ -1911,6 +2124,11 @@ class AdminWindow(QWidget):
         btn_make_default = QPushButton("⭐ По умолчанию")
         btn_make_default.clicked.connect(self._tpl_make_default)
         top_bar.addWidget(btn_make_default)
+
+        btn_bind_pkg = QPushButton("📦 Привязать к партии")
+        btn_bind_pkg.setToolTip("Привязать текущий шаблон к конкретной партии заказов для отправки на Рабочий ПК")
+        btn_bind_pkg.clicked.connect(self._tpl_bind_to_package)
+        top_bar.addWidget(btn_bind_pkg)
 
         center_col.addLayout(top_bar)
 
@@ -2690,6 +2908,87 @@ class AdminWindow(QWidget):
             self._refresh_templates()
         else:
             self.toast.show_message(f"Ошибка: {result['info']}", "err")
+
+    def _tpl_bind_to_package(self):
+        """Привязывает текущий шаблон к выбранным партиям заказов (JSON-пакетам) на Мастер-ПК."""
+        tpl = self._current_template()
+        if not tpl:
+            return
+        try:
+            sync_mod.ensure_packages_from_local_pool(self.store)
+        except Exception:
+            pass
+        pkgs = sync_mod.list_available_json_packages(self.store, include_outbox=False, auto_query_server=False)
+        if not pkgs:
+            pkgs = sync_mod.list_available_json_packages(self.store, include_outbox=True, auto_query_server=False)
+        if not pkgs:
+            QMessageBox.information(
+                self, "Нет партий",
+                "Пока нет сформированных партий заказов. Выгрузите коды из MS SQL или загрузите партию во вкладке «Склад кодов ЧЗ»."
+            )
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Привязать шаблон «{tpl['name']}» к партии")
+        dlg.resize(760, 440)
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(18, 16, 18, 16)
+        lay.setSpacing(10)
+
+        lbl = QLabel(
+            f"Выберите одну или несколько партий заказов — при загрузке на Рабочем ПК шаблон «{tpl['name']}» подтянется автоматически:"
+        )
+        lbl.setWordWrap(True)
+        lay.addWidget(lbl)
+
+        tbl = QTableWidget(len(pkgs), 4)
+        tbl.setHorizontalHeaderLabels(["Партия / Заказ", "ШК / GTIN", "Кодов", "Текущий шаблон"])
+        tbl.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        tbl.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        tbl.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        tbl.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        tbl.verticalHeader().setVisible(False)
+        tbl.setSelectionBehavior(QAbstractItemView.SelectRows)
+        tbl.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
+
+        for r, p in enumerate(pkgs):
+            it0 = QTableWidgetItem(str(p.get("batch_title") or p.get("filename")))
+            it0.setData(Qt.UserRole, p.get("filename"))
+            tbl.setItem(r, 0, it0)
+            tbl.setItem(r, 1, QTableWidgetItem(f"{p.get('shk', '—')} / {p.get('gtin', '—')}"))
+            tbl.setItem(r, 2, QTableWidgetItem(str(p.get("total_codes", 0))))
+            cur_tpl = p.get("template_name") or "По умолчанию"
+            tbl.setItem(r, 3, QTableWidgetItem(cur_tpl))
+        lay.addWidget(tbl, stretch=1)
+
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        b_close = QPushButton("Закрыть")
+        b_close.clicked.connect(dlg.reject)
+        b_apply = QPushButton(f"🔗 Привязать «{tpl['name']}»")
+        b_apply.setProperty("primary", True)
+        btns.addWidget(b_close)
+        btns.addWidget(b_apply)
+        lay.addLayout(btns)
+
+        def _apply_bind():
+            rows = sorted({idx.row() for idx in tbl.selectionModel().selectedRows()})
+            if not rows:
+                QMessageBox.warning(dlg, "Внимание", "Выберите хотя бы одну партию в таблице.")
+                return
+            ok_cnt = 0
+            for r in rows:
+                fname = tbl.item(r, 0).data(Qt.UserRole)
+                if fname:
+                    res = sync_mod.bind_template_to_package(self.store, fname, tpl["code"])
+                    if res.get("ok"):
+                        ok_cnt += 1
+            self.toast.show_message(f"Шаблон «{tpl['name']}» привязан к партиям: {ok_cnt} шт.", "ok")
+            dlg.accept()
+
+        b_apply.clicked.connect(_apply_bind)
+        dlg.exec()
 
     def _tpl_create(self):
         """Удобное создание нового шаблона этикетки с выбором пресетов размеров и режима."""
@@ -3922,6 +4221,10 @@ class AdminWindow(QWidget):
     def _import_pool(self):
         result = import_pool_codes(self.store, self)
         if result["ok"]:
+            try:
+                sync_mod.ensure_packages_from_local_pool(self.store)
+            except Exception:
+                pass
             QMessageBox.information(self, "Импорт выполнен", result["info"])
             self._refresh_pool()
         elif result["info"] != "Отменено":
@@ -3940,6 +4243,10 @@ class AdminWindow(QWidget):
         win = ImportCodesWindow(self.store, self)
         result = win.exec()
         if result == ImportCodesWindow.Accepted:
+            try:
+                sync_mod.ensure_packages_from_local_pool(self.store)
+            except Exception:
+                pass
             self._refresh_pool()
             self._refresh_imports()
 
@@ -4080,7 +4387,7 @@ class AdminWindow(QWidget):
 
         rc.addWidget(QLabel("Целевая точка:"))
         self.sync_target_point_combo = QComboBox()
-        self.sync_target_point_combo.setMinimumWidth(140)
+        self.sync_target_point_combo.setMinimumWidth(210)
         rc.addWidget(self.sync_target_point_combo)
 
         btn_save_role = QPushButton("💾 Применить роль")
@@ -4090,30 +4397,58 @@ class AdminWindow(QWidget):
         rc.addStretch(1)
         v.addWidget(role_card)
 
-        # --- Карточка 2: Транзитный канал связи через Мастер-ПК ---
+        # --- Карточка 2: Сетевое соединение в локальной сети (HTTP :8765) + резервная папка ---
         folder_card = QFrame(); folder_card.setObjectName("card")
-        fc = QHBoxLayout(folder_card)
-        fc.setContentsMargins(16, 10, 16, 10)
-        fc.setSpacing(8)
+        fc_v = QVBoxLayout(folder_card)
+        fc_v.setContentsMargins(16, 10, 16, 10)
+        fc_v.setSpacing(8)
 
-        fc.addWidget(QLabel("Транзитный канал Мастер-ПК (мост к серверу):"))
-        self.sync_folder_edit = QLineEdit()
-        self.sync_folder_edit.setPlaceholderText(
-            r"например, \MASTER-PC\DotmarkSync или локальный путь транзита"
-        )
-        fc.addWidget(self.sync_folder_edit, stretch=1)
+        # Панель для Рабочего ПК: ввод IP Мастер-ПК и проверка связи
+        self.worker_net_widget = QWidget()
+        net_row = QHBoxLayout(self.worker_net_widget)
+        net_row.setContentsMargins(0, 0, 0, 0)
+        net_row.setSpacing(8)
+        net_row.addWidget(QLabel("IP-адрес Мастер-ПК (порт 8765):"))
+        self.sync_master_ip_edit = QLineEdit()
+        self.sync_master_ip_edit.setPlaceholderText("Например: 192.168.1.10 (введите IP компьютера с ролью Мастер-ПК)")
+        self.sync_master_ip_edit.setMinimumWidth(240)
+        net_row.addWidget(self.sync_master_ip_edit, stretch=1)
 
-        btn_browse = QPushButton("📁 Выбрать")
-        btn_browse.clicked.connect(self._sync_choose_folder)
-        fc.addWidget(btn_browse)
+        btn_save_master_ip = QPushButton("💾 Сохранить адрес")
+        btn_save_master_ip.clicked.connect(self._sync_save_master_ip)
+        net_row.addWidget(btn_save_master_ip)
 
-        btn_save_folder = QPushButton("💾 Сохранить")
-        btn_save_folder.clicked.connect(self._sync_save_folder)
-        fc.addWidget(btn_save_folder)
+        self.btn_test_master = QPushButton("📡 Проверить связь с Мастер-ПК")
+        self.btn_test_master.setProperty("primary", True)
+        self.btn_test_master.clicked.connect(self._sync_test_master_connection)
+        net_row.addWidget(self.btn_test_master)
 
-        btn_open_folder = QPushButton("↗ Открыть")
-        btn_open_folder.clicked.connect(self._sync_open_folder)
-        fc.addWidget(btn_open_folder)
+        self.lbl_http_status = QLabel("")
+        self.lbl_http_status.setStyleSheet("color:#8b97a6; font-size:12px; font-weight:600;")
+        net_row.addWidget(self.lbl_http_status)
+        fc_v.addWidget(self.worker_net_widget)
+
+        # Панель для Мастер-ПК: показывает собственный адрес сервера, куда подключаются Рабочие ПК
+        self.master_net_widget = QWidget()
+        m_row = QHBoxLayout(self.master_net_widget)
+        m_row.setContentsMargins(0, 0, 0, 0)
+        m_row.setSpacing(10)
+        m_row.addWidget(QLabel("Адрес этого Мастер-ПК для подключения Рабочих ПК:"))
+        self.lbl_master_bind_addr = QLabel("127.0.0.1:8765")
+        self.lbl_master_bind_addr.setStyleSheet("color:#38bdf8; font-family:Consolas,monospace; font-size:14px; font-weight:700;")
+        m_row.addWidget(self.lbl_master_bind_addr)
+
+        btn_copy_master_ip = QPushButton("📋 Скопировать IP")
+        btn_copy_master_ip.clicked.connect(self._sync_copy_master_ip)
+        m_row.addWidget(btn_copy_master_ip)
+
+        self.lbl_master_srv_status = QLabel("🟢 HTTP-сервер :8765 запущен · ждёт подключения Рабочих ПК")
+        self.lbl_master_srv_status.setStyleSheet("color:#22c55e; font-size:12px; font-weight:600;")
+        m_row.addWidget(self.lbl_master_srv_status)
+        m_row.addStretch(1)
+        fc_v.addWidget(self.master_net_widget)
+
+
         v.addWidget(folder_card)
 
         # --- Карточка 3: Операции Обычного ПК и шлюза Мастер-ПК ---
@@ -4122,8 +4457,10 @@ class AdminWindow(QWidget):
         ops_layout.setContentsMargins(16, 12, 16, 12)
         ops_layout.setSpacing(10)
 
-        # Главная кнопка для Обычного ПК (и старшего смены)
-        worker_row = QHBoxLayout()
+        # Панель операций Обычного ПК (скрывается на Мастер-ПК)
+        self.worker_ops_widget = QWidget()
+        worker_row = QHBoxLayout(self.worker_ops_widget)
+        worker_row.setContentsMargins(0, 0, 0, 0)
         worker_row.setSpacing(10)
 
         self.btn_open_json_picker = QPushButton(
@@ -4145,7 +4482,7 @@ class AdminWindow(QWidget):
         self.btn_worker_send_report.setMinimumHeight(38)
         self.btn_worker_send_report.clicked.connect(self._sync_worker_send_report)
         worker_row.addWidget(self.btn_worker_send_report, stretch=1)
-        ops_layout.addLayout(worker_row)
+        ops_layout.addWidget(self.worker_ops_widget)
 
         # Панель шлюза Мастер-ПК
         self.master_ops_widget = QWidget()
@@ -4162,9 +4499,6 @@ class AdminWindow(QWidget):
         btn_import_results.clicked.connect(self._sync_import_results)
         master_row.addWidget(btn_import_results)
 
-        btn_full = QPushButton("🔁 Полный цикл транзита (Сервер ↔ Мастер-ПК ↔ Точки)")
-        btn_full.clicked.connect(self._sync_full_cycle)
-        master_row.addWidget(btn_full)
         master_row.addStretch(1)
 
         ops_layout.addWidget(self.master_ops_widget)
@@ -4212,18 +4546,83 @@ class AdminWindow(QWidget):
             self.store.set_setting("worker_point_id", target_pt)
         except Exception:
             pass
+        if role == "master":
+            sync_mod.start_master_http_server(self.store, port=sync_mod.DEFAULT_SYNC_PORT)
+        else:
+            sync_mod.stop_master_http_server()
         self._apply_pc_role_ui()
         self._refresh_sync()
         role_title = "👑 Мастер-ПК (шлюз к серверу)" if role == "master" else "💻 Обычный ПК (Рабочий пост)"
         self._sync_log_write(f"Установлена роль: {role_title} ({sync_mod.get_pc_node_name(self.store)}), точка: {target_pt}")
         self.toast.show_message(f"Режим сохранён: {role_title}", "ok")
 
+    def _sync_copy_master_ip(self):
+        from PySide6.QtGui import QGuiApplication
+        ip_txt = (getattr(self, "_cached_real_ip", None) or self.lbl_master_bind_addr.text().split(":")[0]).strip()
+        QGuiApplication.clipboard().setText(ip_txt)
+        self.toast.show_message(f"IP Мастер-ПК ({ip_txt}) скопирован — введите его на Рабочем ПК", "ok")
+
+    def _sync_save_master_ip(self):
+        ip_val = self.sync_master_ip_edit.text().strip()
+        sync_mod.set_master_address(self.store, ip_val, sync_mod.DEFAULT_SYNC_PORT)
+        self._sync_log_write(f"Адрес Мастер-ПК сохранён: {ip_val or 'не задан'}:{sync_mod.DEFAULT_SYNC_PORT}")
+        self.toast.show_message("Адрес Мастер-ПК сохранён", "ok")
+        if ip_val:
+            import threading
+            threading.Thread(target=lambda: sync_mod.publish_pc_heartbeat(self.store), daemon=True).start()
+
+    def _sync_test_master_connection(self):
+        import threading
+        from PySide6.QtCore import QTimer
+        host = self.sync_master_ip_edit.text().strip()
+        if not host and sync_mod.get_pc_role(self.store) == "master":
+            host = "127.0.0.1"
+        if not host:
+            self.toast.show_message("Введите IP-адрес Мастер-ПК", "warn")
+            return
+        sync_mod.set_master_address(self.store, self.sync_master_ip_edit.text().strip(), sync_mod.DEFAULT_SYNC_PORT)
+        self.btn_test_master.setEnabled(False)
+        self.btn_test_master.setText("⏳ Проверка...")
+        self.lbl_http_status.setText("проверка...")
+        self.lbl_http_status.setStyleSheet("color:#8b97a6; font-size:12px; font-weight:600;")
+
+        self._test_conn_res = None
+
+        def _bg():
+            try:
+                self._test_conn_res = sync_mod.test_master_connection(host, sync_mod.DEFAULT_SYNC_PORT, timeout=2.5)
+            except Exception as e:
+                self._test_conn_res = {"ok": False, "info": f"Ошибка проверки: {e}"}
+
+        def _poll():
+            res = self._test_conn_res
+            if res is None:
+                QTimer.singleShot(100, _poll)
+                return
+            self.btn_test_master.setEnabled(True)
+            self.btn_test_master.setText("📡 Проверить связь с Мастер-ПК")
+            info = res.get("info", "")
+            self._sync_log_write(info)
+            if res.get("ok"):
+                self.lbl_http_status.setText(f"🟢 {res.get('latency_ms', 1)} мс")
+                self.lbl_http_status.setStyleSheet("color:#22c55e; font-size:12px; font-weight:700;")
+                self.toast.show_message(info, "ok")
+                threading.Thread(target=lambda: sync_mod.publish_pc_heartbeat(self.store), daemon=True).start()
+            else:
+                self.lbl_http_status.setText("🔴 нет связи")
+                self.lbl_http_status.setStyleSheet("color:#ef4444; font-size:12px; font-weight:700;")
+                self.toast.show_message(info, "err")
+
+        threading.Thread(target=_bg, daemon=True).start()
+        QTimer.singleShot(100, _poll)
+
     def _refresh_sync(self):
         try:
             folder = sync_mod.get_sync_folder(self.store)
         except Exception:
             folder = sync_mod._default_folder()
-        self.sync_folder_edit.setText(str(folder))
+        if hasattr(self, "sync_folder_edit"):
+            self.sync_folder_edit.setText(str(folder))
 
         role = sync_mod.get_pc_role(self.store)
         pc_name = sync_mod.get_pc_node_name(self.store)
@@ -4235,6 +4634,40 @@ class AdminWindow(QWidget):
             self.sync_pc_name_edit.setText(pc_name)
         if hasattr(self, "master_ops_widget"):
             self.master_ops_widget.setVisible(role == "master")
+        if hasattr(self, "worker_ops_widget"):
+            self.worker_ops_widget.setVisible(role != "master")
+        if hasattr(self, "worker_net_widget") and hasattr(self, "master_net_widget"):
+            is_m = (role == "master")
+            self.master_net_widget.setVisible(is_m)
+            self.worker_net_widget.setVisible(not is_m)
+
+            m_host, m_port = sync_mod.get_master_address(self.store)
+            if is_m:
+                real_ip = getattr(self, "_cached_real_ip", None)
+                if not real_ip:
+                    import socket
+                    try:
+                        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                        s.settimeout(0.05)
+                        s.connect(("8.8.8.8", 80))
+                        real_ip = s.getsockname()[0]
+                        s.close()
+                    except Exception:
+                        real_ip = "127.0.0.1"
+                    self._cached_real_ip = real_ip
+                self.lbl_master_bind_addr.setText(f"{real_ip}:{sync_mod.DEFAULT_SYNC_PORT}")
+                try:
+                    hbs = sync_mod.read_pc_heartbeats()
+                    workers_cnt = sum(1 for v in {id(x): x for x in hbs.values()}.values() if v.get("role") != "master")
+                    self.lbl_master_srv_status.setText(
+                        f"🟢 HTTP-сервер :{sync_mod.DEFAULT_SYNC_PORT} активен · рабочих ПК онлайн: {workers_cnt}"
+                    )
+                except Exception:
+                    pass
+            else:
+                self.sync_master_ip_edit.setText(m_host)
+                self.lbl_http_status.setText(f"цель: {m_host}:{m_port}" if m_host else "IP не задан")
+                self.lbl_http_status.setStyleSheet("color:#8b97a6; font-size:12px; font-weight:600;")
 
         if hasattr(self, "sync_target_point_combo"):
             saved_pt = ""
@@ -4375,7 +4808,13 @@ class AdminWindow(QWidget):
         if hasattr(self, "sync_target_point_combo") and self.sync_target_point_combo.currentData():
             point_id = self.sync_target_point_combo.currentData()
         try:
-            res = sync_mod.export_results_from_point(self.store, point_id)
+            m_host, _ = sync_mod.get_master_address(self.store)
+            if m_host and sync_mod.get_pc_role(self.store) != "master":
+                res = sync_mod.send_report_via_http(self.store, point_id)
+                if not res:
+                    res = sync_mod.export_results_from_point(self.store, point_id)
+            else:
+                res = sync_mod.export_results_from_point(self.store, point_id)
             self._sync_log_write(res.get("info", ""))
             self.toast.show_message(res.get("info", "Отчёт отправлен на сервер"), "ok" if res.get("ok") else "warn")
             self._refresh_sync()
@@ -5049,15 +5488,19 @@ class AdminWindow(QWidget):
         self.cfg_dpi.addItems(["203", "300", "600"])
         self.cfg_copies  = QLineEdit()
 
+        self.cfg_label_w.hide()
+        self.cfg_label_h.hide()
+        self.cfg_dpi.hide()
+        self.lbl_printer_tpl_info = QLabel("Из активного макета во вкладке «Шаблоны»")
+        self.lbl_printer_tpl_info.setStyleSheet("color:#38bdf8; font-weight:600;")
+
         rows = [
             ("Принтер (имя Windows):", self.cfg_printer_name),
             ("IP-адрес (если сеть):",  self.cfg_printer_ip),
             ("Порт:",                  self.cfg_printer_port),
             ("Язык команд:",           self.cfg_printer_lang),
-            ("Ширина этикетки, мм:",   self.cfg_label_w),
-            ("Высота этикетки, мм:",   self.cfg_label_h),
-            ("DPI:",                   self.cfg_dpi),
             ("Копий:",                 self.cfg_copies),
+            ("Размер и DPI этикетки:", self.lbl_printer_tpl_info),
         ]
         for i, (lbl, widget) in enumerate(rows):
             l = QLabel(lbl); l.setStyleSheet("color:#8b97a6;")
@@ -6087,7 +6530,8 @@ class AdminWindow(QWidget):
         if hasattr(self, "sql_server_page"):
             try:
                 queue_count = len(self.store.queue) if hasattr(self.store, "queue") else 0
-                self.sql_server_page.lbl_queue_count.setText(f"{queue_count} в очереди")
+                if hasattr(self.sql_server_page, "lbl_queue_count"):
+                    self.sql_server_page.lbl_queue_count.setText(f"{queue_count} в очереди")
             except Exception as e:
                 log.error("Ошибка обновления страницы SQL Server: %s", e)
 

@@ -78,18 +78,6 @@ class SQLServerConfigDialog(QDialog):
     def _setup_connection_tab(self):
         layout = QVBoxLayout(self.tab_conn)
 
-        mock_box = QGroupBox("Режим развертывания (Автономная проверка / Боевой сервер)")
-        mock_layout = QVBoxLayout(mock_box)
-        self.chk_mock_mode = QCheckBox(
-            "Включить тестовый режим эмуляции MS SQL Server (Mock Mode — 3 готовые партии с парами ШК и ДМ)"
-        )
-        self.chk_mock_mode.setToolTip(
-            "Позволяет дома проверить вытягивание кодов с сервера, создание JSON-пакетов и выбор их на обычном ПК без живого MS SQL"
-        )
-        self.chk_mock_mode.toggled.connect(self._on_mock_mode_toggled)
-        mock_layout.addWidget(self.chk_mock_mode)
-        layout.addWidget(mock_box)
-
         form_box = QGroupBox("Параметры сервера MS SQL")
         form_layout = QFormLayout(form_box)
 
@@ -274,14 +262,14 @@ class SQLServerConfigDialog(QDialog):
             self._on_auth_type_changed()
 
     def _on_auth_type_changed(self):
-        is_sql = (self.cmb_auth.currentData() == "sql") and not self.chk_mock_mode.isChecked()
+        is_sql = (self.cmb_auth.currentData() == "sql")
         self.txt_user.setEnabled(is_sql)
         self.txt_password.setEnabled(is_sql)
 
     def _collect_config_from_ui(self) -> Dict[str, Any]:
         cfg = dict(self.config)
-        cfg["mock_mode"] = self.chk_mock_mode.isChecked()
-        cfg["server"] = "MOCK" if cfg["mock_mode"] else self.txt_server.text().strip()
+        cfg["mock_mode"] = False
+        cfg["server"] = self.txt_server.text().strip()
         cfg["database"] = self.txt_database.text().strip() or "ChestnyZnakDB"
         cfg["driver"] = self.cmb_driver.currentText()
         cfg["auth_type"] = self.cmb_auth.currentData()
@@ -321,9 +309,10 @@ class SQLServerConfigDialog(QDialog):
 
     def _load_config_to_ui(self):
         cfg = self.config
-        is_mock = cfg.get("mock_mode", False) or cfg.get("server", "").upper() == "MOCK"
-        self.chk_mock_mode.setChecked(is_mock)
-        self.txt_server.setText(cfg.get("server", ""))
+        srv_str = str(cfg.get("server") or "").strip()
+        if srv_str.upper() in ("MOCK", "DEMO"):
+            srv_str = ""
+        self.txt_server.setText(srv_str)
         self.txt_database.setText(cfg.get("database", "ChestnyZnakDB"))
 
         idx = self.cmb_driver.findText(cfg.get("driver", ""))
@@ -362,7 +351,7 @@ class SQLServerConfigDialog(QDialog):
         m_ev = m.get("events", {})
         self.cmb_ev_table.setCurrentText(m_ev.get("table", "dbo.MarkingEvents"))
 
-        self._on_mock_mode_toggled(is_mock)
+        self._on_auth_type_changed()
 
     def _on_test_connection(self):
         cfg = self._collect_config_from_ui()
@@ -508,7 +497,7 @@ class SQLServerAdminPage(QWidget):
         status_layout = QGridLayout(status_box)
 
         status_layout.addWidget(QLabel("Сервер:"), 0, 0)
-        self.lbl_cur_server = QLabel("MOCK (Режим эмуляции)")
+        self.lbl_cur_server = QLabel("Не настроен")
         self.lbl_cur_server.setStyleSheet("font-weight: bold;")
         status_layout.addWidget(self.lbl_cur_server, 0, 1)
 
@@ -522,9 +511,7 @@ class SQLServerAdminPage(QWidget):
         self.lbl_conn_status.setStyleSheet("color: #22c55e; font-weight: bold;")
         status_layout.addWidget(self.lbl_conn_status, 1, 1)
 
-        status_layout.addWidget(QLabel("Напечатано / в очереди:"), 1, 2)
-        self.lbl_queue_count = QLabel("0 в очереди")
-        status_layout.addWidget(self.lbl_queue_count, 1, 3)
+
 
         layout.addWidget(status_box)
 
@@ -558,16 +545,7 @@ class SQLServerAdminPage(QWidget):
 
         actions_layout.addLayout(btns_row)
 
-        auto_row = QHBoxLayout()
-        self.chk_auto_sync = QCheckBox("Автоматический фоновый обмен каждые:")
-        self.spn_auto_interval = QSpinBox()
-        self.spn_auto_interval.setRange(1, 120)
-        self.spn_auto_interval.setValue(5)
-        self.spn_auto_interval.setSuffix(" мин.")
-        auto_row.addWidget(self.chk_auto_sync)
-        auto_row.addWidget(self.spn_auto_interval)
-        auto_row.addStretch()
-        actions_layout.addLayout(auto_row)
+
 
         layout.addWidget(actions_box)
 
@@ -585,8 +563,14 @@ class SQLServerAdminPage(QWidget):
 
     def _refresh_labels_from_cfg(self):
         cfg = load_mssql_config(self.store)
-        server_name = "MOCK (Тестовая эмуляция)" if cfg.get("mock_mode") else (cfg.get("server") or "Не указан")
+        server_name = cfg.get("server") or "Не указан"
         self.lbl_cur_server.setText(server_name)
+        if not server_name or server_name == "Не указан":
+            self.lbl_conn_status.setText("🔴 Не подключён (укажите адрес сервера)")
+            self.lbl_conn_status.setStyleSheet("color: #ef4444; font-weight: bold;")
+        else:
+            self.lbl_conn_status.setText(f"🟡 Настроен ({server_name}) — нажмите тест или обмен")
+            self.lbl_conn_status.setStyleSheet("color: #f59e0b; font-weight: bold;")
         self.lbl_cur_db.setText(cfg.get("database", "ChestnyZnakDB"))
 
     def _open_settings_dialog(self):
@@ -598,5 +582,5 @@ class SQLServerAdminPage(QWidget):
     def _on_settings_saved(self, new_cfg: dict):
         save_mssql_config(self.store, new_cfg)
         self._refresh_labels_from_cfg()
-        server_name = "MOCK (Тестовая эмуляция)" if new_cfg.get("mock_mode") else new_cfg.get("server", "Не указан")
+        server_name = new_cfg.get("server") or "Не указан"
         self.txt_log.append(f"[Настройки] Сохранены параметры сервера: {server_name} / {new_cfg.get('database')}")

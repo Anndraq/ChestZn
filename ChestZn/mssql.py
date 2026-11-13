@@ -81,14 +81,17 @@ def load_mssql_config(store: Any = None) -> Dict[str, Any]:
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
             if isinstance(data, dict):
+                data["mock_mode"] = False
+                if str(data.get("server") or "").strip().upper() in ("MOCK", "DEMO"):
+                    data["server"] = ""
                 return data
         except Exception as e:
             logger.debug("Ошибка чтения %s: %s", p, e)
 
     return {
-        "mock_mode": True,
+        "mock_mode": False,
         "driver": "ODBC Driver 17 for SQL Server",
-        "server": "MOCK",
+        "server": "",
         "database": "ChestnyZnakDB",
         "auth_type": "windows",
         "user": "sa",
@@ -313,8 +316,7 @@ class MSSQLManager:
         return ";".join(parts)
 
     def is_mock_mode(self) -> bool:
-        server = self.config.get("server", "").strip().upper()
-        return bool(self.config.get("mock_mode", False) or server in ("MOCK", "DEMO", ""))
+        return False
 
     def connect(self):
         if self.is_mock_mode():
@@ -322,10 +324,16 @@ class MSSQLManager:
             self._conn = MockMSSQLConnection()
             return self._conn
 
+        server_val = str(self.config.get("server") or "").strip()
+        if not server_val or server_val.upper() in ("MOCK", "DEMO"):
+            raise RuntimeError(
+                "Не указан адрес MS SQL Server. Откройте «Админ → SQL Server → Параметры подключения» и укажите сервер."
+            )
+
         if not PYODBC_AVAILABLE:
             raise RuntimeError(
                 "Модуль pyodbc не установлен в текущем окружении Python! "
-                "Установите его командой: pip install pyodbc (либо включите режим эмуляции Mock Mode)"
+                "Установите его командой: pip install pyodbc"
             )
 
         conn_str = self.build_connection_string()

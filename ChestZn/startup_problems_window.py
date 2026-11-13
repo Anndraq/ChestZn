@@ -264,16 +264,27 @@ class StartupProblemsWindow(QDialog):
         import threading
         from PySide6.QtCore import QTimer
 
+        self._startup_bg_done = False
+
         def _bg():
             try:
                 from device_discovery import _refresh_all_caches_sync
                 _refresh_all_caches_sync()
             except Exception:
                 pass
+            finally:
+                self._startup_bg_done = True
+
+        def _poll():
+            if not self.isVisible():
+                return
+            if self._startup_bg_done:
+                self._apply_cached_check()
+            else:
+                QTimer.singleShot(150, _poll)
 
         threading.Thread(target=_bg, daemon=True).start()
-        QTimer.singleShot(450, self._apply_cached_check)
-        QTimer.singleShot(1400, self._apply_cached_check)
+        QTimer.singleShot(150, _poll)
 
     def _apply_cached_check(self):
         if not self.isVisible():
@@ -294,6 +305,7 @@ class StartupProblemsWindow(QDialog):
 
         self.btn_refresh.setEnabled(False)
         self.btn_refresh.setText("⏳ Проверка...")
+        self._manual_refresh_done = False
 
         def _bg():
             try:
@@ -301,18 +313,22 @@ class StartupProblemsWindow(QDialog):
                 _refresh_all_caches_sync()
             except Exception:
                 pass
+            finally:
+                self._manual_refresh_done = True
 
-            def _done():
-                self.problems = check_all(force_refresh=False)
-                self._render()
-                self.problems_changed.emit(self.problems)
-                self.btn_refresh.setEnabled(True)
-                self.btn_refresh.setText("🔄 Обновить список")
-                print("[startup] проверка обновлена")
-
-            QTimer.singleShot(0, _done)
+        def _poll_done():
+            if not self._manual_refresh_done:
+                QTimer.singleShot(120, _poll_done)
+                return
+            self.problems = check_all(force_refresh=False)
+            self._render()
+            self.problems_changed.emit(self.problems)
+            self.btn_refresh.setEnabled(True)
+            self.btn_refresh.setText("🔄 Обновить список")
+            print("[startup] проверка обновлена")
 
         threading.Thread(target=_bg, daemon=True).start()
+        QTimer.singleShot(120, _poll_done)
 
     # ------------------------------------------------------------------
     def _render(self):

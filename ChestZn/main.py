@@ -28,6 +28,176 @@ from security_question_window import SecurityQuestionWindow
 ADMIN_LOGIN = "admin"
 
 
+
+def _ensure_store_compat(store) -> None:
+    """Гарантирует наличие check_security_answer в Store для recovery_window.py."""
+    if store is None:
+        return
+    if not hasattr(store, "check_security_answer"):
+        def _check_security_answer(login: str, answer: str) -> bool:
+            if hasattr(store, "verify_security_answer"):
+                try:
+                    return bool(store.verify_security_answer(login, answer))
+                except Exception:
+                    pass
+            ans_clean = str(answer or "").strip()
+            if not ans_clean:
+                return False
+            try:
+                import hashlib
+                import db
+                ans_low = ans_clean.lower()
+                h_raw = hashlib.sha256(ans_clean.encode("utf-8")).hexdigest()
+                h_low = hashlib.sha256(ans_low.encode("utf-8")).hexdigest()
+                with db.get_conn() as conn:
+                    cols_raw = conn.execute("PRAGMA table_info(users)").fetchall()
+                    cols = [c[1] if isinstance(c, (list, tuple)) else c["name"] for c in cols_raw]
+                    ans_cols = [c for c in ("security_answer_hash", "security_answer", "answer_hash", "answer") if c in cols]
+                    if not ans_cols:
+                        return False
+                    row = conn.execute(
+                        f"SELECT {', '.join(ans_cols)} FROM users WHERE login = ? LIMIT 1",
+                        (login,),
+                    ).fetchone()
+                    if row is None:
+                        return False
+                    for idx, col in enumerate(ans_cols):
+                        val = row[idx] if isinstance(row, (list, tuple)) else row[col]
+                        if not val:
+                            continue
+                        val_s = str(val).strip()
+                        if val_s in (ans_clean, ans_low, h_raw, h_low) or val_s.lower() == ans_low:
+                            return True
+            except Exception:
+                pass
+            return False
+
+        store.check_security_answer = _check_security_answer
+
+    if not hasattr(store, "reset_password"):
+        def _reset_password(login: str, new_password: str) -> bool:
+            import inspect
+            for alt_fn in ("set_password", "update_password", "change_user_password", "set_user_password", "update_user_password"):
+                if hasattr(store, alt_fn):
+                    try:
+                        fn = getattr(store, alt_fn)
+                        sig = inspect.signature(fn)
+                        if len(sig.parameters) >= 2:
+                            fn(login, new_password)
+                            return True
+                    except Exception:
+                        pass
+            try:
+                import hashlib
+                import os as _os
+                import db
+                import store as store_mod
+
+                pw_str = str(new_password or "")
+                login_str = str(login or "").strip()
+
+                with db.get_conn() as conn:
+                    cols_raw = conn.execute("PRAGMA table_info(users)").fetchall()
+                    cols = [c[1] if isinstance(c, (list, tuple)) else c["name"] for c in cols_raw]
+                    pw_col = next((c for c in ("password_hash", "pass_hash", "password") if c in cols), None)
+                    if not pw_col:
+                        return False
+                    salt_col = next((c for c in ("salt", "password_salt", "pass_salt") if c in cols), None)
+
+                    sel_cols = [pw_col] + ([salt_col] if salt_col else [])
+                    existing = conn.execute(
+                        f"SELECT {', '.join(sel_cols)} FROM users WHERE login = ? LIMIT 1",
+                        (login_str,),
+                    ).fetchone()
+                    existing_pw = None
+                    existing_salt = None
+                    if existing is not None:
+                        existing_pw = existing[0] if isinstance(existing, (list, tuple)) else existing[pw_col]
+                        if salt_col:
+                            existing_salt = existing[1] if isinstance(existing, (list, tuple)) else existing[salt_col]
+
+                hash_fn = getattr(store_mod, "hash_password", None) or getattr(store, "_hash_password", None)
+                pw_out = None
+                salt_out = None
+                passed_salt = None
+
+                if hash_fn is not None:
+                    try:
+                        sig = inspect.signature(hash_fn)
+                        params = list(sig.parameters.values())
+                        if len(params) >= 2 and ("salt" in sig.parameters or salt_col):
+                            passed_salt = _os.urandom(16).hex()
+                            res = hash_fn(pw_str, passed_salt)
+                        else:
+                            res = hash_fn(pw_str)
+                    except TypeError:
+                        res = hash_fn(pw_str)
+
+                    if isinstance(res, (tuple, list)):
+                        if len(res) >= 2:
+                            a, b = res[0], res[1]
+                            if passed_salt is not None and str(a) == passed_salt:
+                                salt_out, pw_out = a, b
+                            elif passed_salt is not None and str(b) == passed_salt:
+                                pw_out, salt_out = a, b
+                            elif existing_pw is not None and existing_salt is not None:
+                                if len(str(a)) == len(str(existing_salt)) and len(str(b)) == len(str(existing_pw)):
+                                    salt_out, pw_out = a, b
+                                else:
+                                    pw_out, salt_out = a, b
+                            else:
+                                # Обычно hash (64+ симв.) длиннее salt (16-32 симв.)
+                                if len(str(a)) >= len(str(b)):
+                                    pw_out, salt_out = a, b
+                                else:
+                                    salt_out, pw_out = a, b
+                        elif len(res) == 1:
+                            pw_out = res[0]
+                    elif isinstance(res, dict):
+                        pw_out = res.get("password_hash") or res.get("pass_hash") or res.get("hash") or res.get("password")
+                        salt_out = res.get("salt") or res.get("password_salt") or res.get("pass_salt")
+                    else:
+                        pw_out = res
+
+                if pw_out is None:
+                    pw_out = hashlib.sha256(pw_str.encode("utf-8")).hexdigest()
+
+                def _to_sql_scalar(val):
+                    if val is None or isinstance(val, (str, bytes, int, float)):
+                        return val
+                    if isinstance(val, memoryview):
+                        return bytes(val)
+                    return str(val)
+
+                pw_out = _to_sql_scalar(pw_out)
+                if salt_col and salt_out is None and passed_salt is not None:
+                    salt_out = passed_salt
+                salt_out = _to_sql_scalar(salt_out) if salt_out is not None else None
+
+                with db.get_conn() as conn:
+                    if salt_col and salt_out is not None:
+                        conn.execute(
+                            f"UPDATE users SET {pw_col} = ?, {salt_col} = ? WHERE login = ?",
+                            (pw_out, salt_out, login_str),
+                        )
+                    else:
+                        conn.execute(
+                            f"UPDATE users SET {pw_col} = ? WHERE login = ?",
+                            (pw_out, login_str),
+                        )
+                    conn.commit()
+                if hasattr(store, "reload"):
+                    try:
+                        store.reload()
+                    except Exception:
+                        pass
+                return True
+            except Exception:
+                return False
+
+        store.reset_password = _reset_password
+
+
 def _resolve_app_icon() -> QIcon:
     base_dir = Path(__file__).resolve().parent
     for name in ("app.ico", "logo.png"):
@@ -51,7 +221,7 @@ class MainWindow(QMainWindow):
         cfg = load_config()
 
         # --------- Определение точки ---------
-        point = detect_point(cfg)
+        point = detect_point(cfg, store=store)
         if not point:
             point = "T-01"
             print(f"[Dotmark] Точка не задана в config.json, используется по умолчанию: {point}")
@@ -60,6 +230,7 @@ class MainWindow(QMainWindow):
 
         # --------- Создание / переиспользование Store ---------
         self.store = store if store is not None else Store()
+        _ensure_store_compat(self.store)
         self.store.current_point = point
 
         # --------- Оператор по точке ---------
@@ -169,23 +340,9 @@ class MainWindow(QMainWindow):
 
         h.addStretch(1)
 
-        meta_online = QLabel("Система:")
-        meta_online.setObjectName("meta")
-        h.addWidget(meta_online)
-
-        ok = QLabel("• онлайн")
-        ok.setObjectName("okDot")
-        h.addWidget(ok)
-
         meta_ver = QLabel("Версия: v0.2")
         meta_ver.setObjectName("meta")
         h.addWidget(meta_ver)
-
-        avatar = QLabel("АД")
-        avatar.setObjectName("headerAvatar")
-        avatar.setFixedSize(26, 26)
-        avatar.setAlignment(Qt.AlignCenter)
-        h.addWidget(avatar)
 
         self.root_layout.addWidget(header)
 
@@ -212,6 +369,21 @@ class MainWindow(QMainWindow):
         self._device_poll_timer.start()
 
         QTimer.singleShot(150, self.poll_devices_status)
+
+        # На Мастер-ПК сразу поднимаем встроенный HTTP-сервер на порту 8765
+        try:
+            import sync as sync_mod
+            if sync_mod.get_pc_role(self.store) == "master":
+                sync_mod.start_master_http_server(self.store, port=sync_mod.DEFAULT_SYNC_PORT)
+        except Exception:
+            pass
+
+        # Публикация живого heartbeat в фоне для мониторинга онлайн-статуса точек на Мастер-ПК
+        self._hb_timer = QTimer(self)
+        self._hb_timer.setInterval(20000)
+        self._hb_timer.timeout.connect(self._publish_heartbeat_async)
+        self._hb_timer.start()
+        QTimer.singleShot(1500, self._publish_heartbeat_async)
 
         print("[Dotmark] MainWindow создан, размер:", self.size())
         print("[Dotmark] вкладок:", self.tabs.count())
@@ -243,6 +415,16 @@ class MainWindow(QMainWindow):
             badge.style().polish(badge)
 
     # -----------------------------------------------------------------
+    def _publish_heartbeat_async(self):
+        import threading
+        def _bg():
+            try:
+                import sync as sync_mod
+                sync_mod.publish_pc_heartbeat(self.store)
+            except Exception:
+                pass
+        threading.Thread(target=_bg, daemon=True).start()
+
     def poll_devices_status(self):
         """Неблокирующее обновление статусов принтера и сканера из асинхронного кэша."""
         try:
@@ -471,6 +653,216 @@ class MainWindow(QMainWindow):
         return overlay
 
 
+
+
+class FirstRunSetupDialog(QMessageBox):
+    pass
+
+
+def _needs_first_run_setup(store) -> bool:
+    """Проверяет, выполнялась ли уже первичная настройка роли и точки на этом компьютере."""
+    try:
+        cfg_p = Path(os.environ.get("APPDATA", Path.home())) / "ChestZn" / "config.json"
+        if cfg_p.exists():
+            data = json.loads(cfg_p.read_text(encoding="utf-8"))
+            if data.get("setup_completed"):
+                return False
+    except Exception:
+        pass
+    if store is not None and hasattr(store, "get_setting"):
+        try:
+            if store.get_setting("setup_completed") == "1":
+                return False
+        except Exception:
+            pass
+    return True
+
+
+def _run_first_run_wizard(store) -> bool:
+    """Мастер первичной настройки при первом запуске exe на новом ПК: роль (Мастер/Рабочий) и точка (T-01..T-03)."""
+    import socket
+    import sync as sync_mod
+    from PySide6.QtWidgets import (
+        QDialog, QVBoxLayout, QHBoxLayout, QLabel, QComboBox,
+        QLineEdit, QPushButton, QFrame, QFormLayout, QRadioButton, QButtonGroup
+    )
+
+    dlg = QDialog()
+    dlg.setWindowTitle("Dotmark · Первичная настройка компьютера")
+    dlg.setMinimumWidth(520)
+    icon = _resolve_app_icon()
+    if not icon.isNull():
+        dlg.setWindowIcon(icon)
+
+    lay = QVBoxLayout(dlg)
+    lay.setContentsMargins(24, 20, 24, 20)
+    lay.setSpacing(14)
+
+    hdr = QLabel("Первичная настройка рабочего места")
+    hdr.setStyleSheet("font-size: 18px; font-weight: 700;")
+    lay.addWidget(hdr)
+
+    sub = QLabel(
+        "Этот компьютер запускается впервые. Укажите его роль в сети и номер точки, "
+        "чтобы программа знала, куда отправлять и откуда брать заказы."
+    )
+    sub.setWordWrap(True)
+    sub.setStyleSheet("color: #8b949e; font-size: 13px;")
+    lay.addWidget(sub)
+
+    role_card = QFrame()
+    role_card.setObjectName("card")
+    rc_lay = QVBoxLayout(role_card)
+    rc_lay.setContentsMargins(16, 14, 16, 14)
+    rc_lay.setSpacing(8)
+
+    rb_master = QRadioButton("👑 Мастер-ПК (офис · главный компьютер с базой и раздачей заказов)")
+    rb_worker = QRadioButton("💻 Рабочий ПК (склад · сканер + принтер, подключается к Мастер-ПК)")
+    rb_worker.setChecked(True)
+    grp = QButtonGroup(dlg)
+    grp.addButton(rb_master)
+    grp.addButton(rb_worker)
+    rc_lay.addWidget(rb_master)
+    rc_lay.addWidget(rb_worker)
+    lay.addWidget(role_card)
+
+    form_card = QFrame()
+    form_card.setObjectName("card")
+    form = QFormLayout(form_card)
+    form.setContentsMargins(16, 14, 16, 14)
+    form.setSpacing(10)
+
+    cmb_point = QComboBox()
+    cmb_point.setEditable(True)
+    pts = getattr(store, "points", []) or []
+    if pts:
+        for p in pts:
+            cmb_point.addItem(f"{p['id']} — {p.get('name', '')}", p["id"])
+    else:
+        for pid, pname in [("T-01", "Пост 1"), ("T-02", "Пост 2"), ("T-03", "Пост 3")]:
+            cmb_point.addItem(f"{pid} — {pname}", pid)
+
+    ed_pc_name = QLineEdit(socket.gethostname().strip() or "POST-01")
+    lbl_master_ip = QLabel("IP-адрес Мастер-ПК:")
+    ed_master_ip = QLineEdit()
+    ed_master_ip.setPlaceholderText("Например: 192.168.1.10 (указан в окне Мастер-ПК)")
+
+    form.addRow("Точка / пост работы:", cmb_point)
+    form.addRow("Имя этого ПК:", ed_pc_name)
+    form.addRow(lbl_master_ip, ed_master_ip)
+    lay.addWidget(form_card)
+
+    def _toggle_role():
+        is_w = rb_worker.isChecked()
+        lbl_master_ip.setVisible(is_w)
+        ed_master_ip.setVisible(is_w)
+
+    rb_master.toggled.connect(_toggle_role)
+    rb_worker.toggled.connect(_toggle_role)
+    _toggle_role()
+
+    btn_row = QHBoxLayout()
+    btn_row.addStretch(1)
+    btn_ok = QPushButton("✓ Сохранить и запустить")
+    btn_ok.setProperty("primary", True)
+    btn_ok.setMinimumHeight(38)
+    btn_row.addWidget(btn_ok)
+    lay.addLayout(btn_row)
+
+    def _on_save():
+        role = "master" if rb_master.isChecked() else "worker"
+        raw_pt = str(cmb_point.currentText() or "").strip()
+        if not raw_pt:
+            raw_pt = str(cmb_point.currentData() or "T-01").strip()
+        pt_id = raw_pt.split("—")[0].strip().upper() or "T-01"
+        pc_name = ed_pc_name.text().strip() or socket.gethostname().strip()
+        m_ip = ed_master_ip.text().strip()
+
+        # Создаём точку (если её ещё нет) и привязываем к ней этот компьютер в «Точки и ПК»
+        try:
+            import db
+            local_ip = "127.0.0.1"
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.settimeout(0.05)
+                s.connect(("8.8.8.8", 80))
+                local_ip = s.getsockname()[0]
+                s.close()
+            except Exception:
+                pass
+
+            with db.get_conn() as conn:
+                # Если пользователь задал собственную точку при первом запуске — очищаем стартовые демо-точки
+                if pt_id not in ("T-01", "T-02", "T-03"):
+                    try:
+                        conn.execute(
+                            "DELETE FROM points WHERE id IN ('T-01', 'T-02', 'T-03') "
+                            "AND id NOT IN (SELECT DISTINCT point_id FROM computers)"
+                        )
+                    except Exception:
+                        pass
+                conn.execute(
+                    "INSERT OR IGNORE INTO points (id, name, address) VALUES (?, ?, ?)",
+                    (pt_id, f"Пост {pt_id}", ""),
+                )
+                comp_exists = conn.execute(
+                    "SELECT id FROM computers WHERE point_id = ? AND (LOWER(name) = LOWER(?) OR LOWER(sync_node) = LOWER(?)) LIMIT 1",
+                    (pt_id, pc_name, pc_name),
+                ).fetchone()
+                if comp_exists is None:
+                    comp_role = "Основной оператор" if role == "master" else "Рабочий пост"
+                    conn.execute(
+                        "INSERT INTO computers (point_id, name, ip, role, sync_node, sync_enabled, online) "
+                        "VALUES (?, ?, ?, ?, ?, 1, 1)",
+                        (pt_id, pc_name, local_ip, comp_role, pc_name),
+                    )
+                conn.commit()
+            if store is not None and hasattr(store, "reload"):
+                store.reload()
+        except Exception:
+            pass
+
+        if role == "worker" and not m_ip:
+            if QMessageBox.question(
+                dlg,
+                "IP Мастер-ПК не указан",
+                "Вы не ввели IP-адрес Мастер-ПК. Указать его позже в разделе «Админ → Синхронизация»?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            ) != QMessageBox.Yes:
+                return
+
+        sync_mod.set_pc_role(store, role, pc_name)
+        if role == "worker" and m_ip:
+            sync_mod.set_master_address(store, m_ip, sync_mod.DEFAULT_SYNC_PORT)
+
+        if store is not None and hasattr(store, "set_setting"):
+            try:
+                store.set_setting("worker_point_id", pt_id)
+                store.set_setting("setup_completed", "1")
+                store.current_point = pt_id
+            except Exception:
+                pass
+
+        try:
+            cfg_p = Path(os.environ.get("APPDATA", Path.home())) / "ChestZn" / "config.json"
+            cfg_p.parent.mkdir(parents=True, exist_ok=True)
+            c_data = json.loads(cfg_p.read_text(encoding="utf-8")) if cfg_p.exists() else {}
+            c_data["worker_point_id"] = pt_id
+            c_data["current_point"] = pt_id
+            c_data["pc_role"] = role
+            c_data["pc_node_name"] = pc_name
+            c_data["setup_completed"] = True
+            cfg_p.write_text(json.dumps(c_data, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+        dlg.accept()
+
+    btn_ok.clicked.connect(_on_save)
+    return dlg.exec() == QDialog.Accepted
+
+
 def main():
     app = QApplication(sys.argv)
     icon = _resolve_app_icon()
@@ -496,6 +888,7 @@ def main():
     # --------- 3. Создаём единый Store и показываем окно проверки (передавая уже собранные problems) ---------
     try:
         store_for_dialog = Store()
+        _ensure_store_compat(store_for_dialog)
     except Exception as e:
         store_for_dialog = None
         print(f"[Dotmark] Store не создан: {e}")
@@ -512,6 +905,11 @@ def main():
     if result != StartupProblemsWindow.Accepted:
         print("[Dotmark] Оператор закрыл окно проблем — выход")
         sys.exit(0)
+
+    # --------- 3.5. Первичная настройка роли и точки (только при первом запуске на новом ПК) ---------
+    if _needs_first_run_setup(store_for_dialog):
+        if not _run_first_run_wizard(store_for_dialog):
+            sys.exit(0)
 
     # --------- 4. Открыть главное окно ---------
     win = MainWindow(initial_problems=dlg.problems, store=store_for_dialog)
