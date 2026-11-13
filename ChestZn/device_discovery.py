@@ -103,6 +103,8 @@ def _refresh_ps_hardware_snapshot(force: bool = False) -> None:
         return
 
     ps_script = (
+        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+        "$OutputEncoding = [System.Text.Encoding]::UTF8; "
         "$pr = @(Get-Printer -ErrorAction SilentlyContinue | Select-Object Name, PortName, PrinterStatus, WorkOffline); "
         "$pnp = @(Get-PnpDevice -PresentOnly -Status OK -ErrorAction SilentlyContinue | "
         "Where-Object { $_.Class -in @('Printer','PrinterQueue','HIDClass','Keyboard','POSBarcodeScanner') -or "
@@ -116,11 +118,12 @@ def _refresh_ps_hardware_snapshot(force: bool = False) -> None:
             ["powershell", "-NoProfile", "-Command", ps_script],
             capture_output=True,
             text=True,
-            timeout=2.2,
+            encoding="utf-8",
+            errors="replace",
+            timeout=6.0,
             creationflags=creationflags,
         )
         if res.returncode != 0 or not res.stdout.strip():
-            _PS_SNAPSHOT_TS = now
             return
 
         payload = json.loads(res.stdout.strip())
@@ -191,7 +194,6 @@ def _refresh_ps_hardware_snapshot(force: bool = False) -> None:
             _PS_SNAPSHOT_TS = now
     except Exception as e:
         logger.debug("Ошибка единого снимка PnP/Get-Printer: %s", e)
-        _PS_SNAPSHOT_TS = now
 
 
 def _get_windows_printer_offline_statuses(force: bool = False) -> Dict[str, bool]:
@@ -407,11 +409,38 @@ def _scan_scanners_sync(force: bool = False) -> List[Dict[str, Any]]:
     except Exception as e:
         logger.error("Ошибка опроса COM-сканеров: %s", e)
 
-    # Б. USB-HID сканеры из объединённого PnP-снимка (без повторного вызова PowerShell)
+    # Б. USB-HID сканеры: мгновенный нативный Win32 cfgmgr32 опрос + PnP-снимок PowerShell
     try:
         _refresh_ps_hardware_snapshot(force=force)
         with _DISCOVERY_LOCK:
             hid_data = list(_HID_PNP_CACHE_ITEMS)
+
+        # Нативный fallback через cfgmgr32.dll — находит все подключённые HID/USB устройства за <5 мс без PowerShell
+        if platform.system() == "Windows":
+            try:
+                import ctypes
+                from ctypes import wintypes
+                cfgmgr = ctypes.WinDLL("cfgmgr32")
+                CM_GETIDLIST_FILTER_PRESENT = 0x00000100
+                buf_len = wintypes.ULONG(0)
+                if cfgmgr.CM_Get_Device_ID_List_SizeW(ctypes.byref(buf_len), None, CM_GETIDLIST_FILTER_PRESENT) == 0 and buf_len.value > 0:
+                    buf = ctypes.create_unicode_buffer(buf_len.value)
+                    if cfgmgr.CM_Get_Device_ID_ListW(None, buf, buf_len.value, CM_GETIDLIST_FILTER_PRESENT) == 0:
+                        raw_str = ctypes.wstring_at(buf, buf_len.value)
+                        existing_insts = {str(x.get("InstanceId") or "").lower() for x in hid_data}
+                        for dev_id in raw_str.split("\x00"):
+                            if not dev_id:
+                                break
+                            dev_l = dev_id.lower()
+                            if (dev_l.startswith("hid\\") or dev_l.startswith("usb\\")) and "vid_" in dev_l:
+                                if dev_l not in existing_insts:
+                                    hid_data.append({
+                                        "FriendlyName": "",
+                                        "InstanceId": dev_id,
+                                        "Class": "hidclass",
+                                    })
+            except Exception as ce:
+                logger.debug("Ошибка cfgmgr32 опроса HID: %s", ce)
 
         for item in hid_data:
             inst = str(item.get("InstanceId") or "").lower()
